@@ -1,0 +1,935 @@
+import 'dart:async';
+
+import 'package:flexiyo/models/conversation.dart';
+import 'package:flexiyo/providers/auth_provider.dart';
+import 'package:flexiyo/providers/chat_provider.dart';
+import 'package:flexiyo/providers/signal_crypto_provider.dart';
+import 'package:flexiyo/widgets/avatar.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
+
+class ChatsScreen extends ConsumerStatefulWidget {
+  const ChatsScreen({super.key});
+
+  @override
+  ConsumerState<ChatsScreen> createState() => _ChatsScreenState();
+}
+
+class _ChatsScreenState extends ConsumerState<ChatsScreen>
+    with WidgetsBindingObserver {
+  String? _cryptoWarmupUserId;
+  Timer? _inboxRefreshTimer;
+  String _selectedTab = 'recents'; // 'recents' | 'personal' | 'requests'
+  String _searchQuery = '';
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(chatsProvider.notifier).load();
+    });
+    _inboxRefreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (mounted && ref.read(authProvider).isAuthenticated) {
+        unawaited(ref.read(chatsProvider.notifier).load(forceRefresh: true));
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _inboxRefreshTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState lifecycle) {
+    if (lifecycle == AppLifecycleState.resumed) {
+      ref.read(chatsProvider.notifier).load(forceRefresh: true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final authState = ref.watch(authProvider);
+    final chatsState = ref.watch(chatsProvider);
+    final colorScheme = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final userId = authState.user?.id;
+
+    if (userId != null && userId != _cryptoWarmupUserId) {
+      _cryptoWarmupUserId = userId;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_warmUpCrypto(userId));
+      });
+    }
+
+    final totalUnread = chatsState.conversations.fold<int>(
+      0,
+      (sum, conv) => sum + conv.unreadCount,
+    );
+    final hasActivityBadge = totalUnread > 0 || chatsState.requestCount > 0;
+
+    // Filter conversations based on search
+    final conversations = chatsState.conversations.where((conv) {
+      if (_searchQuery.isEmpty) return true;
+      return conv.otherUsername
+          .toLowerCase()
+          .contains(_searchQuery.toLowerCase());
+    }).toList();
+
+    return Scaffold(
+      backgroundColor: colorScheme.surface,
+      body: SafeArea(
+        child: RefreshIndicator(
+          onRefresh: () =>
+              ref.read(chatsProvider.notifier).load(forceRefresh: true),
+          child: CustomScrollView(
+            slivers: [
+              // --------------------------------------------------------------
+              // 1. Header
+              // --------------------------------------------------------------
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  child: Row(
+                    children: [
+                      if (context.canPop())
+                        GestureDetector(
+                          onTap: () => context.pop(),
+                          child: const Padding(
+                            padding: EdgeInsets.only(right: 12),
+                            child: Icon(Icons.arrow_back, size: 24),
+                          ),
+                        ),
+                      GestureDetector(
+                        onTap: () => context.go('/settings'),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              authState.user?.username ?? 'Messages',
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .titleLarge
+                                  ?.copyWith(
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 22,
+                                    letterSpacing: -0.5,
+                                  ),
+                            ),
+                            const SizedBox(width: 4),
+                            Icon(
+                              Icons.keyboard_arrow_down_rounded,
+                              size: 20,
+                              color: colorScheme.onSurface,
+                            ),
+                            if (hasActivityBadge) ...[
+                              const SizedBox(width: 6),
+                              Container(
+                                width: 8,
+                                height: 8,
+                                decoration: const BoxDecoration(
+                                  color: Color(0xFFFF3040),
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      const Spacer(),
+                      IconButton(
+                        onPressed: () {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Video calling coming soon'),
+                              duration: Duration(milliseconds: 900),
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.videocam_outlined, size: 28),
+                        tooltip: 'Video call',
+                      ),
+                      IconButton(
+                        onPressed: () => context.go('/chats/new'),
+                        icon: const Icon(Icons.edit_square, size: 23),
+                        tooltip: 'New chat',
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              // --------------------------------------------------------------
+              // 2. Capsule Search Bar (Clean single bar, no inner borders)
+              // --------------------------------------------------------------
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 14),
+                  child: _InstagramSearchBar(
+                    onChanged: (val) => setState(() => _searchQuery = val),
+                  ),
+                ),
+              ),
+
+              // --------------------------------------------------------------
+              // 3. Notes / Stories Rail with good spacing
+              // --------------------------------------------------------------
+              if (_searchQuery.isEmpty)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: _NotesRail(
+                      myUsername: authState.user?.username ?? 'You',
+                      conversations: chatsState.conversations,
+                      onSelectConversation: (conv) =>
+                          context.go('/chats/${conv.id}'),
+                    ),
+                  ),
+                ),
+
+              // --------------------------------------------------------------
+              // 4. Filter Tabs: Recents | Personal | Requests
+              // --------------------------------------------------------------
+              if (_searchQuery.isEmpty)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 6, 16, 8),
+                    child: Row(
+                      children: [
+                        _FilterTab(
+                          label: 'Recents',
+                          isSelected: _selectedTab == 'recents',
+                          onTap: () => setState(() => _selectedTab = 'recents'),
+                        ),
+                        const SizedBox(width: 24),
+                        _FilterTab(
+                          label: 'Personal',
+                          isSelected: _selectedTab == 'personal',
+                          onTap: () =>
+                              setState(() => _selectedTab = 'personal'),
+                        ),
+                        const Spacer(),
+                        // Requests tab in Instagram Blue
+                        GestureDetector(
+                          onTap: () => context.go('/chats/requests'),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                'Requests',
+                                style: TextStyle(
+                                  color: const Color(0xFF0095F6),
+                                  fontWeight: chatsState.requestCount > 0
+                                      ? FontWeight.w700
+                                      : FontWeight.w600,
+                                  fontSize: 14,
+                                ),
+                              ),
+                              if (chatsState.requestCount > 0) ...[
+                                const SizedBox(width: 6),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                    vertical: 2,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF0095F6),
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: Text(
+                                    '${chatsState.requestCount}',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+
+              // --------------------------------------------------------------
+              // 5. Conversations List
+              // --------------------------------------------------------------
+              if (authState.user == null ||
+                  (chatsState.isLoading && chatsState.conversations.isEmpty))
+                const SliverFillRemaining(
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else if (chatsState.error != null &&
+                  chatsState.conversations.isEmpty)
+                SliverFillRemaining(
+                  child: _ErrorState(
+                    message: chatsState.error!,
+                    onRetry: () => ref
+                        .read(chatsProvider.notifier)
+                        .load(forceRefresh: true),
+                  ),
+                )
+              else if (conversations.isEmpty)
+                SliverFillRemaining(
+                  child: _searchQuery.isNotEmpty
+                      ? const Center(
+                          child: Text(
+                            'No conversations match your search',
+                            style: TextStyle(color: Colors.grey),
+                          ),
+                        )
+                      : _EmptyState(
+                          onNewChat: () => context.go('/chats/new'),
+                        ),
+                )
+              else
+                SliverList(
+                  delegate: SliverChildBuilderDelegate(
+                    (context, index) {
+                      final conv = conversations[index];
+                      return _InstagramChatTile(
+                        conversation: conv,
+                        currentUserId: authState.user?.id,
+                        isDark: isDark,
+                        colorScheme: colorScheme,
+                        onTap: () => context.go('/chats/${conv.id}'),
+                      );
+                    },
+                    childCount: conversations.length,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _warmUpCrypto(String userId) async {
+    try {
+      await ref.read(signalCryptoProvider(userId).future);
+    } catch (_) {
+      // Background crypto warmup
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Capsule Search Bar (Clean single bar, no inner bar or double fill)
+// ---------------------------------------------------------------------------
+
+class _InstagramSearchBar extends StatefulWidget {
+  const _InstagramSearchBar({required this.onChanged});
+  final ValueChanged<String> onChanged;
+
+  @override
+  State<_InstagramSearchBar> createState() => _InstagramSearchBarState();
+}
+
+class _InstagramSearchBarState extends State<_InstagramSearchBar> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final fill = isDark ? const Color(0xFF262626) : const Color(0xFFEFEFEF);
+    final textColor = isDark ? Colors.white : Colors.black;
+
+    return Container(
+      height: 38,
+      decoration: BoxDecoration(
+        color: fill,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          const Icon(Icons.search_rounded, color: Color(0xFF8E8E93), size: 20),
+          const SizedBox(width: 8),
+          Expanded(
+            child: TextField(
+              controller: _controller,
+              onChanged: widget.onChanged,
+              style: TextStyle(fontSize: 14, color: textColor),
+              decoration: const InputDecoration(
+                hintText: 'Search',
+                hintStyle: TextStyle(
+                  fontSize: 14,
+                  color: Color(0xFF8E8E93),
+                  fontWeight: FontWeight.w400,
+                ),
+                filled: false,
+                fillColor: Colors.transparent,
+                border: InputBorder.none,
+                enabledBorder: InputBorder.none,
+                focusedBorder: InputBorder.none,
+                disabledBorder: InputBorder.none,
+                errorBorder: InputBorder.none,
+                isDense: true,
+                contentPadding: EdgeInsets.symmetric(vertical: 9),
+              ),
+            ),
+          ),
+          if (_controller.text.isNotEmpty)
+            GestureDetector(
+              onTap: () {
+                _controller.clear();
+                widget.onChanged('');
+                setState(() {});
+              },
+              child: const Icon(
+                Icons.cancel,
+                color: Color(0xFF8E8E93),
+                size: 16,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Notes / Active Contacts Rail
+// ---------------------------------------------------------------------------
+
+class _NotesRail extends StatelessWidget {
+  const _NotesRail({
+    required this.myUsername,
+    required this.conversations,
+    required this.onSelectConversation,
+  });
+
+  final String myUsername;
+  final List<Conversation> conversations;
+  final ValueChanged<Conversation> onSelectConversation;
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final surfaceColor = Theme.of(context).colorScheme.surface;
+    final labelColor = isDark ? Colors.white70 : Colors.black87;
+
+    return SizedBox(
+      height: 104,
+      child: ListView.separated(
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        scrollDirection: Axis.horizontal,
+        itemCount: 1 + conversations.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 14),
+        itemBuilder: (context, index) {
+          if (index == 0) {
+            // "Your note" item
+            return SizedBox(
+              width: 72,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      UserAvatar(username: myUsername, radius: 29),
+                      Positioned(
+                        top: -3,
+                        left: -3,
+                        child: Container(
+                          width: 24,
+                          height: 24,
+                          decoration: BoxDecoration(
+                            color:
+                                isDark ? const Color(0xFF333333) : Colors.white,
+                            shape: BoxShape.circle,
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.15),
+                                blurRadius: 4,
+                                offset: const Offset(0, 1),
+                              ),
+                            ],
+                          ),
+                          child: Icon(
+                            Icons.add,
+                            size: 16,
+                            color: isDark ? Colors.white : Colors.black87,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Your note',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: isDark ? Colors.white54 : Colors.black45,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
+            );
+          }
+
+          final conv = conversations[index - 1];
+          final hasUnread = conv.unreadCount > 0;
+
+          return GestureDetector(
+            onTap: () => onSelectConversation(conv),
+            child: SizedBox(
+              width: 72,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Stack(
+                    children: [
+                      Container(
+                        width: 62,
+                        height: 62,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: hasUnread
+                              ? const SweepGradient(
+                                  colors: [
+                                    Color(0xFF833AB4),
+                                    Color(0xFFFD1D1D),
+                                    Color(0xFFFCAF45),
+                                    Color(0xFF833AB4),
+                                  ],
+                                )
+                              : null,
+                          border: hasUnread
+                              ? null
+                              : Border.all(
+                                  color: isDark
+                                      ? const Color(0xFF333333)
+                                      : const Color(0xFFE0E0E0),
+                                  width: 1.2,
+                                ),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.all(2.5),
+                          child: Container(
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: surfaceColor,
+                            ),
+                            child: Padding(
+                              padding: const EdgeInsets.all(2),
+                              child: UserAvatar(
+                                username: conv.otherUsername,
+                                radius: 26,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      Positioned(
+                        bottom: 2,
+                        right: 2,
+                        child: Container(
+                          width: 13,
+                          height: 13,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF25D366),
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: surfaceColor,
+                              width: 2.2,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    conv.otherUsername,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: hasUnread ? FontWeight.w600 : FontWeight.w400,
+                      color: labelColor,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Filter Tab item with underline indicator
+// ---------------------------------------------------------------------------
+
+class _FilterTab extends StatelessWidget {
+  const _FilterTab({
+    required this.label,
+    required this.isSelected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool isSelected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final activeColor = isDark ? Colors.white : Colors.black;
+    final inactiveColor = isDark ? Colors.white54 : Colors.black45;
+
+    return GestureDetector(
+      onTap: onTap,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+              color: isSelected ? activeColor : inactiveColor,
+            ),
+          ),
+          const SizedBox(height: 4),
+          if (isSelected)
+            Container(
+              height: 2,
+              width: 32,
+              decoration: BoxDecoration(
+                color: activeColor,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            )
+          else
+            const SizedBox(height: 2),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Instagram Chat Tile with custom subtitle logic
+// ---------------------------------------------------------------------------
+
+class _InstagramChatTile extends StatelessWidget {
+  const _InstagramChatTile({
+    required this.conversation,
+    required this.currentUserId,
+    required this.isDark,
+    required this.colorScheme,
+    required this.onTap,
+  });
+
+  final Conversation conversation;
+  final String? currentUserId;
+  final bool isDark;
+  final ColorScheme colorScheme;
+  final VoidCallback onTap;
+
+  String _formatSubtitleTimestamp(DateTime? dt) {
+    if (dt == null) return '';
+    final now = DateTime.now();
+    final local = dt.toLocal();
+    final diff = now.difference(local);
+
+    if (diff.inMinutes < 1) return 'now';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m';
+    if (diff.inHours < 24) return '${diff.inHours}h';
+    if (diff.inDays < 7) return '${diff.inDays}d';
+    return DateFormat('MMM d').format(local);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasUnread = conversation.unreadCount > 0;
+    final isRequestSent = conversation.requestStatus == 'pending' &&
+        conversation.initiatedById == currentUserId;
+    final preview = conversation.lastMessagePreview;
+    final isUnsent = preview == 'Message unsent';
+    final timestamp = _formatSubtitleTimestamp(conversation.lastMessageAt);
+
+    // Instagram subtitle wording:
+    // If unread: "4+ new messages", "3 new messages", "2 new messages", or "Sent a message"
+    // Never show "Encrypted message"
+    final String rawSubtitle;
+    if (isRequestSent) {
+      rawSubtitle = 'Request sent';
+    } else if (isUnsent) {
+      rawSubtitle = 'Message unsent';
+    } else if (hasUnread) {
+      if (conversation.unreadCount >= 4) {
+        rawSubtitle = '4+ new messages';
+      } else if (conversation.unreadCount == 3) {
+        rawSubtitle = '3 new messages';
+      } else if (conversation.unreadCount == 2) {
+        rawSubtitle = '2 new messages';
+      } else {
+        rawSubtitle = preview != null && preview != 'Encrypted message'
+            ? preview
+            : 'Sent a message';
+      }
+    } else if (preview != null && preview != 'Encrypted message') {
+      rawSubtitle = preview;
+    } else if (conversation.lastMessageAt != null) {
+      rawSubtitle = 'Sent a message';
+    } else {
+      rawSubtitle = 'New conversation';
+    }
+
+    final fullSubtitle =
+        timestamp.isNotEmpty ? '$rawSubtitle · $timestamp' : rawSubtitle;
+
+    final nameColor = isDark ? Colors.white : Colors.black;
+    final subtitleColor = hasUnread
+        ? (isDark ? Colors.white : Colors.black87)
+        : (isDark ? Colors.white54 : Colors.black54);
+
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+        child: Row(
+          children: [
+            // Avatar with Instagram Story ring if unread
+            if (hasUnread)
+              Container(
+                width: 60,
+                height: 60,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: SweepGradient(
+                    colors: [
+                      Color(0xFF833AB4),
+                      Color(0xFFFD1D1D),
+                      Color(0xFFFCAF45),
+                      Color(0xFF833AB4),
+                    ],
+                  ),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(2.5),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: colorScheme.surface,
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(2),
+                      child: UserAvatar(
+                        username: conversation.otherUsername,
+                        radius: 25,
+                      ),
+                    ),
+                  ),
+                ),
+              )
+            else
+              UserAvatar(
+                username: conversation.otherUsername,
+                radius: 28,
+              ),
+
+            const SizedBox(width: 14),
+
+            // Name + Preview subtitle
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          conversation.otherUsername,
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight:
+                                hasUnread ? FontWeight.w700 : FontWeight.w600,
+                            color: nameColor,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    fullSubtitle,
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: subtitleColor,
+                      fontWeight: hasUnread ? FontWeight.w600 : FontWeight.w400,
+                      fontStyle: isUnsent ? FontStyle.italic : FontStyle.normal,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(width: 8),
+
+            // Trailing: unread blue dot + camera icon (Instagram signature)
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (hasUnread) ...[
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF0095F6),
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                ],
+                IconButton(
+                  onPressed: () {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Camera feature coming soon'),
+                        duration: Duration(milliseconds: 900),
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                  },
+                  icon: Icon(
+                    Icons.camera_alt_outlined,
+                    color: isDark ? Colors.white54 : Colors.black45,
+                    size: 24,
+                  ),
+                  tooltip: 'Camera',
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Empty / Error states
+// ---------------------------------------------------------------------------
+
+class _EmptyState extends StatelessWidget {
+  const _EmptyState({required this.onNewChat});
+  final VoidCallback onNewChat;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 80,
+              height: 80,
+              decoration: BoxDecoration(
+                color: colorScheme.primaryContainer,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                Icons.chat_bubble_outline_rounded,
+                size: 40,
+                color: colorScheme.onPrimaryContainer,
+              ),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Your messages',
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Send private, encrypted messages to your contacts.',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+            ),
+            const SizedBox(height: 24),
+            FilledButton.icon(
+              onPressed: onNewChat,
+              icon: const Icon(Icons.edit_square),
+              label: const Text('Send your first message'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ErrorState extends StatelessWidget {
+  const _ErrorState({required this.message, required this.onRetry});
+  final String message;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.wifi_off_rounded,
+              size: 40,
+              color: Theme.of(context).colorScheme.error,
+            ),
+            const SizedBox(height: 12),
+            const Text("Couldn't load messages"),
+            const SizedBox(height: 8),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 16),
+            OutlinedButton(onPressed: onRetry, child: const Text('Retry')),
+          ],
+        ),
+      ),
+    );
+  }
+}

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- APKs downloaded by the in-app updater are stored here before install. -->
+    <cache-path name="app_updates" path="updates/" />
+    <files-path name="app_updates_files" path="updates/" />
+    <external-files-path name="app_updates_external" path="updates/" />
+</paths>

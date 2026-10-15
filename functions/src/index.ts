@@ -31,11 +31,10 @@ export default {
       return handlePreflight(env, request);
     }
 
-    // WebSocket upgrade: GET /api/ws/:conversationId?token=<jwt>
     const url = new URL(request.url);
+    const inboxMatch = url.pathname === '/api/ws/inbox';
     const wsMatch = url.pathname.match(/^\/api\/ws\/([^/]+)$/);
-    if (wsMatch && request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
-      const conversationId = wsMatch[1];
+    if ((inboxMatch || wsMatch) && request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
       const token = url.searchParams.get('token');
 
       if (!token) {
@@ -54,12 +53,20 @@ export default {
         });
       }
 
+      if (inboxMatch) {
+        const doId = env.CHAT_ROOM.idFromName(`inbox:${userId}`);
+        const stub = env.CHAT_ROOM.get(doId);
+        return stub.fetch(new Request(
+          `https://internal/ws?token=${encodeURIComponent(token)}`,
+          { headers: request.headers, method: request.method },
+        ));
+      }
+
+      const conversationId = wsMatch![1];
       const conv = await env.DB.prepare(
         `SELECT id FROM conversations
          WHERE id = ? AND (user_a_id = ? OR user_b_id = ?)`,
-      )
-        .bind(conversationId, userId, userId)
-        .first<{ id: string }>();
+      ).bind(conversationId, userId, userId).first<{ id: string }>();
 
       if (!conv) {
         return new Response(JSON.stringify({ error: 'Conversation not found' }), {
@@ -68,11 +75,9 @@ export default {
         });
       }
 
-      // Forward to the Durable Object for this conversation
       const doId = env.CHAT_ROOM.idFromName(conversationId);
       const stub = env.CHAT_ROOM.get(doId);
 
-      // Forward request to the DO's /ws handler with the token in the query string
       const doRequest = new Request(
         `https://internal/ws?token=${encodeURIComponent(token)}`,
         {

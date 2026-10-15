@@ -51,13 +51,10 @@ class MessageBubble extends StatelessWidget {
   /// If non-null, a quote of the replied-to message is shown above the content.
   final Message? replyToMessage;
 
-  // Geometry helpers
-
   BorderRadius _bubbleRadius() {
     const r = Radius.circular(20);
     const tail = Radius.circular(6);
 
-    // Single standalone message: curved on all 4 corners!
     if (isFirst && isLast) {
       return BorderRadius.circular(20);
     }
@@ -79,8 +76,6 @@ class MessageBubble extends StatelessWidget {
     }
   }
 
-  // Status icon (outgoing only, last in group)
-
   Widget _statusIcon(BuildContext context) {
     switch (message.status) {
       case MessageStatus.sending:
@@ -100,11 +95,7 @@ class MessageBubble extends StatelessWidget {
     }
   }
 
-  // Timestamp
-
   String _timestamp() => DateFormat('HH:mm').format(message.createdAt);
-
-  // Reply quote
 
   Widget _replyQuote(BuildContext context, Message replied) {
     final cs = Theme.of(context).colorScheme;
@@ -141,8 +132,6 @@ class MessageBubble extends StatelessWidget {
     );
   }
 
-  // Unsent tombstone
-
   Widget _unsentBubble(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return Container(
@@ -161,18 +150,14 @@ class MessageBubble extends StatelessWidget {
     );
   }
 
-  // Build
-
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final screenWidth = MediaQuery.sizeOf(context).width;
 
-    // Vertical spacing between bubbles (more breathing room between groups and bubbles)
     final verticalPad = isLast ? 14.0 : 6.0;
 
-    // If unsent, render tombstone and bail early.
     if (message.isUnsent) {
       return _UnsentRow(
         isMine: isMine,
@@ -189,7 +174,6 @@ class MessageBubble extends StatelessWidget {
     final bodyText =
         message.decryptedText ?? 'Message unavailable on this device';
 
-    // Bubble decoration
     final BoxDecoration bubbleDecoration;
     if (isMine) {
       bubbleDecoration = BoxDecoration(
@@ -216,6 +200,7 @@ class MessageBubble extends StatelessWidget {
       onLongPress: onLongPress,
       onLongPressStart: onLongPressStart,
       child: Stack(
+        clipBehavior: Clip.none,
         children: [
           Container(
             constraints: BoxConstraints(maxWidth: screenWidth * 0.72),
@@ -225,11 +210,9 @@ class MessageBubble extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                // Reply quote (if any)
                 if (replyToMessage != null)
                   _replyQuote(context, replyToMessage!),
 
-                // Body
                 Text(
                   bodyText,
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
@@ -239,7 +222,6 @@ class MessageBubble extends StatelessWidget {
 
                 const SizedBox(height: 4),
 
-                // Timestamp + edited + status row
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -271,7 +253,6 @@ class MessageBubble extends StatelessWidget {
             ),
           ),
 
-          // Selection highlight overlay
           if (isSelected)
             Positioned.fill(
               child: Container(
@@ -282,7 +263,6 @@ class MessageBubble extends StatelessWidget {
               ),
             ),
 
-          // Emoji Reaction Pill Badge
           if (message.reaction != null && message.reaction!.isNotEmpty)
             Positioned(
               bottom: -9,
@@ -336,8 +316,6 @@ class MessageBubble extends StatelessWidget {
   }
 }
 
-// Private layout helpers
-
 /// Lays out a bubble in a row, optionally with avatar on the left for
 /// incoming messages.
 class _BubbleRow extends StatelessWidget {
@@ -386,7 +364,7 @@ class _BubbleRow extends StatelessWidget {
                 child: UserAvatar(username: otherUsername, radius: 14),
               )
             else
-              const SizedBox(width: 34), // placeholder to keep alignment
+              const SizedBox(width: 34),
           ],
           child,
         ],

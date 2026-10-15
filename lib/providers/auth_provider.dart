@@ -1,5 +1,7 @@
 import 'package:flexiyo/models/user.dart';
+import 'package:flexiyo/providers/chat_provider.dart';
 import 'package:flexiyo/services/api_service.dart';
+import 'package:flexiyo/storage/local_db.dart';
 import 'package:flexiyo/storage/secure_keys.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -38,9 +40,10 @@ class AuthState {
 }
 
 class AuthController extends StateNotifier<AuthState> {
-  AuthController(this._secureKeys) : super(const AuthState());
+  AuthController(this._secureKeys, [this._ref]) : super(const AuthState());
 
   final SecureKeys _secureKeys;
+  final Ref? _ref;
 
   Future<void> bootstrap() async {
     final token = await _secureKeys.getJwt();
@@ -191,13 +194,15 @@ class AuthController extends StateNotifier<AuthState> {
 
   Future<void> logout() async {
     await _secureKeys.clearJwt();
+    await _ref?.read(chatsProvider.notifier).reset();
+    await LocalDb.instance.clearAllUserData();
     state = const AuthState(isInitialized: true);
   }
 }
 
 final authProvider = StateNotifierProvider<AuthController, AuthState>((ref) {
   final secureKeys = ref.watch(secureKeysProvider);
-  final controller = AuthController(secureKeys);
+  final controller = AuthController(secureKeys, ref);
   controller.bootstrap();
   return controller;
 });

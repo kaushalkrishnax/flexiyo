@@ -12,6 +12,31 @@ import { getConversationForMember } from './conversations.js';
 
 export const messagesRouter = Router({ base: '/api/conversations' });
 
+async function broadcastInbox(
+  env: Env,
+  userIds: string[],
+  event: {
+    type: 'inbox_message';
+    conversationId: string;
+    senderId: string;
+    preview: string;
+    lastMessageAt: number;
+  },
+): Promise<void> {
+  await Promise.all(userIds.map((userId) => {
+    const doId = env.CHAT_ROOM.idFromName(`inbox:${userId}`);
+    const stub = env.CHAT_ROOM.get(doId);
+    return stub.fetch(new Request('https://internal/broadcast', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...event,
+        isIncoming: userId !== event.senderId,
+      }),
+    }));
+  }));
+}
+
 const devicePayloadSchema = z.object({
   deviceId: z.number().int().positive(),
   ciphertext: z.string().min(1),
@@ -88,7 +113,7 @@ messagesRouter.get(
     }
 
     const url = new URL(request.url);
-    const before = url.searchParams.get('before'); // message ID cursor
+    const before = url.searchParams.get('before');
     const limitRaw = parseInt(url.searchParams.get('limit') ?? '50', 10);
     const limit = Math.min(Math.max(1, isNaN(limitRaw) ? 50 : limitRaw), 100);
 
@@ -256,7 +281,6 @@ messagesRouter.post(
     const expiresAt =
       conv.disappearing_timer > 0 ? now + conv.disappearing_timer : null;
 
-    // --- Device fan-out resolution -----------------------------------------
     const senderDevice = await resolveRequestDevice(request, env, userId);
     const recipientDeviceIds = (
       await env.DB.prepare(
@@ -376,7 +400,6 @@ messagesRouter.post(
       await env.DB.batch(deliveryStmts);
     }
 
-    // Broadcast new_message event via Durable Object
     const doId = env.CHAT_ROOM.idFromName(conversationId);
     const stub = env.CHAT_ROOM.get(doId);
     await stub.fetch(
@@ -403,6 +426,13 @@ messagesRouter.post(
         }),
       }),
     );
+    await broadcastInbox(env, [userId, recipientId], {
+      type: 'inbox_message',
+      conversationId,
+      senderId: userId,
+      preview: 'New message',
+      lastMessageAt: now,
+    });
 
     return new Response(
       JSON.stringify({
@@ -659,7 +689,6 @@ messagesRouter.patch(
 
     const newVersion = version + 1;
 
-    // --- Per-device edit fan-out -------------------------------------------
     const recipientId = conv.user_a_id === userId ? conv.user_b_id : conv.user_a_id;
     const recipientDeviceIds = (
       await env.DB.prepare(
@@ -739,7 +768,6 @@ messagesRouter.patch(
       );
     }
 
-    // Broadcast to Durable Object
     const doId = env.CHAT_ROOM.idFromName(conversationId);
     const stub = env.CHAT_ROOM.get(doId);
     await stub.fetch(
@@ -763,7 +791,6 @@ messagesRouter.patch(
         }),
       }),
     );
-
     return new Response(
       JSON.stringify({
         id: messageId,
@@ -859,7 +886,6 @@ messagesRouter.delete(
       .bind(messageId)
       .run();
 
-    // Broadcast unsent event via Durable Object
     const doId = env.CHAT_ROOM.idFromName(conversationId);
     const stub = env.CHAT_ROOM.get(doId);
     await stub.fetch(
@@ -946,7 +972,6 @@ messagesRouter.post(
     const { emoji } = parsed.data;
     const now = Math.floor(Date.now() / 1000);
 
-    // Check if user already reacted
     const existing = await env.DB.prepare(
       `SELECT id, emoji FROM message_reactions WHERE message_id = ? AND user_id = ?`,
     )
@@ -975,7 +1000,6 @@ messagesRouter.post(
         .bind(resultingReaction, messageId)
         .run();
 
-      // Broadcast reaction removal / update via DO
       const doId = env.CHAT_ROOM.idFromName(conversationId);
       const stub = env.CHAT_ROOM.get(doId);
       await stub.fetch(
@@ -999,7 +1023,6 @@ messagesRouter.post(
       );
     }
 
-    // Insert or update user's reaction
     const reactionId = existing ? existing.id : generateId();
     await env.DB.prepare(
       `INSERT INTO message_reactions (id, message_id, conversation_id, user_id, emoji, created_at, updated_at)
@@ -1013,7 +1036,6 @@ messagesRouter.post(
       .bind(emoji, messageId)
       .run();
 
-    // Broadcast reaction via DO
     const doId = env.CHAT_ROOM.idFromName(conversationId);
     const stub = env.CHAT_ROOM.get(doId);
     await stub.fetch(

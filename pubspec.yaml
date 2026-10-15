@@ -5,7 +5,7 @@ description: Secure one-to-one encrypted messaging powered by the Signal Protoco
 
 publish_to: 'none'
 
-version: 1.0.0+1
+version: 1.0.1+10001
 
 environment:
   sdk: '>=3.3.0 <4.0.0'

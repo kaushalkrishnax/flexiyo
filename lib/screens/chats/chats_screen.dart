@@ -22,8 +22,7 @@ class ChatsScreen extends ConsumerStatefulWidget {
 class _ChatsScreenState extends ConsumerState<ChatsScreen>
     with WidgetsBindingObserver {
   String? _cryptoWarmupUserId;
-  Timer? _inboxRefreshTimer;
-  String _selectedTab = 'recents'; // 'recents' | 'personal' | 'requests'
+  String _selectedTab = 'recents';
   String _searchQuery = '';
 
   @override
@@ -33,17 +32,11 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(chatsProvider.notifier).load();
     });
-    _inboxRefreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
-      if (mounted && ref.read(authProvider).isAuthenticated) {
-        unawaited(ref.read(chatsProvider.notifier).load(forceRefresh: true));
-      }
-    });
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _inboxRefreshTimer?.cancel();
     super.dispose();
   }
 
@@ -75,7 +68,6 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
     );
     final hasActivityBadge = totalUnread > 0 || chatsState.requestCount > 0;
 
-    // Filter conversations based on search
     final conversations = chatsState.conversations.where((conv) {
       if (_searchQuery.isEmpty) return true;
       return conv.otherUsername
@@ -91,7 +83,6 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
               ref.read(chatsProvider.notifier).load(forceRefresh: true),
           child: CustomScrollView(
             slivers: [
-              // 1. Header
               SliverToBoxAdapter(
                 child: Padding(
                   padding:
@@ -167,7 +158,6 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                 ),
               ),
 
-              // 2. Capsule Search Bar
               SliverToBoxAdapter(
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(16, 4, 16, 14),
@@ -177,7 +167,6 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                 ),
               ),
 
-              // 3. Notes / Stories Rail with good spacing
               if (_searchQuery.isEmpty)
                 SliverToBoxAdapter(
                   child: Padding(
@@ -191,7 +180,6 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                   ),
                 ),
 
-              // 4. Filter Tabs: Recents | Personal | Requests
               if (_searchQuery.isEmpty)
                 SliverToBoxAdapter(
                   child: Padding(
@@ -211,7 +199,6 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                               setState(() => _selectedTab = 'personal'),
                         ),
                         const Spacer(),
-                        // Requests tab
                         GestureDetector(
                           onTap: () => context.go('/chats/requests'),
                           child: Row(
@@ -256,7 +243,6 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                   ),
                 ),
 
-              // 5. Conversations List
               if (authState.user == null ||
                   (chatsState.isLoading && chatsState.conversations.isEmpty))
                 const SliverFillRemaining(
@@ -327,12 +313,10 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
     try {
       await ref.read(signalCryptoProvider(userId).future);
     } catch (_) {
-      // Background crypto warmup
     }
   }
 }
 
-// Capsule Search Bar
 
 class _ChatSearchBar extends StatefulWidget {
   const _ChatSearchBar({required this.onChanged});
@@ -391,7 +375,6 @@ class _ChatSearchBarState extends State<_ChatSearchBar> {
   }
 }
 
-// Notes / Active Contacts Rail
 
 class _NotesRail extends StatelessWidget {
   const _NotesRail({
@@ -419,7 +402,6 @@ class _NotesRail extends StatelessWidget {
         separatorBuilder: (_, __) => const SizedBox(width: 14),
         itemBuilder: (context, index) {
           if (index == 0) {
-            // "Your note" item
             return SizedBox(
               width: 72,
               child: Column(
@@ -565,7 +547,6 @@ class _NotesRail extends StatelessWidget {
   }
 }
 
-// Filter Tab item with underline indicator
 
 class _FilterTab extends StatelessWidget {
   const _FilterTab({
@@ -616,7 +597,6 @@ class _FilterTab extends StatelessWidget {
   }
 }
 
-// Chat Tile with dynamic status subtitle
 
 class _ChatTile extends StatelessWidget {
   const _ChatTile({
@@ -657,7 +637,6 @@ class _ChatTile extends StatelessWidget {
     final isUnsent = preview == 'Message unsent';
     final timestamp = _formatSubtitleTimestamp(conversation.lastMessageAt);
 
-    // If unread: "4+ new messages", "3 new messages", "2 new messages", or "Sent a message"
     final String rawSubtitle;
     if (isRequestSent) {
       rawSubtitle = 'Request sent';
@@ -698,7 +677,6 @@ class _ChatTile extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
         child: Row(
           children: [
-            // Avatar with colored ring if unread
             if (hasUnread)
               Container(
                 width: 60,
@@ -739,7 +717,6 @@ class _ChatTile extends StatelessWidget {
 
             const SizedBox(width: 14),
 
-            // Name + Preview subtitle
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -796,7 +773,6 @@ class _ChatTile extends StatelessWidget {
 
             const SizedBox(width: 8),
 
-            // Trailing: unread dot + camera action button
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -837,7 +813,6 @@ class _ChatTile extends StatelessWidget {
   }
 }
 
-// Empty / Error states
 
 class _EmptyState extends StatelessWidget {
   const _EmptyState({required this.onNewChat});

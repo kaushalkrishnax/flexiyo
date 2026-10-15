@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flexiyo/models/conversation.dart';
 import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/providers/chat_provider.dart';
@@ -24,20 +22,15 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
   bool _loading = true;
   bool _loadInFlight = false;
   String? _error;
-  Timer? _refreshTimer;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _loadRequests());
-    _refreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
-      if (mounted && !_loadInFlight) unawaited(_loadRequests());
-    });
   }
 
   @override
   void dispose() {
-    _refreshTimer?.cancel();
     super.dispose();
   }
 

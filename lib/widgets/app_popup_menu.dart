@@ -91,8 +91,6 @@ class AppPopupMenu {
   }
 }
 
-// Message Long-Press Menu Overlay
-
 class _MessageMenuOverlay extends StatelessWidget {
   const _MessageMenuOverlay({
     required this.isMine,
@@ -133,9 +131,6 @@ class _MessageMenuOverlay extends StatelessWidget {
     final menuHeight = actionCount * 48.0 + 52.0;
     final totalHeight = reactionBarHeight + 12.0 + menuHeight;
 
-    // Positioning:
-    // Incoming: anchored with avatar spacing on left (56.0)
-    // Outgoing: anchored on right (16.0)
     final double? left = !isMine ? 56.0 : null;
     final double? right = isMine ? 16.0 : null;
 
@@ -259,7 +254,6 @@ class _MessageMenuOverlay extends StatelessWidget {
 
                   const SizedBox(height: 10),
 
-                  // 2. Action Context Menu Box
                   Container(
                     width: menuWidth,
                     decoration: BoxDecoration(
@@ -286,7 +280,6 @@ class _MessageMenuOverlay extends StatelessWidget {
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        // Timestamp header
                         Padding(
                           padding: const EdgeInsets.fromLTRB(18, 14, 18, 6),
                           child: Text(
@@ -302,7 +295,6 @@ class _MessageMenuOverlay extends StatelessWidget {
                           ),
                         ),
 
-                        // Action 1: Reply
                         _ActionRow(
                           label: 'Reply',
                           icon: Icons.reply_rounded,
@@ -313,7 +305,6 @@ class _MessageMenuOverlay extends StatelessWidget {
                           isDark: isDark,
                         ),
 
-                        // Action 2: Copy
                         _ActionRow(
                           label: 'Copy',
                           icon: Icons.copy_rounded,
@@ -324,7 +315,6 @@ class _MessageMenuOverlay extends StatelessWidget {
                           isDark: isDark,
                         ),
 
-                        // Action 3: Unsend (only if isMine)
                         if (showUnsend)
                           _ActionRow(
                             label: 'Unsend',
@@ -337,7 +327,6 @@ class _MessageMenuOverlay extends StatelessWidget {
                             isDark: isDark,
                           ),
 
-                        // Action 4: Delete for me
                         _ActionRow(
                           label: 'Delete for me',
                           icon: Icons.delete_outline_rounded,
@@ -413,9 +402,6 @@ class _ActionRow extends StatelessWidget {
   }
 }
 
-// ==========================================
-// 2. Inbox Item Long-Press Centered Modal
-// ==========================================
 
 class _InboxModalContent extends StatelessWidget {
   const _InboxModalContent({
@@ -466,7 +452,6 @@ class _InboxModalContent extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Header with user avatar and username
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 18, 20, 14),
                 child: Row(
@@ -493,7 +478,6 @@ class _InboxModalContent extends StatelessWidget {
               ),
               Divider(height: 1, color: dividerColor),
 
-              // Option 1: Pin
               _ModalActionRow(
                 label: conversation.isPinned ? 'Unpin' : 'Pin',
                 icon: conversation.isPinned
@@ -506,7 +490,6 @@ class _InboxModalContent extends StatelessWidget {
                 textColor: textColor,
               ),
 
-              // Option 2: Mute messages
               _ModalActionRow(
                 label: conversation.isMuted
                     ? 'Unmute messages'
@@ -521,7 +504,6 @@ class _InboxModalContent extends StatelessWidget {
                 textColor: textColor,
               ),
 
-              // Option 3: Delete
               _ModalActionRow(
                 label: 'Delete',
                 icon: Icons.delete_outline_rounded,

@@ -22,7 +22,6 @@ class ApiService {
       ),
     );
 
-    // Auth interceptor: inject JWT on every request.
     _dio.interceptors.add(
       InterceptorsWrapper(
         onRequest: (options, handler) async {
@@ -44,8 +43,6 @@ class ApiService {
 
   late final Dio _dio;
   final SecureKeys _secureKeys;
-
-  // Auth
 
   Future<Map<String, dynamic>> login({
     required String username,
@@ -122,8 +119,6 @@ class ApiService {
     return User.fromJson(data as Map<String, dynamic>);
   }
 
-  // App updates (public, unauthenticated)
-
   /// Queries the Worker's update checker for the latest release.
   ///
   /// Returns the raw release payload; callers map it via [AppUpdateInfo].
@@ -139,8 +134,6 @@ class ApiService {
     });
   }
 
-  // Users
-
   Future<List<User>> searchUsers(String query) async {
     final data = await _get('/api/users/search', params: {'q': query});
     final List<dynamic> rawList =
@@ -149,8 +142,6 @@ class ApiService {
         .map((u) => User.fromJson(u as Map<String, dynamic>))
         .toList();
   }
-
-  // Conversations
 
   Future<List<Conversation>> getConversations() async {
     final data = await _get('/api/conversations');
@@ -223,8 +214,6 @@ class ApiService {
   Future<void> unblockConversation(String conversationId) async {
     await _delete('/api/conversations/$conversationId/block');
   }
-
-  // Messages
 
   Future<List<Message>> getMessages(
     String conversationId, {
@@ -313,8 +302,6 @@ class ApiService {
     );
   }
 
-  // WebSocket URL helper
-
   /// Builds the WebSocket URL for a given conversation, appending the JWT token.
   Future<String> buildWsUrl(String conversationId) async {
     final token = await _secureKeys.getJwt();
@@ -325,7 +312,14 @@ class ApiService {
     return '$base/api/ws/$conversationId?token=$encoded';
   }
 
-  // Internal HTTP helpers
+  Future<String> buildInboxWsUrl() async {
+    final token = await _secureKeys.getJwt();
+    final base = AppConstants.apiBaseUrl
+        .replaceFirst('https://', 'wss://')
+        .replaceFirst('http://', 'ws://');
+    final encoded = Uri.encodeComponent(token ?? '');
+    return '$base/api/ws/inbox?token=$encoded';
+  }
 
   Future<dynamic> _get(
     String path, {

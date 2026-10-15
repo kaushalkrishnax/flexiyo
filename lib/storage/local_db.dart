@@ -125,8 +125,6 @@ class LocalDb {
     }
   }
 
-  // Messages helpers
-
   Future<void> upsertMessage(Map<String, dynamic> row) async {
     final database = await db;
     await database.insert(
@@ -211,8 +209,6 @@ class LocalDb {
       whereArgs: [messageId],
     );
   }
-
-  // Conversations helpers
 
   Future<void> upsertConversation(Map<String, dynamic> row) async {
     final database = await db;
@@ -308,5 +304,14 @@ class LocalDb {
       where: 'id = ?',
       whereArgs: [conversationId],
     );
+  }
+
+  Future<void> clearAllUserData() async {
+    final database = await db;
+    await database.transaction((txn) async {
+      await txn.delete('messages');
+      await txn.delete('conversations');
+      await txn.delete('signal_sessions');
+    });
   }
 }

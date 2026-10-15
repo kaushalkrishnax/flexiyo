@@ -179,7 +179,6 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
     final myUserId = authState.user?.id ?? '';
     final colorScheme = Theme.of(context).colorScheme;
 
-    // Auto-scroll when new messages arrive and user is at bottom
     ref.listen(
       conversationProvider(widget.conversationId)
           .select((s) => s.messages.length),
@@ -203,13 +202,11 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
             ? const Center(child: CircularProgressIndicator())
             : Column(
                 children: [
-                  // Message list
                   Expanded(
                     child: Stack(
                       children: [
                         GestureDetector(
                           onTap: () {
-                            // Exit selection mode on tap outside
                             if (conversationState.isSelectionMode) {
                               ref
                                   .read(conversationProvider(
@@ -227,7 +224,6 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                             itemCount: messages.length +
                                 (conversationState.isTyping ? 1 : 0),
                             itemBuilder: (context, index) {
-                              // Typing indicator at the end
                               if (conversationState.isTyping &&
                                   index == messages.length) {
                                 return const Padding(
@@ -239,7 +235,6 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                               final message = messages[index];
                               final isMine = message.senderId == myUserId;
 
-                              // Group detection
                               final prev =
                                   index > 0 ? messages[index - 1] : null;
                               final next = index < messages.length - 1
@@ -262,12 +257,10 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                               final isFirst = !sameAsPrev;
                               final isLast = !sameAsNext;
 
-                              // Date separator
                               final showSeparator = prev == null ||
                                   !_isSameDay(
                                       prev.createdAt, message.createdAt);
 
-                              // Reply-to message lookup
                               Message? replyToMsg;
                               if (message.replyToId != null) {
                                 try {
@@ -275,7 +268,6 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                                     (m) => m.id == message.replyToId,
                                   );
                                 } catch (_) {
-                                  // Original message may be locally deleted
                                 }
                               }
 
@@ -332,7 +324,6 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                           ),
                         ),
 
-                        // Scroll-to-bottom FAB
                         if (!_atBottom)
                           Positioned(
                             bottom: 12,
@@ -352,7 +343,6 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                     ),
                   ),
 
-                  // Multi-select action bar
                   if (widget.isMessageRequest)
                     Padding(
                       padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
@@ -418,7 +408,6 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                           .deleteSelectedForMe(),
                     )
                   else
-                    // Composer
                     _ComposerBar(
                       controller: _messageController,
                       conversationId: widget.conversationId,
@@ -533,7 +522,6 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
   }
 }
 
-// Inline Composer Bar
 
 class _ComposerBar extends ConsumerWidget {
   const _ComposerBar({
@@ -581,7 +569,6 @@ class _ComposerBar extends ConsumerWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Reply banner
             if (replyTo != null)
               _ReplyBanner(
                 message: replyTo!,
@@ -589,7 +576,6 @@ class _ComposerBar extends ConsumerWidget {
                 colorScheme: colorScheme,
               ),
 
-            // Edit banner
             if (editDraft != null)
               _EditBanner(
                 originalText: editDraft!.text,
@@ -597,7 +583,6 @@ class _ComposerBar extends ConsumerWidget {
                 colorScheme: colorScheme,
               ),
 
-            // Message input row
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
               child: ValueListenableBuilder<TextEditingValue>(
@@ -612,7 +597,6 @@ class _ComposerBar extends ConsumerWidget {
                         ? CrossAxisAlignment.end
                         : CrossAxisAlignment.center,
                     children: [
-                      // Camera button
                       SizedBox(
                         height: 44,
                         child: Center(
@@ -644,7 +628,6 @@ class _ComposerBar extends ConsumerWidget {
                       ),
                       const SizedBox(width: 8),
 
-                      // Pill capsule containing TextField and right actions
                       Expanded(
                         child: Container(
                           constraints: const BoxConstraints(minHeight: 44),
@@ -658,7 +641,6 @@ class _ComposerBar extends ConsumerWidget {
                                 ? CrossAxisAlignment.end
                                 : CrossAxisAlignment.center,
                             children: [
-                              // Text Field
                               Expanded(
                                 child: Theme(
                                   data: Theme.of(context).copyWith(
@@ -714,7 +696,6 @@ class _ComposerBar extends ConsumerWidget {
                                 ),
                               ),
 
-                              // Right actions inside capsule
                               if (!hasText) ...[
                                 SizedBox(
                                   height: 44,
@@ -935,7 +916,6 @@ class _EditBanner extends StatelessWidget {
   }
 }
 
-// Multi-select action bar
 
 class _SelectionBar extends StatelessWidget {
   const _SelectionBar({

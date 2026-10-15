@@ -76,13 +76,11 @@ export class ChatRoom {
 
     const userId = jwtPayload.sub;
 
-    // Upgrade the connection using the Workers WebSocket API
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
 
     server.accept();
 
-    // Close any existing session for this user
     const existingSession = this.sessions.get(userId);
     if (existingSession) {
       try {
@@ -94,7 +92,6 @@ export class ChatRoom {
 
     this.sessions.set(userId, server);
 
-    // Attach message / close handlers
     server.addEventListener('message', (event: MessageEvent) => {
       this.handleClientMessage(userId, event.data as string);
     });
@@ -107,7 +104,6 @@ export class ChatRoom {
       this.sessions.delete(userId);
     });
 
-    // Send a connected acknowledgement
     server.send(JSON.stringify({ type: 'connected', userId }));
 
     return new Response(null, { status: 101, webSocket: client });
@@ -150,15 +146,13 @@ export class ChatRoom {
     try {
       msg = JSON.parse(data) as { type?: string; messageId?: string };
     } catch {
-      return; // ignore malformed messages
+      return;
     }
 
     if (msg?.type === 'delivery_ack' && msg.messageId) {
-      // Fire-and-forget DB write for delivery acknowledgement
         void this.handleDeliveryAck(userId, msg.messageId);
     }
 
-    // Typing indicators: broadcast to all other participants
     if (msg?.type === 'typing_start' || msg?.type === 'typing_stop') {
       const typingEvent = JSON.stringify({ type: msg.type, userId });
       for (const [peerId, ws] of this.sessions.entries()) {
@@ -171,7 +165,6 @@ export class ChatRoom {
         }
       }
     }
-    // Additional client-to-server event types can be handled here
   }
 
   private async handleDeliveryAck(recipientId: string, messageId: string): Promise<void> {

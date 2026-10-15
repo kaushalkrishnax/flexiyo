@@ -300,6 +300,14 @@ export type DOEvent =
       reaction: string | null;
     }
   | {
+      type: 'inbox_message';
+      conversationId: string;
+      senderId: string;
+      preview: string;
+      lastMessageAt: number;
+      isIncoming: boolean;
+    }
+  | {
       type: 'message_delivered';
       messageId: string;
       recipientId: string;

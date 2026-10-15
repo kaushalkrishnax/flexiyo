@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flexiyo/models/conversation.dart';
 import 'package:flexiyo/services/api_service.dart';
+import 'package:flexiyo/services/ws_service.dart';
 import 'package:flexiyo/storage/local_db.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -41,6 +44,8 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
 
   final ApiService _api;
   bool _initialized = false;
+  WsService? _inboxWs;
+  StreamSubscription<Map<String, dynamic>>? _inboxWsSub;
 
   static List<Conversation> _sort(List<Conversation> items) {
     final list = [...items];
@@ -58,6 +63,8 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
   /// Load conversations — first from cache, then refresh from server.
   Future<void> load({bool forceRefresh = false}) async {
     if (state.isLoading) return;
+
+    await _connectInboxWs();
 
     if (!_initialized || forceRefresh) {
       state = state.copyWith(isLoading: true, clearError: true);
@@ -126,6 +133,54 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
         }
       }
     }
+  }
+
+  Future<void> _connectInboxWs() async {
+    if (_inboxWs != null) return;
+    try {
+      final url = await _api.buildInboxWsUrl();
+      final ws = WsService(wsUrl: url);
+      _inboxWs = ws;
+      _inboxWsSub = ws.events.listen(_handleInboxEvent);
+      await ws.connect();
+    } catch (_) {
+      await disconnect();
+    }
+  }
+
+  void _handleInboxEvent(Map<String, dynamic> event) {
+    if (event['type'] != 'inbox_message') return;
+    if (event['isIncoming'] != true) return;
+    final conversationId = event['conversationId'] as String?;
+    final preview = event['preview'] as String?;
+    final timestamp = event['lastMessageAt'];
+    if (conversationId == null || preview == null) return;
+    final seconds = timestamp is int ? timestamp : 0;
+    onNewMessage(
+      conversationId: conversationId,
+      preview: preview,
+      lastMessageAt: DateTime.fromMillisecondsSinceEpoch(seconds * 1000),
+      isIncoming: event['isIncoming'] == true,
+    );
+  }
+
+  Future<void> disconnect() async {
+    await _inboxWsSub?.cancel();
+    _inboxWsSub = null;
+    await _inboxWs?.dispose();
+    _inboxWs = null;
+  }
+
+  Future<void> reset() async {
+    await disconnect();
+    _initialized = false;
+    state = const ChatsState();
+  }
+
+  @override
+  void dispose() {
+    unawaited(disconnect());
+    super.dispose();
   }
 
   Future<void> upsertConversation(Conversation conversation) async {
@@ -214,7 +269,14 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     final idx = list.indexWhere((c) => c.id == conversationId);
     if (idx == -1) return;
 
-    final updated = list[idx].copyWith(
+    final current = list[idx];
+    if (isIncoming &&
+        current.lastMessageAt != null &&
+        !current.lastMessageAt!.isBefore(lastMessageAt)) {
+      return;
+    }
+
+    final updated = current.copyWith(
       lastMessagePreview: preview,
       lastMessageAt: lastMessageAt,
       unreadCount:
@@ -301,5 +363,7 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
 
 final chatsProvider = StateNotifierProvider<ChatsNotifier, ChatsState>((ref) {
   final api = ref.watch(apiServiceProvider);
-  return ChatsNotifier(api);
+  final notifier = ChatsNotifier(api);
+  ref.onDispose(notifier.dispose);
+  return notifier;
 });

@@ -202,21 +202,11 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     try {
       final wsUrl = await _api.buildWsUrl(conversationId);
       _ws = WsService(conversationId: conversationId, wsUrl: wsUrl);
-      _ws!.onConnectionChanged = (connected) {
-        if (!mounted) return;
-        if (connected) {
-          _liveSyncTimer?.cancel();
-          _liveSyncTimer = null;
-        } else {
-          _startLiveSync();
-        }
-      };
       await _ws!.connect();
 
       _wsSub = _ws!.events.listen((event) => _handleWsEvent(event));
     } catch (_) {
-      // WS connection failure is non-fatal; fall back to HTTP polling if needed
-      if (mounted) _startLiveSync();
+      // WS connection failure is non-fatal; the next screen open retries it.
     }
   }
 
@@ -842,87 +832,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     state = state.copyWith(messages: updated);
   }
 
-  Timer? _liveSyncTimer;
-
-  void _startLiveSync() {
-    if (!mounted || (_ws?.isConnected ?? false)) return;
-    _liveSyncTimer?.cancel();
-    // Gentle fallback polling only when WebSocket is not connected
-    _liveSyncTimer = Timer.periodic(const Duration(seconds: 25), (_) {
-      if (mounted && !(_ws?.isConnected ?? false)) {
-        _syncNewMessages();
-      } else {
-        _liveSyncTimer?.cancel();
-        _liveSyncTimer = null;
-      }
-    });
-  }
-
-  Future<void> _syncNewMessages() async {
-    try {
-      final remoteMessages = await _api.getMessages(conversationId, limit: 30);
-      final existingIds = {for (final m in state.messages) m.id};
-      final newOnes =
-          remoteMessages.where((m) => !existingIds.contains(m.id)).toList();
-
-      if (newOnes.isNotEmpty) {
-        final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
-        for (final msg in newOnes) {
-          String text = msg.encryptedPayload ?? '';
-          if (msg.senderId == _myUserId) {
-            text = (await crypto.getLocalMessageText(msg.id)) ?? text;
-          } else if (msg.encryptedPayload != null && !msg.isUnsent) {
-            try {
-              text = await crypto.decryptFromUser(
-                senderId: msg.senderId,
-                payload: msg.encryptedPayload!,
-                messageType: msg.messageType.name,
-              );
-              await crypto.saveLocalMessageText(msg.id, text);
-            } catch (_) {
-              text = msg.encryptedPayload ?? '';
-            }
-          }
-          final hydrated = msg.copyWith(decryptedText: text);
-          _upsertMessage(hydrated);
-          await LocalDb.instance.upsertMessage(hydrated.toJson());
-
-          if (hydrated.senderId != _myUserId) {
-            _ws?.sendDeliveryAck(hydrated.id);
-            if (state.conversation?.requestStatus == 'accepted' &&
-                !(state.conversation?.isRestricted ?? false)) {
-              unawaited(_api.markConversationRead(conversationId));
-            }
-          }
-        }
-      }
-
-      // Also reconcile unsent/edited messages
-      final remoteById = {for (final m in remoteMessages) m.id: m};
-      bool hasChanges = false;
-      final updatedList = state.messages.map((local) {
-        final remote = remoteById[local.id];
-        if (remote == null) return local;
-        if (remote.isUnsent != local.isUnsent ||
-            remote.isEdited != local.isEdited) {
-          hasChanges = true;
-          return local.copyWith(
-            isUnsent: remote.isUnsent,
-            isEdited: remote.isEdited,
-            editedAt: remote.editedAt,
-          );
-        }
-        return local;
-      }).toList();
-
-      if (hasChanges && mounted) {
-        state = state.copyWith(messages: updatedList);
-      }
-    } catch (_) {
-      // Non-fatal background sync
-    }
-  }
-
   // Dispose
 
   @override
@@ -931,8 +840,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     _outgoingTypingTimer?.cancel();
     _typingTimer?.cancel();
     _wsSub?.cancel();
-    _liveSyncTimer?.cancel();
-    _liveSyncTimer = null;
     _ws?.dispose();
     super.dispose();
   }

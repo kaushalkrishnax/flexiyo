@@ -5,9 +5,9 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 /// WebSocket connection for a single conversation with automatic reconnection.
 class WsService {
-  WsService({required this.conversationId, required this.wsUrl});
+  WsService({this.conversationId, required this.wsUrl});
 
-  final String conversationId;
+  final String? conversationId;
   final String wsUrl;
 
   WebSocketChannel? _channel;
@@ -25,8 +25,6 @@ class WsService {
   bool _connected = false;
   bool get isConnected => _connected;
   void Function(bool isConnected)? onConnectionChanged;
-
-  // Connection management
 
   Future<void> connect() async {
     if (_disposed) return;
@@ -56,7 +54,6 @@ class WsService {
               final decoded = jsonDecode(data) as Map<String, dynamic>;
               _eventController.add(decoded);
             } catch (_) {
-              // ignore malformed frames
             }
           }
         },
@@ -91,14 +88,11 @@ class WsService {
     });
   }
 
-  // Sending client events
-
   void send(Map<String, dynamic> event) {
     if (_disposed || _channel == null || !_connected) return;
     try {
       _channel!.sink.add(jsonEncode(event));
     } catch (_) {
-      // Connection may have closed; ignore
     }
   }
 
@@ -107,8 +101,6 @@ class WsService {
 
   void sendDeliveryAck(String messageId) =>
       send({'type': 'delivery_ack', 'messageId': messageId});
-
-  // Dispose
 
   Future<void> dispose() async {
     _disposed = true;

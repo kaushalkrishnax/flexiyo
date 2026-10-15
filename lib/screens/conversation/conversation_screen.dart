@@ -6,9 +6,9 @@ import 'package:flexiyo/providers/chat_provider.dart';
 import 'package:flexiyo/providers/conversation_provider.dart';
 import 'package:flexiyo/services/api_service.dart';
 import 'package:flexiyo/widgets/avatar.dart';
+import 'package:flexiyo/widgets/app_popup_menu.dart';
 import 'package:flexiyo/widgets/date_separator.dart';
 import 'package:flexiyo/widgets/message_bubble.dart';
-import 'package:flexiyo/widgets/message_context_menu.dart';
 import 'package:flexiyo/widgets/typing_indicator.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -139,12 +139,10 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
     final notifier =
         ref.read(conversationProvider(widget.conversationId).notifier);
 
-    MessageContextMenu.show(
+    AppPopupMenu.showMessageMenu(
       context,
       isMine: isMine,
       message: message,
-      myUserId: myUserId,
-      isEditEligible: message.isEditEligible,
       tapPosition: tapPosition,
       onReply: () {
         notifier.setReplyTo(message);
@@ -167,18 +165,9 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
           ),
         );
       },
-      onEdit: isMine && message.isEditEligible
-          ? () {
-              notifier.startEdit(message);
-              _messageController.text = message.decryptedText ?? '';
-              _messageController.selection = TextSelection.fromPosition(
-                TextPosition(offset: _messageController.text.length),
-              );
-            }
-          : null,
       onUnsend: isMine ? () => notifier.unsendMessage(message.id) : null,
       onDeleteForMe: () => notifier.deleteForMe(message.id),
-      onSelectMode: () => notifier.enterSelectionMode(message.id),
+      onReact: (emoji) => notifier.reactToMessage(message.id, emoji),
     );
   }
 
@@ -314,7 +303,13 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                                                     widget.conversationId)
                                                 .notifier)
                                             .toggleSelection(message.id)
-                                        : null,
+                                        : (message.status == MessageStatus.failed && isMine
+                                            ? () => ref
+                                                .read(conversationProvider(
+                                                        widget.conversationId)
+                                                    .notifier)
+                                                .retryFailedMessage(message.id)
+                                            : null),
                                     onLongPressStart: (details) {
                                       if (conversationState.isSelectionMode) {
                                         ref
@@ -385,7 +380,8 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                           'pending' &&
                       conversationState.conversation?.initiatedById ==
                           myUserId &&
-                      messages.isNotEmpty)
+                      messages.any((m) =>
+                          !m.isUnsent && m.status != MessageStatus.failed))
                     Padding(
                       padding: const EdgeInsets.all(16),
                       child: Text(

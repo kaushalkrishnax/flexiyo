@@ -2,6 +2,7 @@ import 'package:flexiyo/models/user.dart';
 import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/providers/chat_provider.dart';
 import 'package:flexiyo/services/api_service.dart';
+import 'package:flexiyo/widgets/auth_text_field.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -80,17 +81,16 @@ class _NewChatScreenState extends ConsumerState<NewChatScreen> {
           padding: const EdgeInsets.all(16),
           child: Column(
             children: [
-              TextField(
+              AuthTextField(
                 controller: _searchController,
-                onSubmitted: (_) => _searchUsers(),
-                decoration: InputDecoration(
-                  labelText: 'Search username',
-                  prefixIcon: const Icon(Icons.search_rounded),
-                  suffixIcon: IconButton(
-                    icon: const Icon(Icons.search_rounded),
-                    onPressed: _searchUsers,
-                  ),
+                label: 'Search username',
+                labelType: AuthTextFieldLabelType.floating,
+                leading: const Icon(Icons.search_rounded, size: 22, color: Color(0xFF8E8E93)),
+                trailing: IconButton(
+                  icon: const Icon(Icons.arrow_forward_rounded, size: 20),
+                  onPressed: _searchUsers,
                 ),
+                onSubmitted: (_) => _searchUsers(),
               ),
               const SizedBox(height: 16),
               if (_error != null)

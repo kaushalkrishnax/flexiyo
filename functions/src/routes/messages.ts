@@ -44,6 +44,7 @@ function rowToResponse(row: MessageRow) {
     systemData: row.system_data,
     deliveredAt: row.delivered_at,
     readAt: row.read_at,
+    reaction: row.reaction ?? null,
   };
 }
 
@@ -357,6 +358,28 @@ messagesRouter.post(
       });
     }
 
+    // Requests and restricted chats do not send seen receipts
+    if (conversation.request_status === 'pending') {
+      return new Response(JSON.stringify({ read: false, reason: 'pending_request' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const restrictedCheck = await env.DB.prepare(
+      `SELECT 1 FROM conversation_user_settings
+       WHERE conversation_id = ? AND is_restricted = 1 LIMIT 1`,
+    )
+      .bind(conversationId)
+      .first();
+
+    if (restrictedCheck) {
+      return new Response(JSON.stringify({ read: false, reason: 'restricted' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
     const now = Math.floor(Date.now() / 1000);
     await env.DB.prepare(
       `UPDATE message_delivery
@@ -622,3 +645,160 @@ messagesRouter.delete(
     });
   },
 );
+
+const reactionSchema = z.object({
+  emoji: z.string().min(1).max(10),
+});
+
+messagesRouter.post(
+  '/:id/messages/:messageId/reaction',
+  (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
+  async (request: IRequest, env: Env): Promise<Response> => {
+    const authReq = request as unknown as AuthenticatedRequest;
+    const userId = authReq.user.sub;
+    const { id: conversationId, messageId } = request.params as {
+      id: string;
+      messageId: string;
+    };
+
+    const conv = await getConversationForMember(conversationId, userId, env.DB);
+    if (!conv) {
+      return new Response(JSON.stringify({ error: 'Conversation not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const message = await env.DB.prepare(
+      `SELECT * FROM messages WHERE id = ? AND conversation_id = ?`,
+    )
+      .bind(messageId, conversationId)
+      .first<MessageRow>();
+
+    if (!message) {
+      return new Response(JSON.stringify({ error: 'Message not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (message.is_unsent === 1) {
+      return new Response(JSON.stringify({ error: 'Cannot react to unsent message' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const parsed = reactionSchema.safeParse(body);
+    if (!parsed.success) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid body', details: parsed.error.issues }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+
+    const { emoji } = parsed.data;
+    const now = Math.floor(Date.now() / 1000);
+
+    // Check if user already reacted
+    const existing = await env.DB.prepare(
+      `SELECT id, emoji FROM message_reactions WHERE message_id = ? AND user_id = ?`,
+    )
+      .bind(messageId, userId)
+      .first<{ id: string; emoji: string }>();
+
+    let resultingReaction: string | null = emoji;
+
+    if (existing && existing.emoji === emoji) {
+      // Toggle off: remove user's reaction
+      await env.DB.prepare(
+        `DELETE FROM message_reactions WHERE id = ?`,
+      )
+        .bind(existing.id)
+        .run();
+
+      // Find any other reaction on this message (most recently updated)
+      const otherReaction = await env.DB.prepare(
+        `SELECT emoji FROM message_reactions WHERE message_id = ? ORDER BY updated_at DESC LIMIT 1`,
+      )
+        .bind(messageId)
+        .first<{ emoji: string }>();
+
+      resultingReaction = otherReaction?.emoji ?? null;
+      await env.DB.prepare(`UPDATE messages SET reaction = ? WHERE id = ?`)
+        .bind(resultingReaction, messageId)
+        .run();
+
+      // Broadcast reaction removal / update via DO
+      const doId = env.CHAT_ROOM.idFromName(conversationId);
+      const stub = env.CHAT_ROOM.get(doId);
+      await stub.fetch(
+        new Request('https://internal/broadcast', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: 'message_reaction',
+            conversationId,
+            messageId,
+            userId,
+            emoji: null,
+            reaction: resultingReaction,
+          }),
+        }),
+      );
+
+      return new Response(
+        JSON.stringify({ success: true, reacted: false, reaction: resultingReaction }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+
+    // Insert or update user's reaction
+    const reactionId = existing ? existing.id : generateId();
+    await env.DB.prepare(
+      `INSERT INTO message_reactions (id, message_id, conversation_id, user_id, emoji, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(message_id, user_id) DO UPDATE SET emoji = excluded.emoji, updated_at = excluded.updated_at`,
+    )
+      .bind(reactionId, messageId, conversationId, userId, emoji, now, now)
+      .run();
+
+    await env.DB.prepare(`UPDATE messages SET reaction = ? WHERE id = ?`)
+      .bind(emoji, messageId)
+      .run();
+
+    // Broadcast reaction via DO
+    const doId = env.CHAT_ROOM.idFromName(conversationId);
+    const stub = env.CHAT_ROOM.get(doId);
+    await stub.fetch(
+      new Request('https://internal/broadcast', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'message_reaction',
+          conversationId,
+          messageId,
+          userId,
+          emoji,
+          reaction: emoji,
+        }),
+      }),
+    );
+
+    return new Response(
+      JSON.stringify({ success: true, reacted: true, reaction: emoji }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  },
+);
+

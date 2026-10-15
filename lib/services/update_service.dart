@@ -1,12 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
+import 'dart:io' show Directory;
 
 import 'package:dio/dio.dart';
-import 'package:flutter/services.dart';
 import 'package:flexiyo/core/exceptions.dart';
 import 'package:flexiyo/models/app_update.dart';
 import 'package:flexiyo/services/api_service.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -23,20 +24,23 @@ const String _seenVersionKey = 'flexiyo.update_seen_version';
 /// Minimum time between automatic update checks (24h).
 const Duration _checkInterval = Duration(hours: 24);
 
+bool get _isAndroid => !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+bool get _isIOS => !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+
 class UpdateService {
   UpdateService(this._api);
 
   final ApiService _api;
 
   Future<AppUpdateInfo?> checkForUpdates({bool ignoreThrottle = false}) async {
-    if (!Platform.isAndroid && !Platform.isIOS) return null;
+    if (!_isAndroid && !_isIOS) return null;
 
     if (!ignoreThrottle && !await _shouldCheckNow()) return null;
 
     try {
       final version = await getCurrentVersion();
-      final arch = Platform.isAndroid ? await getDeviceArchitecture() : '';
-      final platform = Platform.isIOS ? 'ios' : 'android';
+      final arch = _isAndroid ? await getDeviceArchitecture() : '';
+      final platform = _isIOS ? 'ios' : 'android';
 
       final data = await _api.checkForUpdate(
         version: version,
@@ -95,7 +99,7 @@ class UpdateService {
     required String apkUrl,
     void Function(double progress)? onProgress,
   }) async {
-    if (!Platform.isAndroid) {
+    if (!_isAndroid) {
       throw const FlexiyoException('Updates are only supported on Android');
     }
 
@@ -143,7 +147,7 @@ class UpdateService {
   }
 
   Future<bool> canInstallPackages() async {
-    if (!Platform.isAndroid) return false;
+    if (!_isAndroid) return false;
     try {
       return await _appUpdateChannel.invokeMethod<bool>(
             'canInstallPackages',
@@ -188,7 +192,7 @@ class UpdateService {
   }
 
   Future<String> getCurrentVersion() async {
-    if (!Platform.isAndroid && !Platform.isIOS) return '0.0.0';
+    if (!_isAndroid && !_isIOS) return '0.0.0';
     try {
       return await _appUpdateChannel.invokeMethod<String>('getVersion') ??
           '0.0.0';
@@ -200,7 +204,7 @@ class UpdateService {
   }
 
   Future<String> getDeviceArchitecture() async {
-    if (!Platform.isAndroid) return 'arm64-v8a';
+    if (!_isAndroid) return 'arm64-v8a';
     try {
       return await _appUpdateChannel.invokeMethod<String>('getArchitecture') ??
           'arm64-v8a';

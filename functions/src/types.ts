@@ -23,6 +23,9 @@ export interface UserRow {
   id: string;
   username: string;
   password_hash: string;
+  email?: string | null;
+  google_id?: string | null;
+  email_verified?: number;
   created_at: number;
 }
 
@@ -79,6 +82,17 @@ export interface MessageRow {
   system_data: string | null;
   delivered_at: number | null;
   read_at: number | null;
+  reaction?: string | null;
+}
+
+export interface MessageReactionRow {
+  id: string;
+  message_id: string;
+  conversation_id: string;
+  user_id: string;
+  emoji: string;
+  created_at: number;
+  updated_at: number;
 }
 
 export interface MessageDeliveryRow {
@@ -165,6 +179,9 @@ export interface ConversationResponse {
   lastMessageAt: number | null;
   unreadCount: number;
   createdAt: number;
+  isPinned?: boolean;
+  isMuted?: boolean;
+  isRestricted?: boolean;
 }
 
 export interface MessageResponse {
@@ -180,6 +197,7 @@ export interface MessageResponse {
   expiresAt: number | null;
   editedAt: number | null;
   systemData: string | null;
+  reaction?: string | null;
 }
 
 export type DOEvent =
@@ -208,6 +226,14 @@ export type DOEvent =
       messageId: string;
       conversationId: string;
       unsentAt: number;
+    }
+  | {
+      type: 'message_reaction';
+      conversationId: string;
+      messageId: string;
+      userId: string;
+      emoji: string | null;
+      reaction: string | null;
     }
   | {
       type: 'message_delivered';

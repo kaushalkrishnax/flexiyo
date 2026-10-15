@@ -6,16 +6,20 @@ import 'package:flexiyo/screens/chats/message_requests_screen.dart';
 import 'package:flexiyo/screens/chats/new_chat_screen.dart';
 import 'package:flexiyo/screens/conversation/conversation_screen.dart';
 import 'package:flexiyo/screens/settings/settings_screen.dart';
+import 'package:flexiyo/screens/splash/splash_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+
+final initialSessionProvider = Provider<bool>((ref) => false);
 
 class AppRouterNotifier extends ChangeNotifier {
   AppRouterNotifier(this._ref) {
     _ref.listen<AuthState>(
       authProvider,
       (previous, next) {
-        if (previous?.isAuthenticated != next.isAuthenticated) {
+        if (previous?.isAuthenticated != next.isAuthenticated ||
+            previous?.isInitialized != next.isInitialized) {
           notifyListeners();
         }
       },
@@ -23,14 +27,69 @@ class AppRouterNotifier extends ChangeNotifier {
   }
 
   final Ref _ref;
+  String? _pendingDeepLink;
 
   String? redirect(BuildContext context, GoRouterState state) {
-    final isLoggedIn = _ref.read(authProvider).isAuthenticated;
-    final isAuthRoute = state.matchedLocation == '/login' ||
-        state.matchedLocation == '/register';
+    final auth = _ref.read(authProvider);
+    final hasSession = _ref.read(initialSessionProvider);
+    final location = state.matchedLocation;
+    final uri = state.uri.toString();
+    final isAuthRoute = location == '/login' || location == '/register';
 
-    if (!isLoggedIn && !isAuthRoute) return '/login';
-    if (isLoggedIn && isAuthRoute) return '/chats';
+    // Normalize custom scheme deep links like flexiyo://chats/123
+    if (state.uri.scheme == 'flexiyo' &&
+        state.uri.host.isNotEmpty &&
+        state.uri.host != 'flexiyo.pages.dev') {
+      final host = state.uri.host;
+      final path = state.uri.path;
+      final query = state.uri.query.isNotEmpty ? '?${state.uri.query}' : '';
+      return '/$host$path$query';
+    }
+
+    if (!auth.isInitialized) {
+      if (location != '/splash' &&
+          location != '/login' &&
+          location != '/register' &&
+          location != '/') {
+        _pendingDeepLink = uri;
+      }
+      if (hasSession) {
+        return location == '/splash' ? null : '/splash';
+      }
+      return isAuthRoute ? null : '/login';
+    }
+
+    if (location == '/splash' || location == '/') {
+      if (auth.isAuthenticated) {
+        final target = _pendingDeepLink;
+        _pendingDeepLink = null;
+        if (target != null &&
+            target != '/' &&
+            target != '/splash' &&
+            !target.startsWith('/login')) {
+          return target;
+        }
+        return '/chats';
+      }
+      return '/login';
+    }
+
+    if (!auth.isAuthenticated && !isAuthRoute) return '/login';
+    if (auth.isAuthenticated && isAuthRoute) {
+      if (auth.isOnboarding && location == '/register') {
+        return null;
+      }
+      final target = _pendingDeepLink;
+      _pendingDeepLink = null;
+      if (target != null &&
+          target != '/' &&
+          target != '/splash' &&
+          !target.startsWith('/login') &&
+          !target.startsWith('/register')) {
+        return target;
+      }
+      return '/chats';
+    }
     return null;
   }
 }
@@ -43,12 +102,30 @@ final routerNotifierProvider = Provider<AppRouterNotifier>((ref) {
 
 final routerProvider = Provider<GoRouter>((ref) {
   final notifier = ref.watch(routerNotifierProvider);
+  final hasSession = ref.watch(initialSessionProvider);
 
   return GoRouter(
-    initialLocation: '/chats',
+    initialLocation: hasSession ? '/splash' : '/login',
     refreshListenable: notifier,
     redirect: notifier.redirect,
     routes: [
+      GoRoute(
+        path: '/',
+        name: 'root',
+        redirect: (context, state) {
+          final auth = ref.read(authProvider);
+          if (!auth.isInitialized) {
+            final hasSession = ref.read(initialSessionProvider);
+            return hasSession ? '/splash' : '/login';
+          }
+          return auth.isAuthenticated ? '/chats' : '/login';
+        },
+      ),
+      GoRoute(
+        path: '/splash',
+        name: 'splash',
+        builder: (context, state) => const SplashScreen(),
+      ),
       GoRoute(
         path: '/login',
         name: 'login',

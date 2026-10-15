@@ -81,7 +81,7 @@ export class ChatRoom {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
 
-    this.state.acceptWebSocket(server);
+    server.accept();
 
     // Close any existing session for this user
     const existingSession = this.sessions.get(userId);

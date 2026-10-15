@@ -7,9 +7,12 @@
     "test": "cd functions && bunx vitest run",
     "test:watch": "cd functions && bunx vitest",
     "type-check": "cd functions && bunx tsc --noEmit",
-    "db:migrate:local": "bunx wrangler d1 migrations apply flexiyo-db --local",
-    "db:migrate:remote": "bunx wrangler d1 migrations apply flexiyo-db --remote",
-    "deploy": "bunx wrangler deploy",
+    "db:migrate:local": "cd functions && bunx wrangler d1 migrations apply flexiyo-db --local",
+    "db:migrate:remote": "cd functions && bunx wrangler d1 migrations apply flexiyo-db --remote",
+    "deploy": "cd functions && bunx wrangler deploy",
+    "deploy:worker": "cd functions && bunx wrangler deploy",
+    "build:web": "flutter build web --release",
+    "deploy:pages": "bunx wrangler pages deploy build/web --commit-dirty=true",
     "release:android": "node scripts/build-release.js --platform android",
     "release:ios": "node scripts/build-release.js --platform ios",
     "bump:beta": "node scripts/bump.js --beta",
@@ -19,6 +22,8 @@
     "wrangler": "^4.0.0"
   },
   "dependencies": {
-    "drizzle-orm": "^0.45.4"
+    "drizzle-orm": "^0.45.4",
+    "itty-router": "^5.0.18",
+    "zod": "^3.23.8"
   }
 }

@@ -6,11 +6,13 @@ class User {
   const User({
     required this.id,
     required this.username,
+    this.email,
     this.createdAt,
   });
 
   final String id;
   final String username;
+  final String? email;
   final DateTime? createdAt;
 
   factory User.fromJson(Map<String, dynamic> json) {
@@ -27,6 +29,7 @@ class User {
     return User(
       id: json['id'] as String? ?? 'unknown-user',
       username: json['username'] as String? ?? 'Unknown user',
+      email: json['email'] as String?,
       createdAt: parsedCreatedAt,
     );
   }
@@ -34,13 +37,15 @@ class User {
   Map<String, dynamic> toJson() => {
         'id': id,
         'username': username,
+        if (email != null) 'email': email,
         if (createdAt != null) 'created_at': createdAt!.toIso8601String(),
       };
 
-  User copyWith({String? id, String? username, DateTime? createdAt}) {
+  User copyWith({String? id, String? username, String? email, DateTime? createdAt}) {
     return User(
       id: id ?? this.id,
       username: username ?? this.username,
+      email: email ?? this.email,
       createdAt: createdAt ?? this.createdAt,
     );
   }

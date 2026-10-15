@@ -1,6 +1,5 @@
-import 'dart:io';
-
 import 'package:flexiyo/providers/update_provider.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -28,8 +27,10 @@ class _AppUpdateDialogState extends ConsumerState<AppUpdateDialog> {
     }
 
     final isPermissionPrompt = state.isPermissionPrompt;
-    final canInstall =
-        Platform.isAndroid && state.apkUrl != null && state.apkUrl!.isNotEmpty;
+    final canInstall = !kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.android &&
+        state.apkUrl != null &&
+        state.apkUrl!.isNotEmpty;
     final isBusy = state.isBusy;
 
     final title =

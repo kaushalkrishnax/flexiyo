@@ -6,6 +6,9 @@
 .dev.vars
 *.pem
 *.key
+*-firebase-adminsdk-*.json
+google-services.json
+Screenshot_*.png
 
 # Node / Bun
 node_modules/

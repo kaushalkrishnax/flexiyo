@@ -1,36 +1,8 @@
 name = "flexiyo"
-main = "functions/src/index.ts"
-compatibility_date = "2026-10-13"
+compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
-
-[[d1_databases]]
-binding = "DB"
-database_name = "flexiyo-db"
-database_id = "355429d2-d252-4990-89ef-285d9b64e0f5"
-migrations_dir = "functions/migrations"
-
-[[durable_objects.bindings]]
-name = "CHAT_ROOM"
-class_name = "ChatRoom"
-
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["ChatRoom"]
+pages_build_output_dir = "build/web"
 
 [vars]
-CORS_ORIGIN = "https://flexiyo.kaushalkrishnax.workers.dev"
-
-[dev]
-port = 8787
-local_protocol = "http"
-
-[observability.logs]
-enabled = true
-head_sampling_rate = 1
-invocation_logs = true
-persist = true
-
-[observability.traces]
-enabled = true
-head_sampling_rate = 1
-persist = true
+HOST = "flexiyo.pages.dev"
+ENVIRONMENT = "production"

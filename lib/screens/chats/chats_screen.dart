@@ -5,6 +5,8 @@ import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/providers/chat_provider.dart';
 import 'package:flexiyo/providers/signal_crypto_provider.dart';
 import 'package:flexiyo/widgets/avatar.dart';
+import 'package:flexiyo/widgets/app_popup_menu.dart';
+import 'package:flexiyo/widgets/auth_text_field.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -89,98 +91,93 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
               ref.read(chatsProvider.notifier).load(forceRefresh: true),
           child: CustomScrollView(
             slivers: [
-              // --------------------------------------------------------------
               // 1. Header
-              // --------------------------------------------------------------
               SliverToBoxAdapter(
                 child: Padding(
                   padding:
                       const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  child: Row(
-                    children: [
-                      if (context.canPop())
-                        GestureDetector(
-                          onTap: () => context.pop(),
-                          child: const Padding(
-                            padding: EdgeInsets.only(right: 12),
-                            child: Icon(Icons.arrow_back, size: 24),
+                  child: SizedBox(
+                    height: 44,
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        if (context.canPop())
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: () => context.pop(),
+                              child: const Padding(
+                                padding: EdgeInsets.all(4),
+                                child: Icon(Icons.arrow_back, size: 24),
+                              ),
+                            ),
+                          ),
+                        Align(
+                          alignment: Alignment.center,
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () => context.go('/settings'),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  authState.user?.username ?? 'Messages',
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .titleLarge
+                                      ?.copyWith(
+                                        fontWeight: FontWeight.w700,
+                                        fontSize: 20,
+                                        letterSpacing: -0.4,
+                                      ),
+                                ),
+                                const SizedBox(width: 4),
+                                Icon(
+                                  Icons.keyboard_arrow_down_rounded,
+                                  size: 20,
+                                  color: colorScheme.onSurface,
+                                ),
+                                if (hasActivityBadge) ...[
+                                  const SizedBox(width: 6),
+                                  Container(
+                                    width: 8,
+                                    height: 8,
+                                    decoration: const BoxDecoration(
+                                      color: Color(0xFFFF3040),
+                                      shape: BoxShape.circle,
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
                           ),
                         ),
-                      GestureDetector(
-                        onTap: () => context.go('/settings'),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              authState.user?.username ?? 'Messages',
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .titleLarge
-                                  ?.copyWith(
-                                    fontWeight: FontWeight.w700,
-                                    fontSize: 22,
-                                    letterSpacing: -0.5,
-                                  ),
-                            ),
-                            const SizedBox(width: 4),
-                            Icon(
-                              Icons.keyboard_arrow_down_rounded,
-                              size: 20,
-                              color: colorScheme.onSurface,
-                            ),
-                            if (hasActivityBadge) ...[
-                              const SizedBox(width: 6),
-                              Container(
-                                width: 8,
-                                height: 8,
-                                decoration: const BoxDecoration(
-                                  color: Color(0xFFFF3040),
-                                  shape: BoxShape.circle,
-                                ),
-                              ),
-                            ],
-                          ],
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: IconButton(
+                            onPressed: () => context.go('/chats/new'),
+                            icon: const Icon(Icons.edit_square, size: 23),
+                            tooltip: 'New chat',
+                          ),
                         ),
-                      ),
-                      const Spacer(),
-                      IconButton(
-                        onPressed: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Video calling coming soon'),
-                              duration: Duration(milliseconds: 900),
-                              behavior: SnackBarBehavior.floating,
-                            ),
-                          );
-                        },
-                        icon: const Icon(Icons.videocam_outlined, size: 28),
-                        tooltip: 'Video call',
-                      ),
-                      IconButton(
-                        onPressed: () => context.go('/chats/new'),
-                        icon: const Icon(Icons.edit_square, size: 23),
-                        tooltip: 'New chat',
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
               ),
 
-              // --------------------------------------------------------------
-              // 2. Capsule Search Bar (Clean single bar, no inner borders)
-              // --------------------------------------------------------------
+              // 2. Capsule Search Bar
               SliverToBoxAdapter(
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(16, 4, 16, 14),
-                  child: _InstagramSearchBar(
+                  child: _ChatSearchBar(
                     onChanged: (val) => setState(() => _searchQuery = val),
                   ),
                 ),
               ),
 
-              // --------------------------------------------------------------
               // 3. Notes / Stories Rail with good spacing
-              // --------------------------------------------------------------
               if (_searchQuery.isEmpty)
                 SliverToBoxAdapter(
                   child: Padding(
@@ -194,9 +191,7 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                   ),
                 ),
 
-              // --------------------------------------------------------------
               // 4. Filter Tabs: Recents | Personal | Requests
-              // --------------------------------------------------------------
               if (_searchQuery.isEmpty)
                 SliverToBoxAdapter(
                   child: Padding(
@@ -216,7 +211,7 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                               setState(() => _selectedTab = 'personal'),
                         ),
                         const Spacer(),
-                        // Requests tab in Instagram Blue
+                        // Requests tab
                         GestureDetector(
                           onTap: () => context.go('/chats/requests'),
                           child: Row(
@@ -261,9 +256,7 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                   ),
                 ),
 
-              // --------------------------------------------------------------
               // 5. Conversations List
-              // --------------------------------------------------------------
               if (authState.user == null ||
                   (chatsState.isLoading && chatsState.conversations.isEmpty))
                 const SliverFillRemaining(
@@ -297,12 +290,27 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                   delegate: SliverChildBuilderDelegate(
                     (context, index) {
                       final conv = conversations[index];
-                      return _InstagramChatTile(
+                      return _ChatTile(
                         conversation: conv,
                         currentUserId: authState.user?.id,
                         isDark: isDark,
                         colorScheme: colorScheme,
                         onTap: () => context.go('/chats/${conv.id}'),
+                        onLongPress: () {
+                          AppPopupMenu.showInboxModal(
+                            context,
+                            conversation: conv,
+                            onTogglePin: () => ref
+                                .read(chatsProvider.notifier)
+                                .togglePin(conv.id),
+                            onToggleMute: () => ref
+                                .read(chatsProvider.notifier)
+                                .toggleMute(conv.id),
+                            onDelete: () => ref
+                                .read(chatsProvider.notifier)
+                                .removeConversation(conv.id),
+                          );
+                        },
                       );
                     },
                     childCount: conversations.length,
@@ -324,19 +332,17 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
   }
 }
 
-// ---------------------------------------------------------------------------
-// Capsule Search Bar (Clean single bar, no inner bar or double fill)
-// ---------------------------------------------------------------------------
+// Capsule Search Bar
 
-class _InstagramSearchBar extends StatefulWidget {
-  const _InstagramSearchBar({required this.onChanged});
+class _ChatSearchBar extends StatefulWidget {
+  const _ChatSearchBar({required this.onChanged});
   final ValueChanged<String> onChanged;
 
   @override
-  State<_InstagramSearchBar> createState() => _InstagramSearchBarState();
+  State<_ChatSearchBar> createState() => _ChatSearchBarState();
 }
 
-class _InstagramSearchBarState extends State<_InstagramSearchBar> {
+class _ChatSearchBarState extends State<_ChatSearchBar> {
   final _controller = TextEditingController();
 
   @override
@@ -349,46 +355,22 @@ class _InstagramSearchBarState extends State<_InstagramSearchBar> {
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final fill = isDark ? const Color(0xFF262626) : const Color(0xFFEFEFEF);
-    final textColor = isDark ? Colors.white : Colors.black;
 
-    return Container(
+    return AuthTextField(
+      controller: _controller,
+      labelType: AuthTextFieldLabelType.none,
+      hintText: 'Search',
       height: 38,
-      decoration: BoxDecoration(
-        color: fill,
-        borderRadius: BorderRadius.circular(12),
+      boxColor: fill,
+      borderColor: Colors.transparent,
+      borderRadius: BorderRadius.circular(12),
+      leading: const Icon(
+        Icons.search_rounded,
+        color: Color(0xFF8E8E93),
+        size: 20,
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 10),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          const Icon(Icons.search_rounded, color: Color(0xFF8E8E93), size: 20),
-          const SizedBox(width: 8),
-          Expanded(
-            child: TextField(
-              controller: _controller,
-              onChanged: widget.onChanged,
-              style: TextStyle(fontSize: 14, color: textColor),
-              decoration: const InputDecoration(
-                hintText: 'Search',
-                hintStyle: TextStyle(
-                  fontSize: 14,
-                  color: Color(0xFF8E8E93),
-                  fontWeight: FontWeight.w400,
-                ),
-                filled: false,
-                fillColor: Colors.transparent,
-                border: InputBorder.none,
-                enabledBorder: InputBorder.none,
-                focusedBorder: InputBorder.none,
-                disabledBorder: InputBorder.none,
-                errorBorder: InputBorder.none,
-                isDense: true,
-                contentPadding: EdgeInsets.symmetric(vertical: 9),
-              ),
-            ),
-          ),
-          if (_controller.text.isNotEmpty)
-            GestureDetector(
+      trailing: _controller.text.isNotEmpty
+          ? GestureDetector(
               onTap: () {
                 _controller.clear();
                 widget.onChanged('');
@@ -399,16 +381,17 @@ class _InstagramSearchBarState extends State<_InstagramSearchBar> {
                 color: Color(0xFF8E8E93),
                 size: 16,
               ),
-            ),
-        ],
-      ),
+            )
+          : null,
+      onChanged: (val) {
+        widget.onChanged(val);
+        setState(() {});
+      },
     );
   }
 }
 
-// ---------------------------------------------------------------------------
 // Notes / Active Contacts Rail
-// ---------------------------------------------------------------------------
 
 class _NotesRail extends StatelessWidget {
   const _NotesRail({
@@ -582,9 +565,7 @@ class _NotesRail extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
 // Filter Tab item with underline indicator
-// ---------------------------------------------------------------------------
 
 class _FilterTab extends StatelessWidget {
   const _FilterTab({
@@ -635,17 +616,16 @@ class _FilterTab extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Instagram Chat Tile with custom subtitle logic
-// ---------------------------------------------------------------------------
+// Chat Tile with dynamic status subtitle
 
-class _InstagramChatTile extends StatelessWidget {
-  const _InstagramChatTile({
+class _ChatTile extends StatelessWidget {
+  const _ChatTile({
     required this.conversation,
     required this.currentUserId,
     required this.isDark,
     required this.colorScheme,
     required this.onTap,
+    this.onLongPress,
   });
 
   final Conversation conversation;
@@ -653,6 +633,7 @@ class _InstagramChatTile extends StatelessWidget {
   final bool isDark;
   final ColorScheme colorScheme;
   final VoidCallback onTap;
+  final VoidCallback? onLongPress;
 
   String _formatSubtitleTimestamp(DateTime? dt) {
     if (dt == null) return '';
@@ -676,9 +657,7 @@ class _InstagramChatTile extends StatelessWidget {
     final isUnsent = preview == 'Message unsent';
     final timestamp = _formatSubtitleTimestamp(conversation.lastMessageAt);
 
-    // Instagram subtitle wording:
     // If unread: "4+ new messages", "3 new messages", "2 new messages", or "Sent a message"
-    // Never show "Encrypted message"
     final String rawSubtitle;
     if (isRequestSent) {
       rawSubtitle = 'Request sent';
@@ -714,11 +693,12 @@ class _InstagramChatTile extends StatelessWidget {
 
     return InkWell(
       onTap: onTap,
+      onLongPress: onLongPress,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
         child: Row(
           children: [
-            // Avatar with Instagram Story ring if unread
+            // Avatar with colored ring if unread
             if (hasUnread)
               Container(
                 width: 60,
@@ -780,6 +760,22 @@ class _InstagramChatTile extends StatelessWidget {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
+                      if (conversation.isPinned) ...[
+                        const SizedBox(width: 5),
+                        Icon(
+                          Icons.push_pin_rounded,
+                          size: 13,
+                          color: isDark ? Colors.white54 : Colors.black45,
+                        ),
+                      ],
+                      if (conversation.isMuted) ...[
+                        const SizedBox(width: 5),
+                        Icon(
+                          Icons.notifications_off_outlined,
+                          size: 13,
+                          color: isDark ? Colors.white54 : Colors.black45,
+                        ),
+                      ],
                     ],
                   ),
                   const SizedBox(height: 3),
@@ -800,7 +796,7 @@ class _InstagramChatTile extends StatelessWidget {
 
             const SizedBox(width: 8),
 
-            // Trailing: unread blue dot + camera icon (Instagram signature)
+            // Trailing: unread dot + camera action button
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -841,9 +837,7 @@ class _InstagramChatTile extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
 // Empty / Error states
-// ---------------------------------------------------------------------------
 
 class _EmptyState extends StatelessWidget {
   const _EmptyState({required this.onNewChat});

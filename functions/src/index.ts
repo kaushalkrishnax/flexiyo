@@ -28,7 +28,7 @@ const routers = [authRouter, usersRouter, conversationsRouter, messagesRouter, d
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     if (request.method === 'OPTIONS') {
-      return handlePreflight(env);
+      return handlePreflight(env, request);
     }
 
     // WebSocket upgrade: GET /api/ws/:conversationId?token=<jwt>
@@ -56,10 +56,9 @@ export default {
 
       const conv = await env.DB.prepare(
         `SELECT id FROM conversations
-         WHERE id = ? AND (user_a_id = ? OR user_b_id = ?)
-           AND (request_status = 'accepted' OR initiated_by_id = ?)`,
+         WHERE id = ? AND (user_a_id = ? OR user_b_id = ?)`,
       )
-        .bind(conversationId, userId, userId, userId)
+        .bind(conversationId, userId, userId)
         .first<{ id: string }>();
 
       if (!conv) {
@@ -87,13 +86,13 @@ export default {
     try {
       const healthResponse = await router.fetch(request, env, _ctx);
       if (healthResponse) {
-        return withCors(healthResponse, env);
+        return withCors(healthResponse, env, request);
       }
 
       for (const routeHandler of routers) {
         const response = await routeHandler.fetch(request, env, _ctx);
         if (response) {
-          return withCors(response, env);
+          return withCors(response, env, request);
         }
       }
     } catch (error) {
@@ -104,6 +103,7 @@ export default {
           headers: { 'Content-Type': 'application/json' },
         }),
         env,
+        request,
       );
     }
 
@@ -113,6 +113,7 @@ export default {
         headers: { 'Content-Type': 'application/json' },
       }),
       env,
+      request,
     );
   },
 

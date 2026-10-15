@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart';
 
 class LocalDb {
   LocalDb._();
@@ -14,12 +16,18 @@ class LocalDb {
     final current = _db;
     if (current != null) return current;
 
-    final directory = await getApplicationDocumentsDirectory();
-    final path = p.join(directory.path, 'flexiyo.db');
+    final String path;
+    if (kIsWeb) {
+      databaseFactory = databaseFactoryFfiWeb;
+      path = 'flexiyo.db';
+    } else {
+      final directory = await getApplicationDocumentsDirectory();
+      path = p.join(directory.path, 'flexiyo.db');
+    }
 
     final database = await openDatabase(
       path,
-      version: 2,
+      version: 4,
       onCreate: _createSchema,
       onUpgrade: _onUpgrade,
     );
@@ -49,7 +57,8 @@ class LocalDb {
         expires_at INTEGER,
         edited_at INTEGER,
         status TEXT NOT NULL DEFAULT 'sent',
-        reply_to_id TEXT
+        reply_to_id TEXT,
+        reaction TEXT
       );
     ''');
 
@@ -62,7 +71,10 @@ class LocalDb {
         last_message_at INTEGER,
         last_message_preview TEXT,
         unread_count INTEGER NOT NULL DEFAULT 0,
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        is_pinned INTEGER NOT NULL DEFAULT 0,
+        is_muted INTEGER NOT NULL DEFAULT 0,
+        is_restricted INTEGER NOT NULL DEFAULT 0
       );
     ''');
 
@@ -86,6 +98,30 @@ class LocalDb {
       } catch (_) {
         // Column may already exist
       }
+    }
+    if (oldVersion < 3) {
+      try {
+        await database.execute(
+          'ALTER TABLE conversations ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;',
+        );
+      } catch (_) {}
+      try {
+        await database.execute(
+          'ALTER TABLE conversations ADD COLUMN is_muted INTEGER NOT NULL DEFAULT 0;',
+        );
+      } catch (_) {}
+      try {
+        await database.execute(
+          'ALTER TABLE conversations ADD COLUMN is_restricted INTEGER NOT NULL DEFAULT 0;',
+        );
+      } catch (_) {}
+    }
+    if (oldVersion < 4) {
+      try {
+        await database.execute(
+          'ALTER TABLE messages ADD COLUMN reaction TEXT;',
+        );
+      } catch (_) {}
     }
   }
 
@@ -166,6 +202,16 @@ class LocalDb {
     );
   }
 
+  Future<void> updateMessageReaction(String messageId, String? reaction) async {
+    final database = await db;
+    await database.update(
+      'messages',
+      {'reaction': reaction},
+      where: 'id = ?',
+      whereArgs: [messageId],
+    );
+  }
+
   // Conversations helpers
 
   Future<void> upsertConversation(Map<String, dynamic> row) async {
@@ -190,7 +236,37 @@ class LocalDb {
     final database = await db;
     return database.query(
       'conversations',
+      orderBy: 'is_pinned DESC, last_message_at DESC NULLS LAST, created_at DESC',
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> getRestrictedConversations() async {
+    final database = await db;
+    return database.query(
+      'conversations',
+      where: 'is_restricted = 1',
       orderBy: 'last_message_at DESC NULLS LAST, created_at DESC',
+    );
+  }
+
+  Future<void> updateConversationSettings(
+    String conversationId, {
+    bool? isPinned,
+    bool? isMuted,
+    bool? isRestricted,
+  }) async {
+    final database = await db;
+    final updates = <String, dynamic>{};
+    if (isPinned != null) updates['is_pinned'] = isPinned ? 1 : 0;
+    if (isMuted != null) updates['is_muted'] = isMuted ? 1 : 0;
+    if (isRestricted != null) updates['is_restricted'] = isRestricted ? 1 : 0;
+    if (updates.isEmpty) return;
+
+    await database.update(
+      'conversations',
+      updates,
+      where: 'id = ?',
+      whereArgs: [conversationId],
     );
   }
 

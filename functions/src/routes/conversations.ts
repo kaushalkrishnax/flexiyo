@@ -174,6 +174,7 @@ conversationsRouter.get(
     const rows = await env.DB.prepare(
       `SELECT c.id, c.disappearing_timer, c.created_at, c.last_message_at,
          c.request_status, c.initiated_by_id,
+         COALESCE(cus.is_restricted, 0) AS is_restricted,
          (SELECT COUNT(*) FROM message_delivery md
           JOIN messages m ON m.id = md.message_id
           WHERE md.recipient_id = ? AND md.read_at IS NULL
@@ -183,13 +184,16 @@ conversationsRouter.get(
        FROM conversations c
        JOIN users ua ON ua.id = c.user_a_id
        JOIN users ub ON ub.id = c.user_b_id
-       WHERE c.request_status = 'pending'
-         AND c.initiated_by_id != ?
-         AND (c.user_a_id = ? OR c.user_b_id = ?)
+       LEFT JOIN conversation_user_settings cus ON cus.conversation_id = c.id AND cus.user_id = ?
+       WHERE (c.user_a_id = ? OR c.user_b_id = ?)
+         AND (
+           (c.request_status = 'pending' AND c.initiated_by_id != ?)
+           OR COALESCE(cus.is_restricted, 0) = 1
+         )
          AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
        ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC`,
     )
-      .bind(userId, userId, userId, userId, userId, userId)
+      .bind(userId, userId, userId, userId, userId, userId, userId)
       .all<{
         id: string;
         disappearing_timer: number;
@@ -197,6 +201,7 @@ conversationsRouter.get(
         last_message_at: number | null;
         request_status: string;
         initiated_by_id: string;
+        is_restricted: number;
         unread_count: number;
         conversant_username: string;
         conversant_id: string;
@@ -212,8 +217,8 @@ conversationsRouter.get(
       lastMessagePreview: null,
       unreadCount: row.unread_count,
       createdAt: row.created_at,
+      isRestricted: Boolean(row.is_restricted),
     }));
-
 
     return new Response(JSON.stringify(requests), {
       status: 200,
@@ -311,7 +316,7 @@ conversationsRouter.get(
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
 
-    // Fetch all conversations where the user is a participant
+    // Fetch all conversations where the user is a participant and not restricted
     const rows = await env.DB.prepare(
       `SELECT
          c.id,
@@ -322,6 +327,9 @@ conversationsRouter.get(
          c.last_message_at,
          c.request_status,
          c.initiated_by_id,
+         COALESCE(cus.is_pinned, 0) AS is_pinned,
+         COALESCE(cus.is_muted, 0) AS is_muted,
+         COALESCE(cus.is_restricted, 0) AS is_restricted,
          (SELECT COUNT(*) FROM message_delivery md
           JOIN messages m ON m.id = md.message_id
           WHERE md.recipient_id = ? AND md.read_at IS NULL
@@ -331,13 +339,15 @@ conversationsRouter.get(
        FROM conversations c
        JOIN users ua ON ua.id = c.user_a_id
        JOIN users ub ON ub.id = c.user_b_id
+       LEFT JOIN conversation_user_settings cus ON cus.conversation_id = c.id AND cus.user_id = ?
        WHERE (c.user_a_id = ? OR c.user_b_id = ?)
+         AND COALESCE(cus.is_restricted, 0) = 0
          AND (c.request_status = 'accepted'
            OR (c.request_status = 'pending' AND c.initiated_by_id = ?
              AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)))
-       ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC`,
+       ORDER BY COALESCE(cus.is_pinned, 0) DESC, c.last_message_at DESC NULLS LAST, c.created_at DESC`,
     )
-      .bind(userId, userId, userId, userId, userId, userId)
+      .bind(userId, userId, userId, userId, userId, userId, userId)
       .all<{
         id: string;
         user_a_id: string;
@@ -347,6 +357,9 @@ conversationsRouter.get(
         last_message_at: number | null;
         request_status: string;
         initiated_by_id: string | null;
+        is_pinned: number;
+        is_muted: number;
+        is_restricted: number;
         unread_count: number;
         conversant_username: string;
         conversant_id: string;
@@ -362,6 +375,9 @@ conversationsRouter.get(
       lastMessagePreview: null, // E2EE — server never decrypts
       unreadCount: row.unread_count,
       createdAt: row.created_at,
+      isPinned: Boolean(row.is_pinned),
+      isMuted: Boolean(row.is_muted),
+      isRestricted: Boolean(row.is_restricted),
     }));
 
     return new Response(JSON.stringify(conversations), {
@@ -502,6 +518,158 @@ conversationsRouter.patch(
       JSON.stringify({ conversationId: id, disappearingTimer: timer }),
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     );
+  },
+);
+
+const conversationSettingsSchema = z.object({
+  isPinned: z.boolean().optional(),
+  isMuted: z.boolean().optional(),
+  isRestricted: z.boolean().optional(),
+});
+
+conversationsRouter.patch(
+  '/:id/settings',
+  (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
+  async (request: IRequest, env: Env): Promise<Response> => {
+    const authReq = request as unknown as AuthenticatedRequest;
+    const userId = authReq.user.sub;
+    const { id } = request.params as { id: string };
+
+    const conversation = await getConversationForMember(id, userId, env.DB);
+    if (!conversation) {
+      return new Response(JSON.stringify({ error: 'Conversation not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const parsed = conversationSettingsSchema.safeParse(body);
+    if (!parsed.success) {
+      return new Response(JSON.stringify({ error: 'Invalid settings body' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const existing = await env.DB.prepare(
+      'SELECT * FROM conversation_user_settings WHERE conversation_id = ? AND user_id = ?',
+    )
+      .bind(id, userId)
+      .first<{ id: string; is_pinned: number; is_muted: number; is_restricted: number }>();
+
+    const isPinned = parsed.data.isPinned !== undefined
+      ? (parsed.data.isPinned ? 1 : 0)
+      : (existing?.is_pinned ?? 0);
+    const isMuted = parsed.data.isMuted !== undefined
+      ? (parsed.data.isMuted ? 1 : 0)
+      : (existing?.is_muted ?? 0);
+    const isRestricted = parsed.data.isRestricted !== undefined
+      ? (parsed.data.isRestricted ? 1 : 0)
+      : (existing?.is_restricted ?? 0);
+
+    if (existing) {
+      await env.DB.prepare(
+        `UPDATE conversation_user_settings
+         SET is_pinned = ?, is_muted = ?, is_restricted = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+        .bind(isPinned, isMuted, isRestricted, now, existing.id)
+        .run();
+    } else {
+      const settingsId = generateId();
+      await env.DB.prepare(
+        `INSERT INTO conversation_user_settings
+         (id, conversation_id, user_id, is_pinned, is_muted, is_restricted, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(settingsId, id, userId, isPinned, isMuted, isRestricted, now, now)
+        .run();
+    }
+
+    return new Response(
+      JSON.stringify({
+        conversationId: id,
+        isPinned: Boolean(isPinned),
+        isMuted: Boolean(isMuted),
+        isRestricted: Boolean(isRestricted),
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  },
+);
+
+conversationsRouter.post(
+  '/:id/block',
+  (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
+  async (request: IRequest, env: Env): Promise<Response> => {
+    const authReq = request as unknown as AuthenticatedRequest;
+    const userId = authReq.user.sub;
+    const { id } = request.params as { id: string };
+
+    const conversation = await getConversationForMember(id, userId, env.DB);
+    if (!conversation) {
+      return new Response(JSON.stringify({ error: 'Conversation not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const otherUserId = conversation.user_a_id === userId ? conversation.user_b_id : conversation.user_a_id;
+    const blockId = generateId();
+    const now = Math.floor(Date.now() / 1000);
+
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO user_blocks (id, blocker_id, blocked_id, created_at)
+       VALUES (?, ?, ?, ?)`,
+    )
+      .bind(blockId, userId, otherUserId, now)
+      .run();
+
+    return new Response(JSON.stringify({ blocked: true, userId: otherUserId }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  },
+);
+
+conversationsRouter.delete(
+  '/:id/block',
+  (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
+  async (request: IRequest, env: Env): Promise<Response> => {
+    const authReq = request as unknown as AuthenticatedRequest;
+    const userId = authReq.user.sub;
+    const { id } = request.params as { id: string };
+
+    const conversation = await getConversationForMember(id, userId, env.DB);
+    if (!conversation) {
+      return new Response(JSON.stringify({ error: 'Conversation not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const otherUserId = conversation.user_a_id === userId ? conversation.user_b_id : conversation.user_a_id;
+    await env.DB.prepare(
+      'DELETE FROM user_blocks WHERE blocker_id = ? AND blocked_id = ?',
+    )
+      .bind(userId, otherUserId)
+      .run();
+
+    return new Response(JSON.stringify({ blocked: false, userId: otherUserId }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
   },
 );
 

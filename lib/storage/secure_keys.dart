@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 abstract interface class SecureKeyValueStore {
   Future<void> saveString(String key, String value);
@@ -21,6 +22,10 @@ class SecureKeys implements SecureKeyValueStore {
 
   Future<void> saveJwt(String token) async {
     await _storage.write(key: 'flexiyo.jwt', value: token);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('flexiyo.has_session', true);
+    } catch (_) {}
   }
 
   Future<String?> getJwt() async {
@@ -29,6 +34,10 @@ class SecureKeys implements SecureKeyValueStore {
 
   Future<void> clearJwt() async {
     await _storage.delete(key: 'flexiyo.jwt');
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('flexiyo.has_session', false);
+    } catch (_) {}
   }
 
   @override

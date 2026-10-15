@@ -64,4 +64,47 @@ void main() {
     expect(message.createdAt.millisecondsSinceEpoch, 1700000000000);
     expect(message.editedAt?.millisecondsSinceEpoch, 1700000100000);
   });
+
+  test('parses and manipulates message emoji reactions', () {
+    final message = Message.fromJson(const {
+      'id': 'msg-1',
+      'conversationId': 'conv-1',
+      'senderId': 'user-1',
+      'messageType': 'signal',
+      'version': 1,
+      'createdAt': 1700000000,
+      'reaction': '❤️',
+    });
+
+    expect(message.reaction, '❤️');
+    expect(message.toJson()['reaction'], '❤️');
+
+    final updated = message.copyWith(reaction: '🔥');
+    expect(updated.reaction, '🔥');
+
+    final cleared = updated.copyWith(clearReaction: true);
+    expect(cleared.reaction, isNull);
+    expect(cleared.toJson().containsKey('reaction'), isFalse);
+  });
+
+  test('parses conversation pinned, muted, restricted flags', () {
+    final conv = Conversation.fromJson(const {
+      'id': 'conv-1',
+      'other_user_id': 'user-2',
+      'other_username': 'charlie',
+      'created_at': 1700000000,
+      'is_pinned': 1,
+      'is_muted': 1,
+      'is_restricted': 1,
+    });
+
+    expect(conv.isPinned, isTrue);
+    expect(conv.isMuted, isTrue);
+    expect(conv.isRestricted, isTrue);
+
+    final unpinned = conv.copyWith(isPinned: false);
+    expect(unpinned.isPinned, isFalse);
+    expect(unpinned.isMuted, isTrue);
+  });
 }
+

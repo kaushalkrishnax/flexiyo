@@ -277,9 +277,48 @@ class MessageBubble extends StatelessWidget {
                 ),
               ),
             ),
+
+          // Emoji Reaction Pill Badge
+          if (message.reaction != null && message.reaction!.isNotEmpty)
+            Positioned(
+              bottom: -9,
+              right: isMine ? 10 : null,
+              left: !isMine ? 10 : null,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                decoration: BoxDecoration(
+                  color: isDark ? const Color(0xFF262626) : Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: isDark
+                        ? const Color(0xFF383838)
+                        : const Color(0xFFE5E5EA),
+                    width: 1.2,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color:
+                          Colors.black.withValues(alpha: isDark ? 0.35 : 0.12),
+                      blurRadius: 4,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Text(
+                  message.reaction!,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    height: 1.1,
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
+
+    final hasReaction =
+        message.reaction != null && message.reaction!.isNotEmpty;
 
     return _BubbleRow(
       isMine: isMine,
@@ -287,6 +326,7 @@ class MessageBubble extends StatelessWidget {
       otherUsername: otherUsername,
       verticalPad: verticalPad,
       isSelected: isSelected,
+      hasReaction: hasReaction,
       child: bubble,
     );
   }
@@ -303,6 +343,7 @@ class _BubbleRow extends StatelessWidget {
     required this.otherUsername,
     required this.verticalPad,
     required this.isSelected,
+    this.hasReaction = false,
     required this.child,
   });
 
@@ -311,6 +352,7 @@ class _BubbleRow extends StatelessWidget {
   final String otherUsername;
   final double verticalPad;
   final bool isSelected;
+  final bool hasReaction;
   final Widget child;
 
   @override
@@ -322,9 +364,11 @@ class _BubbleRow extends StatelessWidget {
       color: isSelected
           ? cs.primaryContainer.withValues(alpha: 0.25)
           : Colors.transparent,
-      padding: EdgeInsets.symmetric(
-        horizontal: 8,
-        vertical: verticalPad / 2,
+      padding: EdgeInsets.only(
+        left: 8,
+        right: 8,
+        top: verticalPad / 2,
+        bottom: verticalPad / 2 + (hasReaction ? 8.0 : 0.0),
       ),
       child: Row(
         mainAxisAlignment:

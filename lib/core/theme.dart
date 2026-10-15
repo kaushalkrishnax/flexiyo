@@ -1,11 +1,21 @@
 import 'package:flutter/material.dart';
 
 /// Material 3 theme configuration for Flexiyo.
-/// Seed color: deep teal/blue-green
+/// Seed color: Flexiyo Music primary magenta
 class AppTheme {
   AppTheme._();
 
-  static const Color _seedColor = Color(0xFF00695C);
+  static const Color primary = Color(0xFFD11D89);
+  static const Color primaryHover = Color(0xFFE91E9F);
+  static const Color cyan = Color(0xFF00B4D8);
+  static const Color bgDark = Color(0xFF0B0B0C);
+  static const Color bgDarkSurface = Color(0xFF141416);
+  static const Color bgDarkElevated = Color(0xFF18181B);
+  static const Color bgDarkHover = Color(0xFF202024);
+  static const Color borderSubtle = Color(0x1AFFFFFF);
+  static const Color borderDefault = Color(0x33FFFFFF);
+
+  static const Color _seedColor = primary;
 
   static ThemeData get lightTheme {
     final colorScheme = ColorScheme.fromSeed(
@@ -53,6 +63,8 @@ class AppTheme {
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
           minimumSize: const Size.fromHeight(52),
+          backgroundColor: primary,
+          foregroundColor: Colors.white,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
           ),
@@ -75,13 +87,17 @@ class AppTheme {
     final colorScheme = ColorScheme.fromSeed(
       seedColor: _seedColor,
       brightness: Brightness.dark,
+    ).copyWith(
+      surface: bgDarkSurface,
+      onSurface: Colors.white,
     );
     return ThemeData(
       useMaterial3: true,
+      scaffoldBackgroundColor: bgDark,
       colorScheme: colorScheme,
-      appBarTheme: AppBarTheme(
-        backgroundColor: colorScheme.surface,
-        foregroundColor: colorScheme.onSurface,
+      appBarTheme: const AppBarTheme(
+        backgroundColor: bgDark,
+        foregroundColor: Colors.white,
         elevation: 0,
         scrolledUnderElevation: 1,
         centerTitle: false,

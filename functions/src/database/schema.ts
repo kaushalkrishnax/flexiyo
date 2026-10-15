@@ -5,11 +5,17 @@ export const users = sqliteTable(
   {
     id: text('id').primaryKey(),
     username: text('username').notNull().unique(),
-    passwordHash: text('password_hash').notNull(),
+    password: text('password').notNull().default(''),
+    passwordHash: text('password_hash').notNull().default(''),
+    email: text('email'),
+    googleId: text('google_id'),
+    emailVerified: integer('email_verified').notNull().default(0),
     createdAt: integer('created_at').notNull().default(0),
   },
   (table) => ({
     usernameIdx: index('idx_users_username').on(table.username),
+    emailIdx: index('idx_users_email').on(table.email),
+    googleIdIdx: index('idx_users_google_id').on(table.googleId),
   }),
 );
 
@@ -85,10 +91,29 @@ export const messages = sqliteTable(
     expiresAt: integer('expires_at'),
     editedAt: integer('edited_at'),
     systemData: text('system_data'),
+    reaction: text('reaction'),
   },
   (table) => ({
     conversationCreatedIdx: index('idx_messages_conv_created').on(table.conversationId, table.createdAt),
     expiresIdx: index('idx_messages_expires').on(table.expiresAt),
+  }),
+);
+
+export const messageReactions = sqliteTable(
+  'message_reactions',
+  {
+    id: text('id').primaryKey(),
+    messageId: text('message_id').notNull().references(() => messages.id),
+    conversationId: text('conversation_id').notNull().references(() => conversations.id),
+    userId: text('user_id').notNull().references(() => users.id),
+    emoji: text('emoji').notNull(),
+    createdAt: integer('created_at').notNull().default(0),
+    updatedAt: integer('updated_at').notNull().default(0),
+  },
+  (table) => ({
+    messageIdx: index('idx_reactions_message').on(table.messageId),
+    convIdx: index('idx_reactions_conv').on(table.conversationId),
+    userIdx: index('idx_reactions_user').on(table.userId),
   }),
 );
 
@@ -119,6 +144,39 @@ export const messageDelivery = sqliteTable(
   }),
 );
 
+export const conversationUserSettings = sqliteTable(
+  'conversation_user_settings',
+  {
+    id: text('id').primaryKey(),
+    conversationId: text('conversation_id').notNull().references(() => conversations.id),
+    userId: text('user_id').notNull().references(() => users.id),
+    isPinned: integer('is_pinned').notNull().default(0),
+    isMuted: integer('is_muted').notNull().default(0),
+    isRestricted: integer('is_restricted').notNull().default(0),
+    createdAt: integer('created_at').notNull().default(0),
+    updatedAt: integer('updated_at').notNull().default(0),
+  },
+  (table) => ({
+    userIdIdx: index('idx_conv_user_settings_user').on(table.userId),
+    convUserIdx: index('idx_conv_user_settings_conv_user').on(table.conversationId, table.userId),
+  }),
+);
+
+export const userBlocks = sqliteTable(
+  'user_blocks',
+  {
+    id: text('id').primaryKey(),
+    blockerId: text('blocker_id').notNull().references(() => users.id),
+    blockedId: text('blocked_id').notNull().references(() => users.id),
+    createdAt: integer('created_at').notNull().default(0),
+  },
+  (table) => ({
+    blockerIdIdx: index('idx_user_blocks_blocker').on(table.blockerId),
+    blockedIdIdx: index('idx_user_blocks_blocked').on(table.blockedId),
+  }),
+);
+
 export const SCHEMA_SQL = `
 -- generated via drizzle schema for documentation; see /functions/src/database/schema.ts
 `;
+

@@ -66,5 +66,20 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>FlutterDeepLinkingEnabled</key>
+	<true/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.flexiyo.flexiyo</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>flexiyo</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

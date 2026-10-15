@@ -43,7 +43,6 @@
 - [🚀 Quick Start](#-quick-start)
 - [⌨ Commands](#-commands)
 - [⚙ Environment Variables](#-environment-variables)
-- [📁 Repository Structure](#-repository-structure)
 - [☁ Deployment](#-deployment)
 - [🛠 Troubleshooting](#-troubleshooting)
 - [🗺 Roadmap](#-roadmap)
@@ -95,7 +94,7 @@
       <td width="50%" align="center">
       <br/>🎨
       <h3>Modern design</h3>
-      <sub>Instagram and Signal inspired chat with Material 3 theming and adaptive light and dark modes.</sub>
+      <sub>Clean, familiar chat UI with Material 3 theming and adaptive light and dark modes.</sub>
       <br/><br/>
       </td>
     </tr>
@@ -122,7 +121,7 @@
 
 ### Experience
 
-- **Familiar, modern chat UI:** Instagram and Signal inspired layout, Material 3 theming, adaptive light and dark modes, and long-press context menus.
+- **Familiar, modern chat UI:** Clean responsive layout, Material 3 theming, adaptive light and dark modes, and long-press context menus.
 - **One codebase, two platforms:** Flutter for Android and iOS, with Android as the primary test target.
 
 Multi-device sync and media messaging are on the [Roadmap](#-roadmap).

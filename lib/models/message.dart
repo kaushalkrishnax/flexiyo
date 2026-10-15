@@ -7,8 +7,6 @@ enum MessageStatus { sending, sent, delivered, read, failed }
 enum MessageType { signal, prekey, system }
 
 /// An end-to-end encrypted message in a conversation.
-/// Only [encryptedPayload] is persisted; [decryptedText] is derived at display
-/// time and never written to disk.
 @immutable
 class Message {
   const Message({
@@ -27,6 +25,7 @@ class Message {
     this.expiresAt,
     this.editedAt,
     this.replyToId,
+    this.reaction,
   });
 
   final String id;
@@ -47,6 +46,7 @@ class Message {
   final DateTime? editedAt;
   final MessageStatus status;
   final String? replyToId;
+  final String? reaction;
 
   /// Returns true if the message is past its expiry time.
   bool get isExpired => expiresAt != null && DateTime.now().isAfter(expiresAt!);
@@ -118,6 +118,7 @@ class Message {
         orElse: () => MessageStatus.sent,
       ),
       replyToId: replyToId as String?,
+      reaction: json['reaction'] as String?,
     );
   }
 
@@ -137,6 +138,7 @@ class Message {
         if (editedAt != null) 'edited_at': editedAt!.millisecondsSinceEpoch,
         'status': status.name,
         if (replyToId != null) 'reply_to_id': replyToId,
+        if (reaction != null) 'reaction': reaction,
       };
 
   Message copyWith({
@@ -157,6 +159,8 @@ class Message {
     bool clearDecryptedText = false,
     String? replyToId,
     bool clearReplyToId = false,
+    String? reaction,
+    bool clearReaction = false,
   }) {
     return Message(
       id: id ?? this.id,
@@ -175,6 +179,7 @@ class Message {
       editedAt: editedAt ?? this.editedAt,
       status: status ?? this.status,
       replyToId: clearReplyToId ? null : (replyToId ?? this.replyToId),
+      reaction: clearReaction ? null : (reaction ?? this.reaction),
     );
   }
 

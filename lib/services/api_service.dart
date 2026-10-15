@@ -58,11 +58,43 @@ class ApiService {
   Future<Map<String, dynamic>> register({
     required String username,
     required String password,
+    String? email,
   }) async {
     return _post('/api/auth/register', {
       'username': username,
       'password': password,
+      if (email != null && email.isNotEmpty) 'email': email,
     });
+  }
+
+  Future<Map<String, dynamic>> checkUsernameAvailability(String username) async {
+    final data = await _get(
+      '/api/auth/check-username',
+      params: {'username': username},
+    );
+    return data as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> loginWithGoogle({
+    String? idToken,
+    String? email,
+    String? googleId,
+    String? name,
+  }) async {
+    return _post('/api/auth/google', {
+      if (idToken != null) 'idToken': idToken,
+      if (email != null) 'email': email,
+      if (googleId != null) 'googleId': googleId,
+      if (name != null) 'name': name,
+    });
+  }
+
+  Future<Map<String, dynamic>> addOrUpdateEmail(String email) async {
+    return _post('/api/auth/email', {'email': email});
+  }
+
+  Future<Map<String, dynamic>> verifyEmail(String code) async {
+    return _post('/api/auth/email/verify', {'code': code});
   }
 
   Future<void> registerDevice(Map<String, dynamic> keyBundle) async {
@@ -171,6 +203,27 @@ class ApiService {
     });
   }
 
+  Future<void> updateConversationSettings(
+    String conversationId, {
+    bool? isPinned,
+    bool? isMuted,
+    bool? isRestricted,
+  }) async {
+    final body = <String, dynamic>{};
+    if (isPinned != null) body['isPinned'] = isPinned;
+    if (isMuted != null) body['isMuted'] = isMuted;
+    if (isRestricted != null) body['isRestricted'] = isRestricted;
+    await _patch('/api/conversations/$conversationId/settings', body);
+  }
+
+  Future<void> blockConversation(String conversationId) async {
+    await _post('/api/conversations/$conversationId/block', const {});
+  }
+
+  Future<void> unblockConversation(String conversationId) async {
+    await _delete('/api/conversations/$conversationId/block');
+  }
+
   // Messages
 
   Future<List<Message>> getMessages(
@@ -228,6 +281,18 @@ class ApiService {
   /// Unsend (retract for everyone). Only the original sender may call this.
   Future<void> unsendMessage(String conversationId, String messageId) async {
     await _delete('/api/conversations/$conversationId/messages/$messageId');
+  }
+
+  /// React to a message with an emoji (or toggles it off if same emoji is tapped).
+  Future<Map<String, dynamic>> sendReaction(
+    String conversationId,
+    String messageId,
+    String emoji,
+  ) async {
+    return _post(
+      '/api/conversations/$conversationId/messages/$messageId/reaction',
+      {'emoji': emoji},
+    );
   }
 
   /// Delete for the current user only (local tombstone on server).

@@ -54,6 +54,7 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
       final userId = ref.read(authProvider).user?.id;
       if (userId == null) throw StateError('Your account is still loading');
       final requests = await api.getMessageRequests();
+
       final crypto = await ref.read(signalCryptoProvider(userId).future);
       final hydrated = <Conversation>[];
 
@@ -76,7 +77,7 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
             }
           }
         } catch (_) {
-          preview = 'Encrypted message';
+          preview = request.lastMessagePreview ?? 'Encrypted message';
         }
         hydrated.add(request.copyWith(lastMessagePreview: preview));
       }
@@ -115,7 +116,7 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
     final colorScheme = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Message requests'),
+        title: const Text('Message Requests'),
         actions: [
           IconButton(
             onPressed: _loading ? null : _loadRequests,
@@ -142,7 +143,7 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
                   ),
                 )
               : _requests.isEmpty
-                  ? const Center(child: Text('No message requests'))
+                  ? const Center(child: Text('No pending requests'))
                   : RefreshIndicator(
                       onRefresh: _loadRequests,
                       child: ListView.separated(
@@ -152,18 +153,21 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
                         itemBuilder: (context, index) {
                           final request = _requests[index];
                           final busy = _responding.contains(request.id);
+
                           return ListTile(
-                            onTap: () => context.go(
-                              '/chats/${request.id}?request=true',
-                            ),
+                            onTap: () => context
+                                .go('/chats/${request.id}?request=true'),
                             leading: UserAvatar(
                               username: request.otherUsername,
                               radius: 24,
                             ),
                             title: Text(
                               request.otherUsername,
-                              style:
-                                  const TextStyle(fontWeight: FontWeight.w600),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                             ),
                             subtitle: Text(
                               request.lastMessagePreview ?? 'Encrypted message',
@@ -175,15 +179,16 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
                                     width: 20,
                                     height: 20,
                                     child: CircularProgressIndicator(
-                                        strokeWidth: 2),
+                                      strokeWidth: 2,
+                                    ),
                                   )
                                 : Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
                                       IconButton(
                                         tooltip: 'Delete request',
-                                        onPressed: () =>
-                                            _respond(request, accept: false),
+                                        onPressed: () => _respond(request,
+                                            accept: false),
                                         icon: Icon(
                                           Icons.close_rounded,
                                           color: colorScheme.error,
@@ -191,8 +196,8 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
                                       ),
                                       IconButton(
                                         tooltip: 'Accept request',
-                                        onPressed: () =>
-                                            _respond(request, accept: true),
+                                        onPressed: () => _respond(request,
+                                            accept: true),
                                         icon: Icon(
                                           Icons.check_rounded,
                                           color: colorScheme.primary,

@@ -1,0 +1,17 @@
+{
+  "applinks": {
+    "apps": [],
+    "details": [
+      {
+        "appID": "TEAMID.com.flexiyo.flexiyo",
+        "paths": [
+          "/chats",
+          "/chats/*",
+          "/settings",
+          "/login",
+          "/register"
+        ]
+      }
+    ]
+  }
+}

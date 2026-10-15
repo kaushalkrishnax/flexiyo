@@ -24,6 +24,7 @@ class WsService {
 
   bool _connected = false;
   bool get isConnected => _connected;
+  void Function(bool isConnected)? onConnectionChanged;
 
   // Connection management
 
@@ -40,8 +41,13 @@ class WsService {
       final uri = Uri.parse(wsUrl);
       _channel = WebSocketChannel.connect(uri);
       await _channel!.ready;
+      if (_disposed) {
+        await _channel?.sink.close();
+        return;
+      }
       _connected = true;
       _retryCount = 0;
+      onConnectionChanged?.call(true);
 
       _sub = _channel!.stream.listen(
         (data) {
@@ -59,13 +65,17 @@ class WsService {
         cancelOnError: false,
       );
     } catch (_) {
+      if (_disposed) return;
       _connected = false;
+      onConnectionChanged?.call(false);
       _scheduleRetry();
     }
   }
 
   void _onDisconnected() {
+    if (_disposed) return;
     _connected = false;
+    onConnectionChanged?.call(false);
     _sub?.cancel();
     _sub = null;
     _channel = null;
@@ -103,8 +113,11 @@ class WsService {
   Future<void> dispose() async {
     _disposed = true;
     _connected = false;
+    onConnectionChanged = null;
     await _sub?.cancel();
+    _sub = null;
     await _channel?.sink.close();
+    _channel = null;
     await _eventController.close();
   }
 }

@@ -1,4 +1,5 @@
 import 'package:flexiyo/providers/auth_provider.dart';
+import 'package:flexiyo/providers/theme_provider.dart';
 import 'package:flexiyo/providers/update_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -10,6 +11,7 @@ class SettingsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final authState = ref.watch(authProvider);
+    final themeMode = ref.watch(themeModeProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -39,10 +41,17 @@ class SettingsScreen extends ConsumerWidget {
               title: Text('Privacy'),
               subtitle: Text('End-to-end encryption is enabled by the client.'),
             ),
-            const ListTile(
-              leading: Icon(Icons.dark_mode_outlined),
-              title: Text('Appearance'),
-              subtitle: Text('Follow system theme'),
+            ListTile(
+              leading: const Icon(Icons.dark_mode_outlined),
+              title: const Text('Appearance'),
+              subtitle: Text(
+                themeMode == ThemeMode.system
+                    ? 'Follow system theme'
+                    : (themeMode == ThemeMode.light
+                        ? 'Light mode'
+                        : 'Dark mode'),
+              ),
+              onTap: () => _showThemeDialog(context, ref, themeMode),
             ),
             const Divider(),
             ListTile(
@@ -78,6 +87,53 @@ class SettingsScreen extends ConsumerWidget {
           ],
         ),
       ),
+    );
+  }
+
+  void _showThemeDialog(
+    BuildContext context,
+    WidgetRef ref,
+    ThemeMode currentMode,
+  ) {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Choose theme'),
+          content: RadioGroup<ThemeMode>(
+            groupValue: currentMode,
+            onChanged: (mode) {
+              if (mode != null) {
+                ref.read(themeModeProvider.notifier).setThemeMode(mode);
+                Navigator.of(context).pop();
+              }
+            },
+            child: const Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                RadioListTile<ThemeMode>(
+                  title: Text('System default'),
+                  value: ThemeMode.system,
+                ),
+                RadioListTile<ThemeMode>(
+                  title: Text('Light mode'),
+                  value: ThemeMode.light,
+                ),
+                RadioListTile<ThemeMode>(
+                  title: Text('Dark mode'),
+                  value: ThemeMode.dark,
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+          ],
+        );
+      },
     );
   }
 }

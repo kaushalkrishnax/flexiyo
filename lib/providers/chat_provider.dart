@@ -42,6 +42,19 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
   final ApiService _api;
   bool _initialized = false;
 
+  static List<Conversation> _sort(List<Conversation> items) {
+    final list = [...items];
+    list.sort((a, b) {
+      if (a.isPinned != b.isPinned) {
+        return a.isPinned ? -1 : 1;
+      }
+      final aTime = a.lastMessageAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      final bTime = b.lastMessageAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      return bTime.compareTo(aTime);
+    });
+    return list;
+  }
+
   /// Load conversations — first from cache, then refresh from server.
   Future<void> load({bool forceRefresh = false}) async {
     if (state.isLoading) return;
@@ -55,7 +68,7 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
           final rows = await LocalDb.instance.getAllConversations();
           final cached = rows.map((r) => _conversationFromDbRow(r)).toList();
           if (cached.isNotEmpty) {
-            state = state.copyWith(conversations: cached);
+            state = state.copyWith(conversations: _sort(cached));
           }
         } catch (_) {
           // ignore cache errors — server will provide data
@@ -84,16 +97,22 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
               ? conversation.copyWith(
                   lastMessagePreview: cached.lastMessagePreview,
                   unreadCount: cached.unreadCount,
+                  isPinned: cached.isPinned,
+                  isMuted: cached.isMuted,
+                  isRestricted: cached.isRestricted,
                 )
               : conversation;
         }).toList();
+
+        final sorted = _sort(merged);
+
         // Persist to local cache
-        for (final conv in merged) {
+        for (final conv in sorted) {
           await LocalDb.instance.upsertConversation(_conversationToDbRow(conv));
         }
         if (mounted) {
           state = state.copyWith(
-            conversations: merged,
+            conversations: sorted,
             requestCount: reqCount,
             isLoading: false,
           );
@@ -111,13 +130,17 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
 
   Future<void> upsertConversation(Conversation conversation) async {
     final conversations = [...state.conversations]
-      ..removeWhere((item) => item.id == conversation.id)
-      ..insert(0, conversation);
-    state = state.copyWith(conversations: conversations, clearError: true);
+      ..removeWhere((item) => item.id == conversation.id);
+    conversations.insert(0, conversation);
+    state = state.copyWith(
+      conversations: _sort(conversations),
+      clearError: true,
+    );
     await LocalDb.instance
         .upsertConversation(_conversationToDbRow(conversation));
   }
 
+  /// Delete conversation locally only — zero server tracking for privacy.
   Future<void> removeConversation(String conversationId) async {
     state = state.copyWith(
       conversations: state.conversations
@@ -125,6 +148,57 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
           .toList(),
     );
     await LocalDb.instance.deleteConversation(conversationId);
+  }
+
+  Future<void> togglePin(String conversationId) async {
+    final list = [...state.conversations];
+    final idx = list.indexWhere((c) => c.id == conversationId);
+    if (idx == -1) return;
+    final updated = list[idx].copyWith(isPinned: !list[idx].isPinned);
+    list[idx] = updated;
+    state = state.copyWith(conversations: _sort(list));
+    await LocalDb.instance
+        .updateConversationSettings(conversationId, isPinned: updated.isPinned);
+    try {
+      await _api.updateConversationSettings(conversationId,
+          isPinned: updated.isPinned);
+    } catch (_) {}
+  }
+
+  Future<void> toggleMute(String conversationId) async {
+    final list = [...state.conversations];
+    final idx = list.indexWhere((c) => c.id == conversationId);
+    if (idx == -1) return;
+    final updated = list[idx].copyWith(isMuted: !list[idx].isMuted);
+    list[idx] = updated;
+    state = state.copyWith(conversations: list);
+    await LocalDb.instance
+        .updateConversationSettings(conversationId, isMuted: updated.isMuted);
+    try {
+      await _api.updateConversationSettings(conversationId,
+          isMuted: updated.isMuted);
+    } catch (_) {}
+  }
+
+  Future<void> toggleRestrict(String conversationId) async {
+    final list = [...state.conversations];
+    final idx = list.indexWhere((c) => c.id == conversationId);
+    if (idx == -1) return;
+    final newRestricted = !list[idx].isRestricted;
+    final updated = list[idx].copyWith(isRestricted: newRestricted);
+    if (newRestricted) {
+      // Moves out of main inbox into requests section
+      list.removeAt(idx);
+    } else {
+      list[idx] = updated;
+    }
+    state = state.copyWith(conversations: _sort(list));
+    await LocalDb.instance.updateConversationSettings(conversationId,
+        isRestricted: newRestricted);
+    try {
+      await _api.updateConversationSettings(conversationId,
+          isRestricted: newRestricted);
+    } catch (_) {}
   }
 
   // Real-time updates (called from ConversationNotifier / WsService events)
@@ -147,10 +221,8 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
           isIncoming ? list[idx].unreadCount + 1 : list[idx].unreadCount,
     );
 
-    list.removeAt(idx);
-    list.insert(0, updated); // most recent first
-
-    state = state.copyWith(conversations: list);
+    list[idx] = updated;
+    state = state.copyWith(conversations: _sort(list));
 
     // Persist preview to cache
     LocalDb.instance.updateConversationPreview(
@@ -202,6 +274,9 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
           : null,
       lastMessagePreview: row['last_message_preview'] as String?,
       unreadCount: (row['unread_count'] as int?) ?? 0,
+      isPinned: (row['is_pinned'] as int?) == 1,
+      isMuted: (row['is_muted'] as int?) == 1,
+      isRestricted: (row['is_restricted'] as int?) == 1,
     );
   }
 
@@ -216,6 +291,9 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
           'last_message_preview': conv.lastMessagePreview,
         'unread_count': conv.unreadCount,
         'created_at': DateTime.now().millisecondsSinceEpoch,
+        'is_pinned': conv.isPinned ? 1 : 0,
+        'is_muted': conv.isMuted ? 1 : 0,
+        'is_restricted': conv.isRestricted ? 1 : 0,
       };
 }
 

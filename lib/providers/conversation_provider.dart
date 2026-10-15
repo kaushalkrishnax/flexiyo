@@ -104,7 +104,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   WsService? _ws;
   StreamSubscription<Map<String, dynamic>>? _wsSub;
   Timer? _typingTimer;
-  Timer? _requestStatusTimer;
   bool _peerIsTyping = false;
 
   static const _uuid = Uuid();
@@ -126,11 +125,16 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
     // Then load from server
     try {
-      final conversations = await _api.getConversations();
-      final cachedConversation =
-          conversations.where((c) => c.id == conversationId).firstOrNull;
-      final conv =
-          cachedConversation ?? await _api.getConversation(conversationId);
+      Conversation? conv;
+      try {
+        conv = await _api.getConversation(conversationId);
+      } catch (_) {
+        final conversations = await _api.getConversations();
+        conv = conversations.where((c) => c.id == conversationId).firstOrNull;
+      }
+      if (conv == null) {
+        throw Exception('Conversation not found');
+      }
 
       final messages = await _api.getMessages(conversationId, limit: 60)
         ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
@@ -178,9 +182,9 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
           isLoading: false,
         );
 
-        // Mark as read
+        // Mark as read only if accepted
         _ref.read(chatsProvider.notifier).markRead(conversationId);
-        if (conv.requestStatus != 'rejected') {
+        if (conv.requestStatus == 'accepted') {
           unawaited(_api.markConversationRead(conversationId));
         }
       }
@@ -192,22 +196,27 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
     // Connect WebSocket
     await _connectWs();
-    _startLiveSync();
-    if (state.conversation?.requestStatus == 'pending' &&
-        state.conversation?.initiatedById == _myUserId) {
-      _startRequestStatusPolling();
-    }
   }
 
   Future<void> _connectWs() async {
     try {
       final wsUrl = await _api.buildWsUrl(conversationId);
       _ws = WsService(conversationId: conversationId, wsUrl: wsUrl);
+      _ws!.onConnectionChanged = (connected) {
+        if (!mounted) return;
+        if (connected) {
+          _liveSyncTimer?.cancel();
+          _liveSyncTimer = null;
+        } else {
+          _startLiveSync();
+        }
+      };
       await _ws!.connect();
 
       _wsSub = _ws!.events.listen((event) => _handleWsEvent(event));
     } catch (_) {
       // WS connection failure is non-fatal; fall back to HTTP polling if needed
+      if (mounted) _startLiveSync();
     }
   }
 
@@ -235,27 +244,11 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         );
       case 'messages_read':
         _onMessagesRead(event);
+      case 'message_reaction':
+        _onRemoteMessageReaction(event);
       default:
         break;
     }
-  }
-
-  void _startRequestStatusPolling() {
-    _requestStatusTimer?.cancel();
-    _requestStatusTimer =
-        Timer.periodic(const Duration(seconds: 12), (_) async {
-      final current = state.conversation;
-      if (!mounted || current == null || current.requestStatus != 'pending') {
-        _requestStatusTimer?.cancel();
-        return;
-      }
-      try {
-        final latest = await _api.getConversation(conversationId);
-        if (latest.requestStatus != current.requestStatus) {
-          await updateRequestStatus(latest.requestStatus);
-        }
-      } catch (_) {}
-    });
   }
 
   Future<void> updateRequestStatus(String requestStatus) async {
@@ -270,6 +263,10 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
           .read(chatsProvider.notifier)
           .removeConversation(conversationId);
     }
+  }
+
+  void updateConversation(Conversation conversation) {
+    state = state.copyWith(conversation: conversation);
   }
 
   Future<void> _onRemoteNewMessage(Map<String, dynamic> event) async {
@@ -345,7 +342,9 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     _ws?.sendDeliveryAck(msgId);
 
     final isIncoming = senderId != _myUserId;
-    if (isIncoming) unawaited(_api.markConversationRead(conversationId));
+    if (isIncoming && state.conversation?.requestStatus == 'accepted') {
+      unawaited(_api.markConversationRead(conversationId));
+    }
 
     _ref.read(chatsProvider.notifier).onNewMessage(
           conversationId: conversationId,
@@ -444,6 +443,22 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     _ref.read(chatsProvider.notifier).onMessageUnsent(conversationId);
   }
 
+  void _onRemoteMessageReaction(Map<String, dynamic> event) {
+    final msgId = event['messageId'] as String?;
+    if (msgId == null) return;
+    final reaction = event['reaction'] as String? ?? event['emoji'] as String?;
+
+    final updated = state.messages.map((m) {
+      if (m.id == msgId) {
+        return m.copyWith(reaction: reaction, clearReaction: reaction == null);
+      }
+      return m;
+    }).toList();
+
+    state = state.copyWith(messages: updated);
+    LocalDb.instance.updateMessageReaction(msgId, reaction);
+  }
+
   void _onPeerTypingStart() {
     _typingTimer?.cancel();
     if (!_peerIsTyping) {
@@ -463,12 +478,21 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   // User actions
 
   Future<void> sendMessage(String text) async {
-    final conv = state.conversation;
+    var conv = state.conversation;
+    if (conv == null) {
+      try {
+        conv = await _api.getConversation(conversationId);
+        if (mounted) state = state.copyWith(conversation: conv);
+      } catch (_) {}
+    }
     if (text.isEmpty || conv == null || state.isSending) return;
     if (conv.requestStatus == 'pending' && conv.initiatedById != _myUserId) {
       return;
     }
-    if (conv.requestStatus == 'pending' && state.messages.isNotEmpty) return;
+    if (conv.requestStatus == 'pending' &&
+        state.messages.any((m) => !m.isUnsent && m.status != MessageStatus.failed)) {
+      return;
+    }
 
     final msgId = _uuid.v4();
     final now = DateTime.now();
@@ -522,14 +546,37 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         status: MessageStatus.sent,
       );
       _upsertMessage(sent);
-      final row = sent.toJson();
-      await LocalDb.instance.upsertMessage(row);
+      try {
+        final row = sent.toJson();
+        await LocalDb.instance.upsertMessage(row);
+      } catch (_) {}
     } catch (e) {
       _updateMessageStatus(msgId, MessageStatus.failed);
-      if (mounted) state = state.copyWith(error: 'Send failed: $e');
+      final errorStr = e.toString();
+      final userFriendlyError = errorStr.contains('No device registered')
+          ? "Recipient hasn't registered encryption keys yet."
+          : 'Send failed: $e';
+      if (mounted) state = state.copyWith(error: userFriendlyError);
     } finally {
       if (mounted) state = state.copyWith(isSending: false);
     }
+  }
+
+  Future<void> retryFailedMessage(String messageId) async {
+    final msg = state.messages.firstWhere(
+      (m) => m.id == messageId,
+      orElse: () => throw StateError('Message not found'),
+    );
+    if (msg.senderId != _myUserId || msg.status != MessageStatus.failed) return;
+    final text = msg.decryptedText;
+    if (text == null || text.isEmpty) return;
+
+    // Remove the failed optimistic message and re-send
+    state = state.copyWith(
+      messages: state.messages.where((m) => m.id != messageId).toList(),
+      clearError: true,
+    );
+    await sendMessage(text);
   }
 
   Future<void> editMessage(String messageId, String newText) async {
@@ -618,6 +665,44 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     await _deleteMessagesForMe(ids.toList());
   }
 
+  Future<void> reactToMessage(String messageId, String emoji) async {
+    final existing = state.messages.where((m) => m.id == messageId).firstOrNull;
+    if (existing == null) return;
+
+    // Toggle off if same reaction, otherwise set new reaction
+    final newReaction = existing.reaction == emoji ? null : emoji;
+
+    // Optimistic update
+    final updated = state.messages.map((m) {
+      if (m.id == messageId) {
+        return m.copyWith(
+          reaction: newReaction,
+          clearReaction: newReaction == null,
+        );
+      }
+      return m;
+    }).toList();
+    state = state.copyWith(messages: updated);
+    await LocalDb.instance.updateMessageReaction(messageId, newReaction);
+
+    try {
+      await _api.sendReaction(conversationId, messageId, emoji);
+    } catch (_) {
+      // Revert if API fails
+      final reverted = state.messages.map((m) {
+        if (m.id == messageId) {
+          return m.copyWith(
+            reaction: existing.reaction,
+            clearReaction: existing.reaction == null,
+          );
+        }
+        return m;
+      }).toList();
+      state = state.copyWith(messages: reverted);
+      await LocalDb.instance.updateMessageReaction(messageId, existing.reaction);
+    }
+  }
+
   Future<void> _deleteMessagesForMe(List<String> messageIds) async {
     if (messageIds.isEmpty) return;
     final originals = state.messages
@@ -643,25 +728,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       for (final id in ids) {
         await crypto.deleteLocalMessageText(id);
       }
-      await _api.deleteMessagesForMe(conversationId, ids.toList());
-    } catch (error) {
-      for (final original in originals) {
-        _upsertMessage(original);
-        await LocalDb.instance.upsertMessage(original.toJson());
-      }
-      try {
-        final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
-        for (final original in originals) {
-          if (original.decryptedText != null) {
-            await crypto.saveLocalMessageText(
-              original.id,
-              original.decryptedText!,
-            );
-          }
-        }
-      } catch (_) {}
-      if (mounted) state = state.copyWith(error: 'Delete failed: $error');
-    }
+    } catch (_) {}
   }
 
   Future<void> _deleteSecureMessageText(String messageId) async {
@@ -778,9 +845,16 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   Timer? _liveSyncTimer;
 
   void _startLiveSync() {
+    if (!mounted || (_ws?.isConnected ?? false)) return;
     _liveSyncTimer?.cancel();
-    _liveSyncTimer = Timer.periodic(const Duration(seconds: 3), (_) {
-      if (mounted) _syncNewMessages();
+    // Gentle fallback polling only when WebSocket is not connected
+    _liveSyncTimer = Timer.periodic(const Duration(seconds: 25), (_) {
+      if (mounted && !(_ws?.isConnected ?? false)) {
+        _syncNewMessages();
+      } else {
+        _liveSyncTimer?.cancel();
+        _liveSyncTimer = null;
+      }
     });
   }
 
@@ -815,7 +889,10 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
           if (hydrated.senderId != _myUserId) {
             _ws?.sendDeliveryAck(hydrated.id);
-            unawaited(_api.markConversationRead(conversationId));
+            if (state.conversation?.requestStatus == 'accepted' &&
+                !(state.conversation?.isRestricted ?? false)) {
+              unawaited(_api.markConversationRead(conversationId));
+            }
           }
         }
       }
@@ -850,11 +927,12 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
   @override
   void dispose() {
+    _ws?.onConnectionChanged = null;
     _outgoingTypingTimer?.cancel();
     _typingTimer?.cancel();
     _wsSub?.cancel();
-    _requestStatusTimer?.cancel();
     _liveSyncTimer?.cancel();
+    _liveSyncTimer = null;
     _ws?.dispose();
     super.dispose();
   }
@@ -862,7 +940,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
 // Provider family
 
-final conversationProvider = StateNotifierProvider.family<ConversationNotifier,
+final conversationProvider = StateNotifierProvider.autoDispose.family<ConversationNotifier,
     ConversationState, String>(
   (ref, conversationId) {
     final api = ref.watch(apiServiceProvider);

@@ -1,5 +1,6 @@
 import 'package:flexiyo/app/router.dart';
 import 'package:flexiyo/core/theme.dart';
+import 'package:flexiyo/providers/theme_provider.dart';
 import 'package:flexiyo/providers/update_provider.dart';
 import 'package:flexiyo/widgets/app_update_dialog.dart';
 import 'package:flutter/material.dart';
@@ -25,12 +26,14 @@ class _FlexiyoAppState extends ConsumerState<FlexiyoApp> {
   @override
   Widget build(BuildContext context) {
     final router = ref.watch(routerProvider);
+    final themeMode = ref.watch(themeModeProvider);
+
     return MaterialApp.router(
       title: 'Flexiyo',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
       darkTheme: AppTheme.darkTheme,
-      themeMode: ThemeMode.system,
+      themeMode: themeMode,
       routerConfig: router,
       builder: (context, child) {
         return Stack(

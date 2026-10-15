@@ -13,6 +13,9 @@ class Conversation {
     this.unreadCount = 0,
     this.requestStatus = 'accepted',
     this.initiatedById,
+    this.isPinned = false,
+    this.isMuted = false,
+    this.isRestricted = false,
   });
 
   final String id;
@@ -26,6 +29,9 @@ class Conversation {
   final int unreadCount;
   final String requestStatus;
   final String? initiatedById;
+  final bool isPinned;
+  final bool isMuted;
+  final bool isRestricted;
 
   factory Conversation.fromJson(Map<String, dynamic> json) {
     final otherUser =
@@ -48,6 +54,10 @@ class Conversation {
       parsedLastMessageAt = DateTime.fromMillisecondsSinceEpoch(ts.toInt());
     }
 
+    final isPinnedVal = json['is_pinned'] ?? json['isPinned'];
+    final isMutedVal = json['is_muted'] ?? json['isMuted'];
+    final isRestrictedVal = json['is_restricted'] ?? json['isRestricted'];
+
     return Conversation(
       id: json['id'] as String,
       otherUserId: otherUserId,
@@ -65,6 +75,9 @@ class Conversation {
           'accepted',
       initiatedById: json['initiated_by_id'] as String? ??
           json['initiatedById'] as String?,
+      isPinned: isPinnedVal == 1 || isPinnedVal == true,
+      isMuted: isMutedVal == 1 || isMutedVal == true,
+      isRestricted: isRestrictedVal == 1 || isRestrictedVal == true,
     );
   }
 
@@ -80,6 +93,9 @@ class Conversation {
         'unread_count': unreadCount,
         'request_status': requestStatus,
         if (initiatedById != null) 'initiated_by_id': initiatedById,
+        'is_pinned': isPinned ? 1 : 0,
+        'is_muted': isMuted ? 1 : 0,
+        'is_restricted': isRestricted ? 1 : 0,
       };
 
   Conversation copyWith({
@@ -92,6 +108,9 @@ class Conversation {
     int? unreadCount,
     String? requestStatus,
     String? initiatedById,
+    bool? isPinned,
+    bool? isMuted,
+    bool? isRestricted,
   }) {
     return Conversation(
       id: id ?? this.id,
@@ -103,6 +122,9 @@ class Conversation {
       unreadCount: unreadCount ?? this.unreadCount,
       requestStatus: requestStatus ?? this.requestStatus,
       initiatedById: initiatedById ?? this.initiatedById,
+      isPinned: isPinned ?? this.isPinned,
+      isMuted: isMuted ?? this.isMuted,
+      isRestricted: isRestricted ?? this.isRestricted,
     );
   }
 
@@ -114,5 +136,6 @@ class Conversation {
   int get hashCode => id.hashCode;
 
   @override
-  String toString() => 'Conversation(id: $id, otherUsername: $otherUsername)';
+  String toString() =>
+      'Conversation(id: $id, otherUsername: $otherUsername, isPinned: $isPinned, isMuted: $isMuted, isRestricted: $isRestricted)';
 }

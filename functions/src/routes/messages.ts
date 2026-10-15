@@ -2,6 +2,7 @@ import { IRequest, Router } from 'itty-router';
 import { z } from 'zod';
 import type { Env, AuthenticatedRequest, MessageRow } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { resolveRequestDevice } from '../middleware/device.js';
 import { generateId } from '../utils/crypto.js';
 import {
   getMessageEditDenial,
@@ -11,19 +12,38 @@ import { getConversationForMember } from './conversations.js';
 
 export const messagesRouter = Router({ base: '/api/conversations' });
 
-const sendMessageSchema = z.object({
-  id: z.string().uuid('Message ID must be a UUID'),
-  encryptedPayload: z.string().min(1, 'encryptedPayload is required'),
-  messageType: z.enum(['signal', 'prekey']),
-    recipientId: z.string().uuid('recipientId must be a valid UUID'),
-    replyToId: z.string().uuid().nullable().optional(),
+const devicePayloadSchema = z.object({
+  deviceId: z.number().int().positive(),
+  ciphertext: z.string().min(1),
+  messageType: z.enum(['signal', 'prekey']).optional(),
 });
 
-const editMessageSchema = z.object({
-  encryptedPayload: z.string().min(1),
-  version: z.number().int().positive(),
-  messageType: z.enum(['signal', 'prekey']),
-});
+const sendMessageSchema = z
+  .object({
+    id: z.string().uuid('Message ID must be a UUID'),
+    /** Legacy single-ciphertext contract (pre-multi-device clients). */
+    encryptedPayload: z.string().min(1).optional(),
+    /** Multi-device contract: one ciphertext per target device. */
+    payloads: z.array(devicePayloadSchema).min(1).max(10).optional(),
+    messageType: z.enum(['signal', 'prekey']),
+    recipientId: z.string().uuid('recipientId must be a valid UUID'),
+    replyToId: z.string().uuid().nullable().optional(),
+  })
+  .refine((d) => d.encryptedPayload !== undefined || d.payloads !== undefined, {
+    message: 'Either payloads[] (multi-device) or encryptedPayload (legacy) is required',
+  });
+
+const editMessageSchema = z
+  .object({
+    encryptedPayload: z.string().min(1).optional(),
+    payloads: z.array(devicePayloadSchema).min(1).max(10).optional(),
+    version: z.number().int().positive(),
+    messageType: z.enum(['signal', 'prekey']),
+  })
+  .refine((d) => d.encryptedPayload !== undefined || d.payloads !== undefined, {
+    message: 'Either payloads[] or encryptedPayload is required',
+  });
+
 const deleteForMeSchema = z.object({
   messageIds: z.array(z.string().uuid()).min(1).max(100),
 });
@@ -33,8 +53,10 @@ function rowToResponse(row: MessageRow) {
     id: row.id,
     conversationId: row.conversation_id,
     senderId: row.sender_id,
-    encryptedPayload: row.encrypted_payload,
-    messageType: row.message_type,
+    // Prefer the ciphertext addressed to the requesting device; fall back to
+    // the legacy account-level column for pre-multi-device messages.
+    encryptedPayload: row.device_payload ?? row.encrypted_payload,
+    messageType: row.device_message_type ?? row.message_type,
     replyToId: row.reply_to_id,
     version: row.version,
     isUnsent: row.is_unsent === 1,
@@ -42,9 +64,10 @@ function rowToResponse(row: MessageRow) {
     expiresAt: row.expires_at,
     editedAt: row.edited_at,
     systemData: row.system_data,
-    deliveredAt: row.delivered_at,
-    readAt: row.read_at,
+    deliveredAt: row.delivered_at ?? null,
+    readAt: row.read_at ?? null,
     reaction: row.reaction ?? null,
+    isSentByMe: row.is_sent_by_me === 1,
   };
 }
 
@@ -71,6 +94,11 @@ messagesRouter.get(
 
     const now = Math.floor(Date.now() / 1000);
 
+    // Resolve the requesting device so its per-device ciphertext is returned.
+    // Legacy clients without the header fall back to messages.encrypted_payload.
+    const requestDevice = await resolveRequestDevice(request, env, userId);
+    const myDeviceId = requestDevice?.id ?? -1;
+
     let rows: D1Result<MessageRow>;
 
     if (before) {
@@ -90,11 +118,18 @@ messagesRouter.get(
 
       rows = await env.DB.prepare(
           `SELECT m.*,
-            (SELECT delivered_at FROM message_delivery WHERE message_id = m.id LIMIT 1) AS delivered_at,
-            (SELECT read_at FROM message_delivery WHERE message_id = m.id LIMIT 1) AS read_at
+            (SELECT MIN(delivered_at) FROM message_deliveries
+             WHERE message_id = m.id) AS delivered_at,
+            (SELECT MAX(read_at) FROM message_deliveries
+             WHERE message_id = m.id) AS read_at,
+            myd.payload AS device_payload,
+            myd.message_type AS device_message_type,
+            (m.sender_id = ?) AS is_sent_by_me
          FROM messages m
          LEFT JOIN local_deletions ld
            ON ld.message_id = m.id AND ld.user_id = ?
+         LEFT JOIN message_deliveries myd
+           ON myd.message_id = m.id AND myd.recipient_device_id = ?
          WHERE m.conversation_id = ?
            AND ld.id IS NULL
            AND (m.expires_at IS NULL OR m.expires_at > ?)
@@ -102,23 +137,30 @@ messagesRouter.get(
          ORDER BY m.created_at DESC
          LIMIT ?`,
       )
-        .bind(userId, conversationId, now, cursorMsg.created_at, limit)
+        .bind(userId, userId, myDeviceId, conversationId, now, cursorMsg.created_at, limit)
         .all<MessageRow>();
     } else {
       rows = await env.DB.prepare(
           `SELECT m.*,
-            (SELECT delivered_at FROM message_delivery WHERE message_id = m.id LIMIT 1) AS delivered_at,
-            (SELECT read_at FROM message_delivery WHERE message_id = m.id LIMIT 1) AS read_at
+            (SELECT MIN(delivered_at) FROM message_deliveries
+             WHERE message_id = m.id) AS delivered_at,
+            (SELECT MAX(read_at) FROM message_deliveries
+             WHERE message_id = m.id) AS read_at,
+            myd.payload AS device_payload,
+            myd.message_type AS device_message_type,
+            (m.sender_id = ?) AS is_sent_by_me
          FROM messages m
          LEFT JOIN local_deletions ld
            ON ld.message_id = m.id AND ld.user_id = ?
+         LEFT JOIN message_deliveries myd
+           ON myd.message_id = m.id AND myd.recipient_device_id = ?
          WHERE m.conversation_id = ?
            AND ld.id IS NULL
            AND (m.expires_at IS NULL OR m.expires_at > ?)
          ORDER BY m.created_at DESC
          LIMIT ?`,
       )
-        .bind(userId, conversationId, now, limit)
+        .bind(userId, userId, myDeviceId, conversationId, now, limit)
         .all<MessageRow>();
     }
 
@@ -195,7 +237,8 @@ messagesRouter.post(
       );
     }
 
-    const { id: msgId, encryptedPayload, messageType, recipientId, replyToId } = parsed.data;
+    const { id: msgId, payloads, messageType, recipientId, replyToId } = parsed.data;
+    const legacyPayload = parsed.data.encryptedPayload;
 
     // Validate recipientId is the other conversation participant
     const expectedRecipient =
@@ -213,6 +256,78 @@ messagesRouter.post(
     const expiresAt =
       conv.disappearing_timer > 0 ? now + conv.disappearing_timer : null;
 
+    // --- Device fan-out resolution -----------------------------------------
+    const senderDevice = await resolveRequestDevice(request, env, userId);
+    const recipientDeviceIds = (
+      await env.DB.prepare(
+        `SELECT id FROM devices WHERE user_id = ? AND status = 'active' ORDER BY id`,
+      )
+        .bind(recipientId)
+        .all<{ id: number }>()
+    ).results.map((r) => r.id);
+    const senderOtherDeviceIds = senderDevice
+      ? (
+          await env.DB.prepare(
+            `SELECT id FROM devices WHERE user_id = ? AND status = 'active' AND id <> ?
+             ORDER BY id`,
+          )
+            .bind(userId, senderDevice.id)
+            .all<{ id: number }>()
+        ).results.map((r) => r.id)
+      : [];
+
+    let deliveryRows: Array<{
+      deviceId: number;
+      payload: string | null;
+      messageType: string;
+    }> = [];
+    let storedLegacyPayload: string | null = null;
+
+    if (payloads && payloads.length > 0) {
+      const allowed = new Set([...recipientDeviceIds, ...senderOtherDeviceIds]);
+      const addressed = new Set(payloads.map((p) => p.deviceId));
+      for (const p of payloads) {
+        if (!allowed.has(p.deviceId)) {
+          return new Response(
+            JSON.stringify({ error: 'unknown_device', deviceId: p.deviceId }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+      }
+      // Every ACTIVE recipient device must receive a ciphertext, otherwise
+      // sibling devices could never read the message.
+      const missing = recipientDeviceIds.filter((id) => !addressed.has(id));
+      if (missing.length > 0) {
+        return new Response(
+          JSON.stringify({
+            error: 'missing_device_payloads',
+            missingDeviceIds: missing,
+          }),
+          { status: 409, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      deliveryRows = payloads.map((p) => ({
+        deviceId: p.deviceId,
+        payload: p.ciphertext,
+        messageType: p.messageType ?? messageType,
+      }));
+      // Degraded path: recipient has no registered devices, so there was
+      // nothing to address — keep a ciphertext on the message row so it is
+      // not lost (matches pre-multi-device behaviour).
+      if (recipientDeviceIds.length === 0) {
+        storedLegacyPayload = legacyPayload ?? payloads[0].ciphertext;
+      }
+    } else {
+      // Legacy contract: one ciphertext replicated to every recipient device
+      // and mirrored to messages.encrypted_payload for old readers.
+      storedLegacyPayload = legacyPayload ?? null;
+      deliveryRows = recipientDeviceIds.map((id) => ({
+        deviceId: id,
+        payload: storedLegacyPayload,
+        messageType,
+      }));
+    }
+
     // sender_id always from JWT — never from client body
     await env.DB.prepare(
       `INSERT INTO messages
@@ -220,7 +335,16 @@ messagesRouter.post(
          version, is_unsent, created_at, expires_at)
        VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`,
     )
-      .bind(msgId, conversationId, userId, encryptedPayload, messageType, replyToId ?? null, now, expiresAt)
+      .bind(
+        msgId,
+        conversationId,
+        userId,
+        storedLegacyPayload,
+        messageType,
+        replyToId ?? null,
+        now,
+        expiresAt,
+      )
       .run();
 
     // Update last_message_at on conversation
@@ -230,13 +354,27 @@ messagesRouter.post(
       .bind(now, conversationId)
       .run();
 
-    // Insert delivery row for recipient
-    await env.DB.prepare(
-      `INSERT OR IGNORE INTO message_delivery (id, message_id, recipient_id)
-       VALUES (?, ?, ?)`,
-    )
-      .bind(generateId(), msgId, recipientId)
-      .run();
+    // Per-device delivery ledger. UNIQUE(message_id, recipient_device_id)
+    // makes fan-out retries idempotent under retries/races.
+    if (deliveryRows.length > 0) {
+      const deliveryStmts = deliveryRows.map((row) =>
+        env.DB.prepare(
+          `INSERT OR IGNORE INTO message_deliveries
+             (id, message_id, recipient_device_id, sender_device_id, payload,
+              message_type, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          generateId(),
+          msgId,
+          row.deviceId,
+          senderDevice?.id ?? null,
+          row.payload,
+          row.messageType,
+          now,
+        ),
+      );
+      await env.DB.batch(deliveryStmts);
+    }
 
     // Broadcast new_message event via Durable Object
     const doId = env.CHAT_ROOM.idFromName(conversationId);
@@ -250,7 +388,14 @@ messagesRouter.post(
           messageId: msgId,
           conversationId,
           senderId: userId,
-          encryptedPayload,
+          senderDeviceId: senderDevice?.id ?? null,
+          recipients: [userId, recipientId],
+          payloads: deliveryRows.map((r) => ({
+            deviceId: r.deviceId,
+            payload: r.payload,
+            messageType: r.messageType,
+          })),
+          encryptedPayload: storedLegacyPayload,
           messageType,
           replyToId: replyToId ?? null,
           createdAt: now,
@@ -264,7 +409,7 @@ messagesRouter.post(
         id: msgId,
         conversationId,
         senderId: userId,
-        encryptedPayload,
+        encryptedPayload: storedLegacyPayload,
         messageType,
         replyToId: replyToId ?? null,
         version: 1,
@@ -275,6 +420,7 @@ messagesRouter.post(
         systemData: null,
         deliveredAt: null,
         readAt: null,
+        isSentByMe: true,
       }),
       { status: 201, headers: { 'Content-Type': 'application/json' } },
     );
@@ -366,11 +512,13 @@ messagesRouter.post(
       });
     }
 
+    // Restriction is per-user: only the CALLER's own flag may suppress their
+    // read receipts (the other participant's flag must not leak into this).
     const restrictedCheck = await env.DB.prepare(
       `SELECT 1 FROM conversation_user_settings
-       WHERE conversation_id = ? AND is_restricted = 1 LIMIT 1`,
+       WHERE conversation_id = ? AND user_id = ? AND is_restricted = 1 LIMIT 1`,
     )
-      .bind(conversationId)
+      .bind(conversationId, userId)
       .first();
 
     if (restrictedCheck) {
@@ -381,10 +529,13 @@ messagesRouter.post(
     }
 
     const now = Math.floor(Date.now() / 1000);
+    // Reading is an ACCOUNT-level action: mark read (and implied delivered)
+    // for every device of this account so sibling devices stay in sync.
     await env.DB.prepare(
-      `UPDATE message_delivery
+      `UPDATE message_deliveries
        SET delivered_at = COALESCE(delivered_at, ?), read_at = ?
-       WHERE recipient_id = ? AND read_at IS NULL
+       WHERE read_at IS NULL
+         AND recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)
          AND message_id IN (
            SELECT id FROM messages
            WHERE conversation_id = ? AND sender_id != ? AND is_unsent = 0
@@ -492,7 +643,8 @@ messagesRouter.patch(
       );
     }
 
-    const { encryptedPayload, version, messageType } = parsed.data;
+    const { payloads, version, messageType } = parsed.data;
+    const legacyPayload = parsed.data.encryptedPayload;
 
     // Optimistic concurrency: reject if stored version != client's version
     if (message.version !== version) {
@@ -507,13 +659,85 @@ messagesRouter.patch(
 
     const newVersion = version + 1;
 
+    // --- Per-device edit fan-out -------------------------------------------
+    const recipientId = conv.user_a_id === userId ? conv.user_b_id : conv.user_a_id;
+    const recipientDeviceIds = (
+      await env.DB.prepare(
+        `SELECT id FROM devices WHERE user_id = ? AND status = 'active' ORDER BY id`,
+      )
+        .bind(recipientId)
+        .all<{ id: number }>()
+    ).results.map((r) => r.id);
+
+    let storedLegacyPayload: string | null = legacyPayload ?? null;
+    let editRows: Array<{ deviceId: number; payload: string | null; messageType: string }> = [];
+
+    if (payloads && payloads.length > 0) {
+      const addressed = new Set(payloads.map((p) => p.deviceId));
+      const missing = recipientDeviceIds.filter((id) => !addressed.has(id));
+      if (missing.length > 0) {
+        return new Response(
+          JSON.stringify({ error: 'missing_device_payloads', missingDeviceIds: missing }),
+          { status: 409, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      for (const p of payloads) {
+        const belongs =
+          recipientDeviceIds.includes(p.deviceId) ||
+          (await env.DB.prepare(
+            `SELECT 1 AS ok FROM devices
+             WHERE id = ? AND user_id = ? AND status = 'active'`,
+          )
+            .bind(p.deviceId, userId)
+            .first());
+        if (!belongs) {
+          return new Response(
+            JSON.stringify({ error: 'unknown_device', deviceId: p.deviceId }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+      }
+      storedLegacyPayload = null; // per-device ciphertexts are now authoritative
+      editRows = payloads.map((p) => ({
+        deviceId: p.deviceId,
+        payload: p.ciphertext,
+        messageType: p.messageType ?? messageType,
+      }));
+    } else {
+      // Legacy single-payload edit: refresh every delivery row.
+      editRows = recipientDeviceIds.map((id) => ({
+        deviceId: id,
+        payload: storedLegacyPayload,
+        messageType,
+      }));
+    }
+
     await env.DB.prepare(
       `UPDATE messages
        SET encrypted_payload = ?, message_type = ?, version = ?, edited_at = ?
        WHERE id = ?`,
     )
-      .bind(encryptedPayload, messageType, newVersion, now, messageId)
+      .bind(storedLegacyPayload, messageType, newVersion, now, messageId)
       .run();
+
+    if (legacyPayload !== undefined) {
+      // Legacy edit path: one ciphertext overwrites all device rows.
+      await env.DB.prepare(
+        `UPDATE message_deliveries SET payload = ?, message_type = ?
+         WHERE message_id = ?`,
+      )
+        .bind(legacyPayload, messageType, messageId)
+        .run();
+    } else if (editRows.length > 0) {
+      await env.DB.batch(
+        editRows.map((row) =>
+          env.DB.prepare(
+            `UPDATE message_deliveries SET payload = ?, message_type = ?
+             WHERE message_id = ? AND recipient_device_id = ?`,
+          ).bind(row.payload, row.messageType, messageId, row.deviceId),
+        ),
+      );
+    }
 
     // Broadcast to Durable Object
     const doId = env.CHAT_ROOM.idFromName(conversationId);
@@ -526,7 +750,13 @@ messagesRouter.patch(
           type: 'message_edited',
           messageId,
           conversationId,
-          encryptedPayload,
+          recipients: [userId, recipientId],
+          payloads: editRows.map((r) => ({
+            deviceId: r.deviceId,
+            payload: r.payload,
+            messageType: r.messageType,
+          })),
+          encryptedPayload: storedLegacyPayload,
           messageType,
           version: newVersion,
           editedAt: now,
@@ -539,10 +769,11 @@ messagesRouter.patch(
         id: messageId,
         conversationId,
         senderId: userId,
-        encryptedPayload,
+        encryptedPayload: storedLegacyPayload,
         messageType,
         version: newVersion,
         editedAt: now,
+        isSentByMe: true,
       }),
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     );
@@ -616,9 +847,14 @@ messagesRouter.delete(
       });
     }
 
-    // Mark as unsent; clear encrypted_payload to prevent payload leakage
+    // Mark as unsent; clear payload everywhere to prevent payload leakage
     await env.DB.prepare(
       `UPDATE messages SET is_unsent = 1, encrypted_payload = NULL WHERE id = ?`,
+    )
+      .bind(messageId)
+      .run();
+    await env.DB.prepare(
+      `UPDATE message_deliveries SET payload = NULL WHERE message_id = ?`,
     )
       .bind(messageId)
       .run();

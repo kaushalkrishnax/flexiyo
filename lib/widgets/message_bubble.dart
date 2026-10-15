@@ -15,12 +15,16 @@ class MessageBubble extends StatelessWidget {
     this.onLongPress,
     this.onLongPressStart,
     this.onTap,
+    this.onReactionTap,
     required this.isSelected,
     this.replyToMessage,
   });
 
   /// The message to display.
   final Message message;
+
+  /// Optional callback when reaction pill is tapped.
+  final VoidCallback? onReactionTap;
 
   /// Whether this message was sent by the current user.
   final bool isMine;

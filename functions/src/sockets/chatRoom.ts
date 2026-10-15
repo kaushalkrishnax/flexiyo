@@ -5,11 +5,10 @@ import type { JWTPayload } from '../types.js';
 export class ChatRoom {
   private sessions: Map<string, WebSocket> = new Map();
 
-  private state: DurableObjectState;
   private env: Env;
 
-  constructor(state: DurableObjectState, env: Env) {
-    this.state = state;
+  constructor(_state: DurableObjectState, env: Env) {
+    void _state;
     this.env = env;
   }
 
@@ -186,9 +185,11 @@ export class ChatRoom {
       if (!message || message.sender_id === recipientId) return;
 
       await this.env.DB.prepare(
-        `UPDATE message_delivery
+        `UPDATE message_deliveries
          SET delivered_at = COALESCE(delivered_at, ?)
-         WHERE message_id = ? AND recipient_id = ?`,
+         WHERE message_id = ?
+           AND recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)
+           AND delivered_at IS NULL`,
       )
         .bind(now, messageId, recipientId)
         .run();

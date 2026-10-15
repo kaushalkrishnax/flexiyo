@@ -36,23 +36,31 @@ export interface TokenRevocationRow {
 }
 
 export interface DeviceRow {
-  id: string;
+  /** Server-assigned Signal device id (integer, never reused). */
+  id: number;
   user_id: string;
-  device_id: string;
+  /** Stable client-generated installation identifier. */
+  installation_id: string;
+  legacy_device_id: string | null;
   registration_id: number;
   identity_key: string;
   signed_pre_key_id: number;
   signed_pre_key_public: string;
   signed_pre_key_signature: string;
+  status: DeviceStatus;
   created_at: number;
+  last_seen_at: number | null;
+  revoked_at: number | null;
 }
+
+export type DeviceStatus = 'active' | 'pending' | 'disabled' | 'logged_out';
 
 export interface PreKeyRow {
   id: string;
-  user_id: string;
+  device_id: number;
   key_id: number;
   public_key: string;
-  used: number;
+  consumed_at: number | null;
   created_at: number;
 }
 
@@ -71,6 +79,7 @@ export interface MessageRow {
   id: string;
   conversation_id: string;
   sender_id: string;
+  /** Legacy single-payload column. NULL for new multi-device sends. */
   encrypted_payload: string | null;
   message_type: string;
   reply_to_id: string | null;
@@ -80,9 +89,17 @@ export interface MessageRow {
   expires_at: number | null;
   edited_at: number | null;
   system_data: string | null;
-  delivered_at: number | null;
-  read_at: number | null;
   reaction?: string | null;
+  // Computed by list queries (not stored columns):
+  /** Aggregated across the recipient account's devices (MIN of non-NULL). */
+  delivered_at?: number | null;
+  /** Aggregated across the recipient account's devices (MAX of non-NULL). */
+  read_at?: number | null;
+  /** Ciphertext addressed to the requesting device (message_deliveries.payload). */
+  device_payload?: string | null;
+  /** message_type of the requesting device's delivery row. */
+  device_message_type?: string | null;
+  is_sent_by_me?: number;
 }
 
 export interface MessageReactionRow {
@@ -95,12 +112,21 @@ export interface MessageReactionRow {
   updated_at: number;
 }
 
-export interface MessageDeliveryRow {
+/**
+ * Authoritative per-device delivery record: one row per (message, recipient
+ * device) holding the ciphertext addressed to that device plus its delivery
+ * and read state. Sender-side UI aggregates these across devices.
+ */
+export interface MessageDeliveriesRow {
   id: string;
   message_id: string;
-  recipient_id: string;
+  recipient_device_id: number;
+  sender_device_id: number | null;
+  payload: string | null;
+  message_type: string;
   delivered_at: number | null;
   read_at: number | null;
+  created_at: number;
 }
 
 export interface LocalDeletionRow {
@@ -128,22 +154,46 @@ export interface DisappearingTimerBody {
   timer: 0 | 30 | 60 | 300 | 3600 | 86400 | 604800;
 }
 
+/** One ciphertext addressed to a single device (Signal address = userId+deviceId). */
+export interface DevicePayload {
+  /** Server-assigned integer device id from the target account's bundle list. */
+  deviceId: number;
+  ciphertext: string;
+  /** Session kind used for this specific device; falls back to the message-level type. */
+  messageType?: 'signal' | 'prekey';
+}
+
 export interface SendMessageBody {
   id: string;
-  encryptedPayload: string;
+  /**
+   * Preferred multi-device contract: one ciphertext per target device
+   * (recipient devices MUST all be covered; sender's other devices SHOULD be
+   * covered so they can render sent history).
+   */
+  payloads?: DevicePayload[];
+  /**
+   * Legacy single-payload contract (pre-multi-device clients). Accepted and
+   * replicated to every recipient device's delivery row; the column
+   * messages.encrypted_payload is also populated for old readers.
+   */
+  encryptedPayload?: string;
   messageType: 'signal' | 'prekey';
   recipientId: string;
   replyToId?: string | null;
 }
 
 export interface EditMessageBody {
-  encryptedPayload: string;
+  /** Legacy single-payload edit (old clients). */
+  encryptedPayload?: string;
+  /** Preferred per-device edit payloads. */
+  payloads?: DevicePayload[];
   messageType: 'signal' | 'prekey';
   version: number;
 }
 
 export interface RegisterDeviceBody {
-  deviceId: string;
+  /** Stable installation id generated once per client install. */
+  installationId: string;
   identityKey: string;
   registrationId: number;
   signedPreKey: {
@@ -152,6 +202,8 @@ export interface RegisterDeviceBody {
     signature: string;
   };
   preKeys: Array<{ keyId: number; publicKey: string }>;
+  /** Register as 'pending' instead of 'active' (default true → active). */
+  activate?: boolean;
 }
 
 export interface ReplenishPreKeysBody {
@@ -206,7 +258,17 @@ export type DOEvent =
       messageId: string;
       conversationId: string;
       senderId: string;
-      encryptedPayload: string;
+      senderDeviceId: number | null;
+      /** User ids that should be notified (both participants). */
+      recipients: string[];
+      /**
+       * Per-device ciphertexts. Online sessions whose device id matches an
+       * entry receive it as `encryptedPayload`; other sessions receive a
+       * metadata-only event (encryptedPayload: null) and must refetch.
+       */
+      payloads: Array<{ deviceId: number; payload: string | null; messageType: string }>;
+      /** Legacy single payload for pre-multi-device clients / unattributed sends. */
+      encryptedPayload: string | null;
       messageType: string;
       replyToId: string | null;
       createdAt: number;
@@ -216,7 +278,9 @@ export type DOEvent =
       type: 'message_edited';
       messageId: string;
       conversationId: string;
-      encryptedPayload: string;
+      recipients: string[];
+      payloads: Array<{ deviceId: number; payload: string | null; messageType: string }>;
+      encryptedPayload: string | null;
       messageType: string;
       version: number;
       editedAt: number;
@@ -239,6 +303,7 @@ export type DOEvent =
       type: 'message_delivered';
       messageId: string;
       recipientId: string;
+      recipientDeviceId: number;
       deliveredAt: number;
     }
   | {

@@ -175,10 +175,12 @@ conversationsRouter.get(
       `SELECT c.id, c.disappearing_timer, c.created_at, c.last_message_at,
          c.request_status, c.initiated_by_id,
          COALESCE(cus.is_restricted, 0) AS is_restricted,
-         (SELECT COUNT(*) FROM message_delivery md
+         (SELECT COUNT(*) FROM message_deliveries md
           JOIN messages m ON m.id = md.message_id
-          WHERE md.recipient_id = ? AND md.read_at IS NULL
-            AND m.conversation_id = c.id AND m.is_unsent = 0) AS unread_count,
+          WHERE md.recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)
+            AND md.read_at IS NULL
+            AND m.conversation_id = c.id AND m.is_unsent = 0
+            AND m.sender_id != ?) AS unread_count,
          CASE WHEN c.user_a_id = ? THEN ub.username ELSE ua.username END AS conversant_username,
          CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END AS conversant_id
        FROM conversations c
@@ -193,7 +195,16 @@ conversationsRouter.get(
          AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
        ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC`,
     )
-      .bind(userId, userId, userId, userId, userId, userId, userId)
+      .bind(
+        userId,
+        userId,
+        userId,
+        userId,
+        userId,
+        userId,
+        userId,
+        userId,
+      )
       .all<{
         id: string;
         disappearing_timer: number;
@@ -330,10 +341,12 @@ conversationsRouter.get(
          COALESCE(cus.is_pinned, 0) AS is_pinned,
          COALESCE(cus.is_muted, 0) AS is_muted,
          COALESCE(cus.is_restricted, 0) AS is_restricted,
-         (SELECT COUNT(*) FROM message_delivery md
+         (SELECT COUNT(*) FROM message_deliveries md
           JOIN messages m ON m.id = md.message_id
-          WHERE md.recipient_id = ? AND md.read_at IS NULL
-            AND m.conversation_id = c.id AND m.is_unsent = 0) AS unread_count,
+          WHERE md.recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)
+            AND md.read_at IS NULL
+            AND m.conversation_id = c.id AND m.is_unsent = 0
+            AND m.sender_id != ?) AS unread_count,
          CASE WHEN c.user_a_id = ? THEN ub.username ELSE ua.username END AS conversant_username,
          CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END AS conversant_id
        FROM conversations c
@@ -347,7 +360,16 @@ conversationsRouter.get(
              AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)))
        ORDER BY COALESCE(cus.is_pinned, 0) DESC, c.last_message_at DESC NULLS LAST, c.created_at DESC`,
     )
-      .bind(userId, userId, userId, userId, userId, userId, userId)
+      .bind(
+        userId,
+        userId,
+        userId,
+        userId,
+        userId,
+        userId,
+        userId,
+        userId,
+      )
       .all<{
         id: string;
         user_a_id: string;
@@ -409,12 +431,14 @@ conversationsRouter.get(
       .first<{ id: string; username: string }>();
 
     const unread = await env.DB.prepare(
-      `SELECT COUNT(*) AS unread_count FROM message_delivery md
+      `SELECT COUNT(*) AS unread_count FROM message_deliveries md
        JOIN messages m ON m.id = md.message_id
-       WHERE md.recipient_id = ? AND md.read_at IS NULL
-         AND m.conversation_id = ? AND m.is_unsent = 0`,
+       WHERE md.recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)
+         AND md.read_at IS NULL
+         AND m.conversation_id = ? AND m.is_unsent = 0
+         AND m.sender_id != ?`,
     )
-      .bind(userId, id)
+      .bind(userId, id, userId)
       .first<{ unread_count: number }>();
 
     return new Response(

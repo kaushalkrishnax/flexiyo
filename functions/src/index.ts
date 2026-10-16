@@ -3,10 +3,12 @@ import { authRouter } from './routes/auth.js';
 import { conversationsRouter } from './routes/conversations.js';
 import { devicesRouter } from './routes/devices.js';
 import { messagesRouter } from './routes/messages.js';
+import { mediaRouter } from './routes/media.js';
 import { usersRouter } from './routes/users.js';
 import { updateRouter } from './routes/update.js';
 import { handlePreflight, withCors } from './middleware/cors.js';
 import { cleanExpiredMessages } from './services/expiry.js';
+import { purgeExpiredMedia } from './services/media_purge.js';
 import { ChatRoom } from './sockets/chatRoom.js';
 import type { Env } from './types.js';
 import { verifyJWT } from './utils/jwt.js';
@@ -23,7 +25,7 @@ router.get('/api/health', () => new Response(JSON.stringify({ ok: true }), {
   headers: { 'Content-Type': 'application/json' },
 }));
 
-const routers = [authRouter, usersRouter, conversationsRouter, messagesRouter, devicesRouter, updateRouter];
+const routers = [authRouter, usersRouter, conversationsRouter, messagesRouter, mediaRouter, devicesRouter, updateRouter];
 
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
@@ -44,7 +46,16 @@ export default {
         });
       }
 
-      const payload = await verifyJWT(token, env.JWT_SECRET);
+      let payload: Record<string, unknown> | null;
+      try {
+        payload = await verifyJWT(token, env.JWT_SECRET);
+      } catch (error) {
+        console.error('WebSocket authentication failed', error);
+        return new Response(JSON.stringify({ error: 'Invalid or expired token' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
       const userId = payload?.['sub'];
       if (typeof userId !== 'string') {
         return new Response(JSON.stringify({ error: 'Invalid or expired token' }), {
@@ -124,6 +135,7 @@ export default {
 
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
     await cleanExpiredMessages(env.DB);
+    await purgeExpiredMedia(env.DB, env);
   },
 };
 

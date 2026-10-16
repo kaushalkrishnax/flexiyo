@@ -1,3 +1,4 @@
+import 'package:flexiyo/services/media_service.dart';
 import 'package:flutter/foundation.dart';
 
 /// Status of a message in the send pipeline.
@@ -47,6 +48,19 @@ class Message {
   final MessageStatus status;
   final String? replyToId;
   final String? reaction;
+
+  /// Parses the inline media envelope (`FYMEDIA:...`) from the decrypted text.
+  MediaRef? get mediaRef {
+    if (decryptedText == null ||
+        !decryptedText!.startsWith(MediaRef.mediaPrefix)) {
+      return null;
+    }
+    return MediaRef.parse(decryptedText!);
+  }
+
+  /// True when this message carries a camera/gallery image or voice note.
+  bool get isMedia => mediaRef != null;
+  bool get isVoiceMedia => mediaRef?.kind == MediaKind.voice;
 
   /// Returns true if the message is past its expiry time.
   bool get isExpired => expiresAt != null && DateTime.now().isAfter(expiresAt!);

@@ -60,7 +60,9 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     return list;
   }
 
-  /// Load conversations — first from cache, then refresh from server.
+  /// Load conversations — first from cache, then one single-seed refresh.
+  /// After seeding, all updates are pushed over the inbox WebSocket; there is
+  /// no polling anywhere in the app.
   Future<void> load({bool forceRefresh = false}) async {
     if (state.isLoading) return;
 
@@ -69,7 +71,7 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     if (!_initialized || forceRefresh) {
       state = state.copyWith(isLoading: true, clearError: true);
 
-      // Show cached conversations immediately while network request runs
+      // Show cached conversations immediately while the seed request runs
       if (!_initialized) {
         try {
           final rows = await LocalDb.instance.getAllConversations();
@@ -84,17 +86,13 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
       }
 
       try {
-        final remote = await _api.getConversations();
-        int reqCount = state.requestCount;
-        try {
-          final reqs = await _api.getMessageRequests();
-          reqCount = reqs.length;
-        } catch (_) {}
+        // One round trip: accepted chats + request queue together.
+        final seed = await _api.getConversationSeed();
 
         final cachedById = {
           for (final conv in state.conversations) conv.id: conv
         };
-        final merged = remote.map((conversation) {
+        Conversation merge(Conversation conversation) {
           final cached = cachedById[conversation.id];
           final sameLatestMessage = cached?.lastMessageAt != null &&
               conversation.lastMessageAt != null &&
@@ -109,8 +107,9 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
                   isRestricted: cached.isRestricted,
                 )
               : conversation;
-        }).toList();
+        }
 
+        final merged = seed.conversations.map(merge).toList();
         final sorted = _sort(merged);
 
         // Persist to local cache
@@ -120,7 +119,7 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
         if (mounted) {
           state = state.copyWith(
             conversations: sorted,
-            requestCount: reqCount,
+            requestCount: seed.requests.length,
             isLoading: false,
           );
         }
@@ -148,21 +147,115 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     }
   }
 
-  void _handleInboxEvent(Map<String, dynamic> event) {
-    if (event['type'] != 'inbox_message') return;
-    if (event['isIncoming'] != true) return;
-    final conversationId = event['conversationId'] as String?;
-    final preview = event['preview'] as String?;
-    final timestamp = event['lastMessageAt'];
-    if (conversationId == null || preview == null) return;
-    final seconds = timestamp is int ? timestamp : 0;
-    onNewMessage(
-      conversationId: conversationId,
-      preview: preview,
-      lastMessageAt: DateTime.fromMillisecondsSinceEpoch(seconds * 1000),
-      isIncoming: event['isIncoming'] == true,
-    );
+  bool _resyncing = false;
+
+  /// Silent repair for state that arrived partially over the socket (e.g. a
+  /// brand-new conversation tile). Consumes one seed call, rate-guarded.
+  Future<void> _resync() async {
+    if (_resyncing) return;
+    _resyncing = true;
+    try {
+      final seed = await _api.getConversationSeed();
+      if (!mounted) return;
+      final merged = _sort(seed.conversations);
+      state = state.copyWith(
+        conversations: merged,
+        requestCount: seed.requests.length,
+        clearError: true,
+      );
+      for (final conv in merged) {
+        await LocalDb.instance.upsertConversation(_conversationToDbRow(conv));
+      }
+    } catch (_) {
+      // Socket-event repair is best-effort; pull-to-refresh is the fallback.
+    } finally {
+      _resyncing = false;
+    }
   }
+
+  void _handleInboxEvent(Map<String, dynamic> event) {
+    switch (event['type'] as String?) {
+      case 'inbox_message':
+        if (event['isIncoming'] != true) return;
+        final conversationId = event['conversationId'] as String?;
+        if (conversationId == null) return;
+
+        final exists = state.conversations.any((c) => c.id == conversationId);
+        if (!exists) {
+          // Brand-new chat pushed over the socket while this client had no
+          // tile for it — repair the list once (never a poll loop).
+          unawaited(_resync());
+          return;
+        }
+
+        final seconds =
+            event['lastMessageAt'] is int ? event['lastMessageAt'] as int : 0;
+        onNewMessage(
+          conversationId: conversationId,
+          preview: event['preview'] as String? ?? 'New message',
+          lastMessageAt: DateTime.fromMillisecondsSinceEpoch(seconds * 1000),
+          isIncoming: true,
+        );
+        break;
+      case 'conversation_upsert':
+        final payload = event['conversation'];
+        if (payload is Map<String, dynamic>) {
+          final conversation = Conversation.fromJson(payload);
+          // Events are already user-scoped (built per recipient inbox), so a
+          // pending tile addressed to me as the RECIPIENT feeds the requests
+          // badge; pending tiles for my own outgoing chats stay in the list.
+          if (conversation.requestStatus == 'pending' &&
+              conversation.initiatedById != null &&
+              conversation.initiatedById == conversation.otherUserId) {
+            final remaining = state.conversations
+                .where((c) => c.id != conversation.id)
+                .toList();
+            state = state.copyWith(
+              conversations: remaining,
+              requestCount: state.requestCount + 1,
+              clearError: true,
+            );
+            LocalDb.instance
+                .upsertConversation(_conversationToDbRow(conversation));
+          } else {
+            final wasInRequests = state.requestCount > 0 &&
+                !state.conversations.any((c) => c.id == conversation.id);
+            unawaited(upsertConversation(conversation));
+            if (wasInRequests &&
+                (conversation.requestStatus == 'accepted' ||
+                    conversation.requestStatus == 'rejected')) {
+              // A request from the queue transformed into (or vanished from)
+              // the main list — drain one from the badge.
+              state = state.copyWith(
+                requestCount: (state.requestCount - 1).clamp(0, 1 << 30),
+              );
+            }
+          }
+        }
+        break;
+      case 'conversation_removed':
+        final conversationId = event['conversationId'] as String?;
+        if (conversationId != null) {
+          unawaited(removeConversation(conversationId));
+        }
+        break;
+      case 'unread_reset':
+        final conversationId = event['conversationId'] as String?;
+        if (conversationId != null) {
+          markRead(conversationId);
+        }
+        break;
+      case 'message_unsent':
+        final conversationId = event['conversationId'] as String?;
+        if (conversationId != null) {
+          onMessageUnsent(conversationId);
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
 
   Future<void> disconnect() async {
     await _inboxWsSub?.cancel();

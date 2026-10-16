@@ -17,8 +17,20 @@ class_name = "ChatRoom"
 tag = "v1"
 new_sqlite_classes = ["ChatRoom"]
 
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "flexiyo-media"
+
+[triggers]
+crons = ["0 * * * *"]
+
 [vars]
 CORS_ORIGIN = "https://flexiyo.pages.dev"
+# Media TTL in days; daily per-user byte caps; max single upload size.
+MEDIA_TTL_DAYS = "14"
+MEDIA_DAILY_UPLOAD_BYTES = "52428800"
+MEDIA_DAILY_DOWNLOAD_BYTES = "209715200"
+MEDIA_MAX_UPLOAD_BYTES = "26214400"
 
 [dev]
 port = 8787

@@ -2,6 +2,7 @@ import 'package:flexiyo/models/user.dart';
 import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/providers/chat_provider.dart';
 import 'package:flexiyo/services/api_service.dart';
+import 'package:flexiyo/widgets/skeleton.dart';
 import 'package:flexiyo/widgets/auth_text_field.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -104,7 +105,7 @@ class _NewChatScreenState extends ConsumerState<NewChatScreen> {
                 ),
               Expanded(
                 child: _searching
-                    ? const Center(child: CircularProgressIndicator())
+                    ? const ChatsSkeletonList(itemCount: 4)
                     : _results.isEmpty
                         ? const Center(
                             child: Text(

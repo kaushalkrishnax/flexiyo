@@ -6,6 +6,7 @@ import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/providers/chat_provider.dart';
 import 'package:flexiyo/providers/signal_crypto_provider.dart';
 import 'package:flexiyo/services/api_service.dart';
+import 'package:flexiyo/services/media_service.dart';
 import 'package:flexiyo/services/ws_service.dart';
 import 'package:flexiyo/storage/local_db.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -336,9 +337,11 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       unawaited(_api.markConversationRead(conversationId));
     }
 
+    // Media envelopes render as a friendly label in the chat list.
+    final mediaPreview = MediaRef.parse(plaintext);
     _ref.read(chatsProvider.notifier).onNewMessage(
           conversationId: conversationId,
-          preview: plaintext,
+          preview: mediaPreview?.label ?? plaintext,
           lastMessageAt: createdAt,
           isIncoming: isIncoming,
         );
@@ -504,10 +507,11 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     _upsertMessage(optimistic);
     state = state.copyWith(clearReplyTo: true);
 
-    // Update chats list preview
+    // Update chats list preview.
+    final optimisticPreview = MediaRef.parse(text);
     _ref.read(chatsProvider.notifier).onNewMessage(
           conversationId: conversationId,
-          preview: text,
+          preview: optimisticPreview?.label ?? text,
           lastMessageAt: now,
         );
 

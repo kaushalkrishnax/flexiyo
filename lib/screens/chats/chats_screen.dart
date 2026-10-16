@@ -7,10 +7,12 @@ import 'package:flexiyo/providers/signal_crypto_provider.dart';
 import 'package:flexiyo/widgets/avatar.dart';
 import 'package:flexiyo/widgets/app_popup_menu.dart';
 import 'package:flexiyo/widgets/auth_text_field.dart';
+import 'package:flexiyo/widgets/skeleton.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
+import 'package:icon_plus/icon_plus.dart';
 
 class ChatsScreen extends ConsumerStatefulWidget {
   const ChatsScreen({super.key});
@@ -148,7 +150,7 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                           alignment: Alignment.centerRight,
                           child: IconButton(
                             onPressed: () => context.go('/chats/new'),
-                            icon: const Icon(Icons.edit_square, size: 23),
+                            icon: const Icon(IonIcons.create, size: 23),
                             tooltip: 'New chat',
                           ),
                         ),
@@ -245,8 +247,10 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
 
               if (authState.user == null ||
                   (chatsState.isLoading && chatsState.conversations.isEmpty))
+                // Skeleton mirrors the exact tile layout — no spinners.
                 const SliverFillRemaining(
-                  child: Center(child: CircularProgressIndicator()),
+                  hasScrollBody: false,
+                  child: ChatsSkeletonList(),
                 )
               else if (chatsState.error != null &&
                   chatsState.conversations.isEmpty)
@@ -280,7 +284,6 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                         conversation: conv,
                         currentUserId: authState.user?.id,
                         isDark: isDark,
-                        colorScheme: colorScheme,
                         onTap: () => context.go('/chats/${conv.id}'),
                         onLongPress: () {
                           AppPopupMenu.showInboxModal(
@@ -603,7 +606,6 @@ class _ChatTile extends StatelessWidget {
     required this.conversation,
     required this.currentUserId,
     required this.isDark,
-    required this.colorScheme,
     required this.onTap,
     this.onLongPress,
   });
@@ -611,7 +613,6 @@ class _ChatTile extends StatelessWidget {
   final Conversation conversation;
   final String? currentUserId;
   final bool isDark;
-  final ColorScheme colorScheme;
   final VoidCallback onTap;
   final VoidCallback? onLongPress;
 
@@ -662,13 +663,12 @@ class _ChatTile extends StatelessWidget {
       rawSubtitle = 'New conversation';
     }
 
-    final fullSubtitle =
-        timestamp.isNotEmpty ? '$rawSubtitle · $timestamp' : rawSubtitle;
-
+    // Preview carries the readable content; the timestamp trails dimmed.
     final nameColor = isDark ? Colors.white : Colors.black;
-    final subtitleColor = hasUnread
+    final previewColor = hasUnread
         ? (isDark ? Colors.white : Colors.black87)
-        : (isDark ? Colors.white54 : Colors.black54);
+        : Colors.grey[500]!;
+    final timingColor = Colors.grey[500]!;
 
     return InkWell(
       onTap: onTap,
@@ -677,43 +677,10 @@ class _ChatTile extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
         child: Row(
           children: [
-            if (hasUnread)
-              Container(
-                width: 60,
-                height: 60,
-                decoration: const BoxDecoration(
-                  shape: BoxShape.circle,
-                  gradient: SweepGradient(
-                    colors: [
-                      Color(0xFF833AB4),
-                      Color(0xFFFD1D1D),
-                      Color(0xFFFCAF45),
-                      Color(0xFF833AB4),
-                    ],
-                  ),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.all(2.5),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: colorScheme.surface,
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.all(2),
-                      child: UserAvatar(
-                        username: conversation.otherUsername,
-                        radius: 25,
-                      ),
-                    ),
-                  ),
-                ),
-              )
-            else
-              UserAvatar(
-                username: conversation.otherUsername,
-                radius: 28,
-              ),
+            UserAvatar(
+              username: conversation.otherUsername,
+              radius: 28,
+            ),
 
             const SizedBox(width: 14),
 
@@ -728,84 +695,70 @@ class _ChatTile extends StatelessWidget {
                         child: Text(
                           conversation.otherUsername,
                           style: TextStyle(
-                            fontSize: 15,
-                            fontWeight:
-                                hasUnread ? FontWeight.w700 : FontWeight.w600,
+                            fontSize: 17,
+                            fontWeight: FontWeight.w700,
                             color: nameColor,
                           ),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                      if (conversation.isPinned) ...[
-                        const SizedBox(width: 5),
-                        Icon(
-                          Icons.push_pin_rounded,
-                          size: 13,
-                          color: isDark ? Colors.white54 : Colors.black45,
-                        ),
-                      ],
-                      if (conversation.isMuted) ...[
-                        const SizedBox(width: 5),
-                        Icon(
-                          Icons.notifications_off_outlined,
-                          size: 13,
-                          color: isDark ? Colors.white54 : Colors.black45,
-                        ),
-                      ],
                     ],
                   ),
-                  const SizedBox(height: 3),
-                  Text(
-                    fullSubtitle,
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: subtitleColor,
-                      fontWeight: hasUnread ? FontWeight.w600 : FontWeight.w400,
-                      fontStyle: isUnsent ? FontStyle.italic : FontStyle.normal,
-                    ),
+                  const SizedBox(height: 4),
+                  RichText(
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
+                    text: TextSpan(
+                      style: DefaultTextStyle.of(context).style,
+                      children: [
+                        TextSpan(
+                          text: rawSubtitle,
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: previewColor,
+                            fontWeight:
+                                hasUnread ? FontWeight.w600 : FontWeight.w400,
+                            fontStyle:
+                                isUnsent ? FontStyle.italic : FontStyle.normal,
+                          ),
+                        ),
+                        if (timestamp.isNotEmpty)
+                          TextSpan(
+                            text: '  ·  $timestamp',
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: timingColor,
+                              fontWeight: FontWeight.w400,
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
                 ],
               ),
             ),
 
-            const SizedBox(width: 8),
+            if (conversation.isMuted) ...[
+              const SizedBox(width: 6),
+              Icon(
+                Icons.notifications_off_outlined,
+                size: 13,
+                color: isDark ? Colors.white54 : Colors.black45,
+              ),
+            ],
 
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (hasUnread) ...[
-                  Container(
-                    width: 8,
-                    height: 8,
-                    decoration: const BoxDecoration(
-                      color: Color(0xFF0095F6),
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                ],
-                IconButton(
-                  onPressed: () {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Camera feature coming soon'),
-                        duration: Duration(milliseconds: 900),
-                        behavior: SnackBarBehavior.floating,
-                      ),
-                    );
-                  },
-                  icon: Icon(
-                    Icons.camera_alt_outlined,
-                    color: isDark ? Colors.white54 : Colors.black45,
-                    size: 24,
-                  ),
-                  tooltip: 'Camera',
+            if (hasUnread) ...[
+              const SizedBox(width: 8),
+              Container(
+                width: 8,
+                height: 8,
+                decoration: const BoxDecoration(
+                  color: Color(0xFF1572DB),
+                  shape: BoxShape.circle,
                 ),
-              ],
-            ),
+              ),
+            ],
           ],
         ),
       ),

@@ -110,9 +110,15 @@ class ApiService {
   }
 
   Future<KeyBundle> fetchKeyBundle(String userId) async {
-    final data = await _get('/api/devices/$userId/key-bundle');
+    // Backend serves the bundle at /key-bundle/:userId — the device id segment
+    // comes AFTER the resource, not before.
+    final data = await _get('/api/devices/key-bundle/$userId');
     return KeyBundle.fromJson(data as Map<String, dynamic>);
   }
+
+  /// Announce server-side that this client is exiting; server revokes the
+  /// session so the JWT dies with it. Local storage cleanup happens in auth.
+  Future<void> logout() => _post('/api/auth/logout', const {});
 
   Future<User> getMe() async {
     final data = await _get('/api/auth/me');
@@ -143,8 +149,25 @@ class ApiService {
         .toList();
   }
 
-  Future<List<Conversation>> getConversations() async {
-    final data = await _get('/api/conversations');
+  /// One-seed REST payload: accepted chats + request queue in a single call.
+  /// Used once after login; after that the inbox WebSocket keeps state fresh.
+  Future<({List<Conversation> conversations, List<Conversation> requests})>
+      getConversationSeed() async {
+    final data = await _get('/api/conversations', params: {'scope': 'all'});
+    final map = data as Map<String, dynamic>;
+    final conversations = ((map['conversations'] as List<dynamic>?) ?? const [])
+        .map((c) => Conversation.fromJson(c as Map<String, dynamic>))
+        .toList();
+    final requests = ((map['requests'] as List<dynamic>?) ?? const [])
+        .map((r) => Conversation.fromJson(r as Map<String, dynamic>))
+        .toList();
+    return (conversations: conversations, requests: requests);
+  }
+
+  /// Inboxes list and message requests are the same projection — one merged
+  /// endpoint. scope: 'inbox' (default) | 'requests' | 'all'.
+  Future<List<Conversation>> getConversations({String scope = 'inbox'}) async {
+    final data = await _get('/api/conversations', params: {'scope': scope});
     final List<dynamic> rawList = data is List
         ? data
         : data['conversations'] as List<dynamic>? ?? const [];
@@ -154,7 +177,7 @@ class ApiService {
   }
 
   Future<List<Conversation>> getMessageRequests() async {
-    final data = await _get('/api/conversations/requests');
+    final data = await _get('/api/conversations', params: {'scope': 'requests'});
     final List<dynamic> rows =
         data is List ? data : data['requests'] as List<dynamic>? ?? const [];
     return rows
@@ -162,11 +185,13 @@ class ApiService {
         .toList();
   }
 
+  /// Accepts or rejects an incoming message request.
+  /// Merged endpoint: PATCH /api/conversations/:id/request
   Future<void> respondToMessageRequest(
     String conversationId, {
     required bool accept,
   }) async {
-    await _patch('/api/conversations/requests/$conversationId', {
+    await _patch('/api/conversations/$conversationId/request', {
       'action': accept ? 'accept' : 'reject',
     });
   }

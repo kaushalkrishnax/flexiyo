@@ -3,8 +3,50 @@ export interface Env {
   CHAT_ROOM: DurableObjectNamespace;
   JWT_SECRET: string;
   CORS_ORIGIN: string;
+  /// Brevo transactional email API key (https://developers.brevo.com). Never
+  /// puts credentials in the client bundle — the Worker calls Brevo directly.
+  BREVO_API_KEY?: string;
+  /// Brevo sender identity. Falls back to Brevo account default sender.
+  BREVO_SENDER_EMAIL?: string;
+  BREVO_SENDER_NAME?: string;
   /// GitHub `owner/repo` publishing release APKs. Defaults to kaushalkrishnax/flexiyo.
   UPDATE_GITHUB_REPO?: string;
+  /** R2 bucket binding for media delivery (server-side only). */
+  MEDIA: R2Bucket;
+  /** Media object TTL in days. Default 14. */
+  MEDIA_TTL_DAYS?: string;
+  /** Per-user daily upload cap in bytes (soft quota). */
+  MEDIA_DAILY_UPLOAD_BYTES?: string;
+  /** Per-user daily download cap in bytes (soft quota). */
+  MEDIA_DAILY_DOWNLOAD_BYTES?: string;
+  /** Max bytes for a single media upload. Default 25 MB. */
+  MEDIA_MAX_UPLOAD_BYTES?: string;
+}
+
+export type ViewPolicy = 'once' | 'twice' | 'unlimited';
+
+export interface MediaRow {
+  id: string;
+  conversation_id: string;
+  sender_id: string;
+  kind: 'image' | 'voice';
+  view_policy: ViewPolicy;
+  size: number;
+  mime_type: string | null;
+  r2_key: string;
+  duration_ms: number | null;
+  created_at: number;
+  expires_at: number;
+  consumed: number;
+}
+
+export interface MediaDto {
+  id: string;
+  kind: 'image' | 'voice';
+  viewPolicy: ViewPolicy;
+  size: number;
+  durationMs: number | null;
+  createdAt: number;
 }
 
 export interface JWTPayload {

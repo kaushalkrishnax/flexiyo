@@ -5,7 +5,7 @@ description: Secure one-to-one encrypted messaging powered by the Signal Protoco
 
 publish_to: 'none'
 
-version: 1.0.1+10001
+version: 1.0.2-beta.1+10002
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -46,11 +46,20 @@ dependencies:
   uuid: ^4.4.0
   shared_preferences: ^2.2.3
 
+  # Media: camera, gallery, voice notes, AES-GCM for media encryption
+  camera: ^0.12.1
+  photo_manager: ^3.12.0
+  record: ^7.1.2
+  audioplayers: ^6.0.0
+  cryptography: ^2.8.0
+
   # Icons
   cupertino_icons: ^1.0.8
+  icon_plus: ^0.1.1
   google_sign_in: ^6.2.1
   sqflite_common_ffi_web: ^1.2.0
   sqflite_common_ffi: ^2.4.4
+  google_fonts: ^8.2.1
 
 dev_dependencies:
   flutter_test:

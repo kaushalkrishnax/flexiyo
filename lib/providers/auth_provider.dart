@@ -193,6 +193,13 @@ class AuthController extends StateNotifier<AuthState> {
   }
 
   Future<void> logout() async {
+    // Tell the server first while the JWT is still attached, so the session
+    // (and its revocation record) actually dies — not just the local copy.
+    try {
+      await ApiService(_secureKeys).logout();
+    } catch (_) {
+      // Network failures must never trap the user inside their own account.
+    }
     await _secureKeys.clearJwt();
     await _ref?.read(chatsProvider.notifier).reset();
     await LocalDb.instance.clearAllUserData();

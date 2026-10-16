@@ -7,6 +7,13 @@ import type {
 } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { generateId } from '../utils/crypto.js';
+import {
+  listConversations,
+  mapConversationRow,
+  parseScope,
+} from '../services/conversationList.js';
+import { notifyInboxes } from '../services/inbox.js';
+import type { InboxEvent } from '../services/inbox.js';
 
 export const conversationsRouter = Router({ base: '/api/conversations' });
 
@@ -148,6 +155,35 @@ conversationsRouter.post(
       .bind(userId)
       .first<{ username: string }>();
 
+    // Both chat lists get a "Request sent"/"Message request" tile instantly —
+    // no client-side refresh required. List is repairable via REST seed.
+    try {
+      const requesterName = myUser?.username ?? 'unknown';
+      await notifyInboxes(env, [userId, participantId], (targetUserId) => [
+        {
+          type: 'conversation_upsert',
+          conversation: {
+            id: convId,
+            conversant: targetUserId === userId
+              ? { id: participant.id, username: participant.username }
+              : { id: userId, username: requesterName },
+            disappearingTimer: 0,
+            requestStatus: 'pending',
+            initiatedById: userId,
+            lastMessageAt: null,
+            lastMessagePreview: null,
+            unreadCount: 0,
+            createdAt: now,
+            isPinned: false,
+            isMuted: false,
+            isRestricted: false,
+          },
+        } as InboxEvent,
+      ]);
+    } catch {
+      // Non-fatal.
+    }
+
     return new Response(
       JSON.stringify({
         id: convId,
@@ -165,81 +201,8 @@ conversationsRouter.post(
   },
 );
 
-conversationsRouter.get(
-  '/requests',
-  (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
-  async (request: IRequest, env: Env): Promise<Response> => {
-    const authReq = request as unknown as AuthenticatedRequest;
-    const userId = authReq.user.sub;
-    const rows = await env.DB.prepare(
-      `SELECT c.id, c.disappearing_timer, c.created_at, c.last_message_at,
-         c.request_status, c.initiated_by_id,
-         COALESCE(cus.is_restricted, 0) AS is_restricted,
-         (SELECT COUNT(*) FROM message_deliveries md
-          JOIN messages m ON m.id = md.message_id
-          WHERE md.recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)
-            AND md.read_at IS NULL
-            AND m.conversation_id = c.id AND m.is_unsent = 0
-            AND m.sender_id != ?) AS unread_count,
-         CASE WHEN c.user_a_id = ? THEN ub.username ELSE ua.username END AS conversant_username,
-         CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END AS conversant_id
-       FROM conversations c
-       JOIN users ua ON ua.id = c.user_a_id
-       JOIN users ub ON ub.id = c.user_b_id
-       LEFT JOIN conversation_user_settings cus ON cus.conversation_id = c.id AND cus.user_id = ?
-       WHERE (c.user_a_id = ? OR c.user_b_id = ?)
-         AND (
-           (c.request_status = 'pending' AND c.initiated_by_id != ?)
-           OR COALESCE(cus.is_restricted, 0) = 1
-         )
-         AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
-       ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC`,
-    )
-      .bind(
-        userId,
-        userId,
-        userId,
-        userId,
-        userId,
-        userId,
-        userId,
-        userId,
-      )
-      .all<{
-        id: string;
-        disappearing_timer: number;
-        created_at: number;
-        last_message_at: number | null;
-        request_status: string;
-        initiated_by_id: string;
-        is_restricted: number;
-        unread_count: number;
-        conversant_username: string;
-        conversant_id: string;
-      }>();
-
-    const requests = (rows.results ?? []).map((row) => ({
-      id: row.id,
-      conversant: { id: row.conversant_id, username: row.conversant_username },
-      disappearingTimer: row.disappearing_timer,
-      requestStatus: row.request_status,
-      initiatedById: row.initiated_by_id,
-      lastMessageAt: row.last_message_at,
-      lastMessagePreview: null,
-      unreadCount: row.unread_count,
-      createdAt: row.created_at,
-      isRestricted: Boolean(row.is_restricted),
-    }));
-
-    return new Response(JSON.stringify(requests), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  },
-);
-
 conversationsRouter.patch(
-  '/requests/:id',
+  '/:id/request',
   (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
   async (request: IRequest, env: Env): Promise<Response> => {
     const authReq = request as unknown as AuthenticatedRequest;
@@ -313,6 +276,42 @@ conversationsRouter.patch(
       // The database status remains authoritative if no socket is connected.
     }
 
+    // Push the status flip into BOTH participants' chat lists over their inbox
+    // sockets — accept promotes the "Request sent" tile, reject drops it.
+    try {
+      const otherId = conversation.user_a_id === userId ? conversation.user_b_id : conversation.user_a_id;
+      const nameRows = await env.DB.prepare(
+        `SELECT id, username FROM users WHERE id IN (?, ?)`,
+      ).bind(userId, otherId).all<{ id: string; username: string }>();
+      const names = new Map((nameRows.results ?? []).map((u) => [u.id, u.username]));
+
+      const upsertEvent = (targetUserId: string) => ({
+        type: 'conversation_upsert',
+        conversation: {
+          id,
+          conversant: {
+            id: targetUserId === userId ? otherId : userId,
+            username: targetUserId === userId
+              ? names.get(otherId) ?? 'unknown'
+              : names.get(userId) ?? 'unknown',
+          },
+          disappearingTimer: conversation.disappearing_timer ?? 0,
+          requestStatus: nextStatus,
+          initiatedById: conversation.initiated_by_id,
+          lastMessageAt: conversation.last_message_at ?? null,
+          lastMessagePreview: null,
+          unreadCount: 0,
+          createdAt: conversation.created_at,
+          isPinned: false,
+          isMuted: false,
+          isRestricted: false,
+        },
+      });
+      await notifyInboxes(env, [userId, otherId], (target) => [upsertEvent(target) as InboxEvent]);
+    } catch {
+      // Non-fatal: REST seed repairs the list on next app resume / refresh.
+    }
+
     return new Response(JSON.stringify({ requestStatus: nextStatus }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
@@ -326,83 +325,28 @@ conversationsRouter.get(
   async (request: IRequest, env: Env): Promise<Response> => {
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
+    const scope = parseScope(new URL(request.url));
 
-    // Fetch all conversations where the user is a participant and not restricted
-    const rows = await env.DB.prepare(
-      `SELECT
-         c.id,
-         c.user_a_id,
-         c.user_b_id,
-         c.disappearing_timer,
-         c.created_at,
-         c.last_message_at,
-         c.request_status,
-         c.initiated_by_id,
-         COALESCE(cus.is_pinned, 0) AS is_pinned,
-         COALESCE(cus.is_muted, 0) AS is_muted,
-         COALESCE(cus.is_restricted, 0) AS is_restricted,
-         (SELECT COUNT(*) FROM message_deliveries md
-          JOIN messages m ON m.id = md.message_id
-          WHERE md.recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)
-            AND md.read_at IS NULL
-            AND m.conversation_id = c.id AND m.is_unsent = 0
-            AND m.sender_id != ?) AS unread_count,
-         CASE WHEN c.user_a_id = ? THEN ub.username ELSE ua.username END AS conversant_username,
-         CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END AS conversant_id
-       FROM conversations c
-       JOIN users ua ON ua.id = c.user_a_id
-       JOIN users ub ON ub.id = c.user_b_id
-       LEFT JOIN conversation_user_settings cus ON cus.conversation_id = c.id AND cus.user_id = ?
-       WHERE (c.user_a_id = ? OR c.user_b_id = ?)
-         AND COALESCE(cus.is_restricted, 0) = 0
-         AND (c.request_status = 'accepted'
-           OR (c.request_status = 'pending' AND c.initiated_by_id = ?
-             AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)))
-       ORDER BY COALESCE(cus.is_pinned, 0) DESC, c.last_message_at DESC NULLS LAST, c.created_at DESC`,
-    )
-      .bind(
-        userId,
-        userId,
-        userId,
-        userId,
-        userId,
-        userId,
-        userId,
-        userId,
-      )
-      .all<{
-        id: string;
-        user_a_id: string;
-        user_b_id: string;
-        disappearing_timer: number;
-        created_at: number;
-        last_message_at: number | null;
-        request_status: string;
-        initiated_by_id: string | null;
-        is_pinned: number;
-        is_muted: number;
-        is_restricted: number;
-        unread_count: number;
-        conversant_username: string;
-        conversant_id: string;
-      }>();
+    if (scope === 'all') {
+      // Single-seed payload: accepted chats + request queue in one round trip.
+      const [rows, requestRows] = await Promise.all([
+        listConversations(env, userId, 'inbox'),
+        listConversations(env, userId, 'requests'),
+      ]);
+      return new Response(
+        JSON.stringify({
+          conversations: rows.map((row) => mapConversationRow(row)),
+          requests: requestRows.map((row) => mapConversationRow(row, { restricted: true })),
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
 
-    const conversations = (rows.results ?? []).map((row) => ({
-      id: row.id,
-      conversant: { id: row.conversant_id, username: row.conversant_username },
-      disappearingTimer: row.disappearing_timer,
-      requestStatus: row.request_status,
-      initiatedById: row.initiated_by_id,
-      lastMessageAt: row.last_message_at,
-      lastMessagePreview: null, // E2EE — server never decrypts
-      unreadCount: row.unread_count,
-      createdAt: row.created_at,
-      isPinned: Boolean(row.is_pinned),
-      isMuted: Boolean(row.is_muted),
-      isRestricted: Boolean(row.is_restricted),
-    }));
-
-    return new Response(JSON.stringify(conversations), {
+    const rows = await listConversations(env, userId, scope);
+    const payload = rows.map((row) =>
+      mapConversationRow(row, scope === 'requests' ? { restricted: true } : {}),
+    );
+    return new Response(JSON.stringify(payload), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });

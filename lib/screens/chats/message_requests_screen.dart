@@ -4,6 +4,7 @@ import 'package:flexiyo/providers/chat_provider.dart';
 import 'package:flexiyo/providers/signal_crypto_provider.dart';
 import 'package:flexiyo/services/api_service.dart';
 import 'package:flexiyo/widgets/avatar.dart';
+import 'package:flexiyo/widgets/skeleton.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -75,7 +76,11 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
         hydrated.add(request.copyWith(lastMessagePreview: preview));
       }
 
-      if (mounted) setState(() => _requests = hydrated);
+      if (mounted) {
+        setState(() => _requests = hydrated);
+        // Keep the chats-screen badge in sync with what the server returned.
+        ref.read(chatsProvider.notifier).updateRequestCount(hydrated.length);
+      }
     } catch (error) {
       if (mounted) setState(() => _error = error.toString());
     } finally {
@@ -119,7 +124,7 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
         ],
       ),
       body: _loading && _requests.isEmpty
-          ? const Center(child: CircularProgressIndicator())
+          ? const ChatsSkeletonList(itemCount: 4)
           : _error != null && _requests.isEmpty
               ? Center(
                   child: Column(

@@ -109,7 +109,7 @@ class AuthBackground extends StatelessWidget {
   }
 }
 
-/// Logo with ambient glow matching Instagram's centered brand mark
+/// App logo with a subtle ambient glow beneath it
 class FlexiyoLogo extends StatelessWidget {
   const FlexiyoLogo({super.key, this.size = 80});
 

@@ -8,6 +8,7 @@ import { hashPassword, verifyPassword, generateId } from '../utils/crypto.js';
 import { signJWT } from '../utils/jwt.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { rateLimitMiddleware } from '../middleware/rateLimit.js';
+import { issueEmailVerificationCode, verifyEmailCode } from '../services/brevo.js';
 
 export const authRouter = Router({ base: '/api/auth' });
 
@@ -421,8 +422,9 @@ authRouter.post(
 
 authRouter.post(
   '/email',
+  rateLimitMiddleware({ limit: 5, windowMs: 10 * 60_000 }),
   // @ts-ignore
-  (req: IRequest, env: Env, _ctx: ExecutionContext) => authMiddleware(req as unknown as Request, env),
+  (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
   // @ts-ignore
   async (request: IRequest, env: Env, _ctx: ExecutionContext): Promise<Response> => {
     let body: any;
@@ -460,10 +462,32 @@ authRouter.post(
       });
     }
 
+    // Persist the (unverified) email, then email a single-use verification
+    // code via Brevo. The account stays unverified until the code round-trips.
     await db.update(users).set({ email, emailVerified: 0 }).where(eq(users.id, authReq.user.sub)).run();
 
+    const { sent, capped } = await issueEmailVerificationCode(env, authReq.user.sub, email);
+
+    if (capped) {
+      // Hitting the send budget twice in a row should never surprise the user,
+      // so the account keeps the just-saved address either way.
+      return new Response(
+        JSON.stringify({
+          error: 'Too many verification emails today. Try again tomorrow.',
+        }),
+        { status: 429, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+
     return new Response(
-      JSON.stringify({ message: 'Email saved successfully', email, verified: false }),
+      JSON.stringify({
+        message: sent
+          ? 'Verification code sent to your email'
+          : 'Verification code generated — email delivery unavailable right now',
+        email,
+        verified: false,
+        codeSent: sent,
+      }),
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     );
   },
@@ -471,8 +495,9 @@ authRouter.post(
 
 authRouter.post(
   '/email/verify',
+  rateLimitMiddleware({ limit: 10, windowMs: 60_000 }),
   // @ts-ignore
-  (req: IRequest, env: Env, _ctx: ExecutionContext) => authMiddleware(req as unknown as Request, env),
+  (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
   // @ts-ignore
   async (request: IRequest, env: Env, _ctx: ExecutionContext): Promise<Response> => {
     let body: any;
@@ -486,15 +511,25 @@ authRouter.post(
     }
 
     const code = (body.code || '').trim();
-    if (!code || code.length < 4) {
-      return new Response(JSON.stringify({ error: 'Valid verification code is required' }), {
+    if (!/^\d{6}$/.test(code)) {
+      return new Response(JSON.stringify({ error: 'Enter the 6-digit code from your email' }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' },
       });
     }
 
+    // Verify the code server-side: hashed match, TTL, and a per-code attempt
+    // ceiling — guessing is impossible even with this endpoint rate-limited.
     const authReq = request as unknown as AuthenticatedRequest;
     const db = getDb(env);
+    const valid = await verifyEmailCode(env, authReq.user.sub, code);
+    if (!valid) {
+      return new Response(JSON.stringify({ error: 'That code is invalid or expired' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
     await db.update(users).set({ emailVerified: 1 }).where(eq(users.id, authReq.user.sub)).run();
 
     return new Response(

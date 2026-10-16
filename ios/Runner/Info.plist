@@ -68,6 +68,14 @@
 	</array>
 	<key>FlutterDeepLinkingEnabled</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Flexiyo uses the camera so you can take photos and send them in your chats.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Flexiyo uses the microphone so you can record and send voice notes.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Flexiyo needs access to your photos so you can share them in your chats.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Flexiyo saves media you choose to keep to your photo library.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

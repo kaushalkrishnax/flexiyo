@@ -171,6 +171,29 @@ export const localDeletions = sqliteTable(
   }),
 );
 
+export const emailVerificationCodes = sqliteTable(
+  'email_verification_codes',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .unique()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    email: text('email').notNull(),
+    codeHash: text('code_hash').notNull(),
+    expiresAt: integer('expires_at').notNull(),
+    attempts: integer('attempts').notNull().default(0),
+    createdAt: integer('created_at').notNull().default(0),
+    /** Emails sent inside the current rolling daily window. */
+    dailyCount: integer('daily_count').notNull().default(0),
+    /** Start (unix sec) of the rolling 24h daily window. */
+    windowStartedAt: integer('window_started_at').notNull().default(0),
+  },
+  (table) => ({
+    expiryIdx: index('idx_email_codes_expiry').on(table.expiresAt),
+  }),
+);
+
 export const messageDeliveries = sqliteTable(
   'message_deliveries',
   {

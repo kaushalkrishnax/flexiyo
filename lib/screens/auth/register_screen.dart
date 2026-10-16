@@ -7,10 +7,10 @@ import 'package:flexiyo/services/google_auth_service.dart';
 import 'package:flexiyo/storage/secure_keys.dart';
 import 'package:flexiyo/widgets/auth_background.dart';
 import 'package:flexiyo/widgets/auth_text_field.dart';
-import 'package:flexiyo/widgets/google_icon.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:icon_plus/icon_plus.dart';
 
 class RegisterScreen extends ConsumerStatefulWidget {
   const RegisterScreen({super.key});
@@ -317,7 +317,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
 
   Future<void> _handleVerifyEmailCode() async {
     final code = _verificationCodeController.text.trim();
-    if (code.isEmpty || code.length < 4) {
+    if (code.isEmpty || code.length < 6) {
       setState(() => _emailError = 'Please enter the verification code.');
       return;
     }
@@ -627,7 +627,8 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                 : Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      const GoogleIcon(size: 20),
+                      const Icon(FontAwesome.google_brand,
+                          size: 20, color: Color(0xFF4285F4)),
                       const SizedBox(width: 10),
                       Text(
                         'Sign up with Google',

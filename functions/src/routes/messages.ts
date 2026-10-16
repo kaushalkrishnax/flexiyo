@@ -8,34 +8,10 @@ import {
   getMessageEditDenial,
   getMessageSendDenial,
 } from '../services/messagePermissions.js';
+import { notifyInboxes } from '../services/inbox.js';
 import { getConversationForMember } from './conversations.js';
 
 export const messagesRouter = Router({ base: '/api/conversations' });
-
-async function broadcastInbox(
-  env: Env,
-  userIds: string[],
-  event: {
-    type: 'inbox_message';
-    conversationId: string;
-    senderId: string;
-    preview: string;
-    lastMessageAt: number;
-  },
-): Promise<void> {
-  await Promise.all(userIds.map((userId) => {
-    const doId = env.CHAT_ROOM.idFromName(`inbox:${userId}`);
-    const stub = env.CHAT_ROOM.get(doId);
-    return stub.fetch(new Request('https://internal/broadcast', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ...event,
-        isIncoming: userId !== event.senderId,
-      }),
-    }));
-  }));
-}
 
 const devicePayloadSchema = z.object({
   deviceId: z.number().int().positive(),
@@ -426,13 +402,15 @@ messagesRouter.post(
         }),
       }),
     );
-    await broadcastInbox(env, [userId, recipientId], {
+    await notifyInboxes(env, [userId, recipientId], (targetUserId) => [{
       type: 'inbox_message',
       conversationId,
       senderId: userId,
+      // E2EE — the server can never render a real preview.
       preview: 'New message',
       lastMessageAt: now,
-    });
+      isIncoming: targetUserId !== userId,
+    }]);
 
     return new Response(
       JSON.stringify({
@@ -900,6 +878,14 @@ messagesRouter.delete(
         }),
       }),
     );
+
+    // Keep the other participant's chat-list preview in sync ("Message unsent").
+    const otherParticipant = conv.user_a_id === userId ? conv.user_b_id : conv.user_a_id;
+    await notifyInboxes(env, [otherParticipant], () => [{
+      type: 'message_unsent',
+      conversationId,
+      messageId,
+    }]);
 
     return new Response(JSON.stringify({ deleted: true, scope: 'global' }), {
       status: 200,

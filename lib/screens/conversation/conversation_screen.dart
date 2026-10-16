@@ -4,16 +4,22 @@ import 'package:flexiyo/models/message.dart';
 import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/providers/chat_provider.dart';
 import 'package:flexiyo/providers/conversation_provider.dart';
+import 'package:flexiyo/screens/media/camera_screen.dart';
 import 'package:flexiyo/services/api_service.dart';
+import 'package:flexiyo/services/media_service.dart';
 import 'package:flexiyo/widgets/avatar.dart';
 import 'package:flexiyo/widgets/app_popup_menu.dart';
 import 'package:flexiyo/widgets/date_separator.dart';
+import 'package:flexiyo/widgets/media_gallery_sheet.dart';
 import 'package:flexiyo/widgets/message_bubble.dart';
+import 'package:flexiyo/widgets/skeleton.dart';
 import 'package:flexiyo/widgets/typing_indicator.dart';
+import 'package:flexiyo/widgets/voice_recorder_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:icon_plus/icon_plus.dart';
 
 class ConversationScreen extends ConsumerStatefulWidget {
   const ConversationScreen({
@@ -33,6 +39,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
   final _messageController = TextEditingController();
   final _scrollController = ScrollController();
   bool _atBottom = true;
+  bool _recordingVoice = false;
 
   @override
   void initState() {
@@ -101,6 +108,63 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
     }
   }
 
+  void _openCamera() {
+    final conv =
+        ref.read(conversationProvider(widget.conversationId)).conversation;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => CameraScreen(
+          conversationId: widget.conversationId,
+          otherUsername: conv?.otherUsername,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openGallery() async {
+    final bytes = await showMediaGallerySheet(context);
+    if (bytes == null || !mounted) return;
+    final conv =
+        ref.read(conversationProvider(widget.conversationId)).conversation;
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => CameraScreen(
+          conversationId: widget.conversationId,
+          initialImage: bytes,
+          otherUsername: conv?.otherUsername,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _sendMediaEnvelope(
+    Uint8List bytes,
+    MediaKind kind, {
+    ViewPolicy policy = ViewPolicy.unlimited,
+    int? durationMs,
+  }) async {
+    try {
+      final service = ref.read(mediaServiceProvider);
+      final mediaRef = await service.encryptAndUpload(
+        bytes: bytes,
+        conversationId: widget.conversationId,
+        kind: kind,
+        policy: policy,
+        durationMs: durationMs,
+      );
+      await ref
+          .read(conversationProvider(widget.conversationId).notifier)
+          .sendMessage(mediaRef.toEnvelopeString());
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not send media: $e')),
+        );
+      }
+    }
+  }
+
   Future<void> _respondToRequest({required bool accept}) async {
     try {
       await ref.read(apiServiceProvider).respondToMessageRequest(
@@ -148,6 +212,16 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
         notifier.setReplyTo(message);
       },
       onCopy: () {
+        if (message.isMedia) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text("Media messages can't be copied"),
+              duration: Duration(seconds: 1),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+          return;
+        }
         final text = message.decryptedText;
         if (text == null) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -199,7 +273,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
       appBar: _buildAppBar(context, conversationState, colorScheme),
       body: SafeArea(
         child: conversationState.isLoading && messages.isEmpty
-            ? const Center(child: CircularProgressIndicator())
+            ? const ConversationSkeleton()
             : Column(
                 children: [
                   Expanded(
@@ -267,8 +341,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                                   replyToMsg = messages.firstWhere(
                                     (m) => m.id == message.replyToId,
                                   );
-                                } catch (_) {
-                                }
+                                } catch (_) {}
                               }
 
                               final isSelected = conversationState
@@ -295,7 +368,9 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                                                     widget.conversationId)
                                                 .notifier)
                                             .toggleSelection(message.id)
-                                        : (message.status == MessageStatus.failed && isMine
+                                        : (message.status ==
+                                                    MessageStatus.failed &&
+                                                isMine
                                             ? () => ref
                                                 .read(conversationProvider(
                                                         widget.conversationId)
@@ -323,7 +398,6 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                             },
                           ),
                         ),
-
                         if (!_atBottom)
                           Positioned(
                             bottom: 12,
@@ -342,7 +416,6 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                       ],
                     ),
                   ),
-
                   if (widget.isMessageRequest)
                     Padding(
                       padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
@@ -407,6 +480,20 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                               .notifier)
                           .deleteSelectedForMe(),
                     )
+                  else if (_recordingVoice)
+                    VoiceRecorderBar(
+                      onCancel: () => setState(() => _recordingVoice = false),
+                      onSend: (bytes, durationMs) async {
+                        if (mounted) {
+                          setState(() => _recordingVoice = false);
+                        }
+                        await _sendMediaEnvelope(
+                          bytes,
+                          MediaKind.voice,
+                          durationMs: durationMs,
+                        );
+                      },
+                    )
                   else
                     _ComposerBar(
                       controller: _messageController,
@@ -416,6 +503,11 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                       isSending: conversationState.isSending,
                       replyTo: conversationState.replyTo,
                       editDraft: conversationState.editDraft,
+                      onCameraTap: _openCamera,
+                      onGalleryTap: _openGallery,
+                      onMicTap: () {
+                        setState(() => _recordingVoice = true);
+                      },
                       onCancelReply: () => ref
                           .read(conversationProvider(widget.conversationId)
                               .notifier)
@@ -451,47 +543,52 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
         onPressed: () => context.pop(),
         tooltip: 'Back',
       ),
-      title: Row(
-        children: [
-          if (conv != null) ...[
-            UserAvatar(username: conv.otherUsername, radius: 18),
-            const SizedBox(width: 10),
-          ],
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
+      title: conv == null
+          // Chat still loading: avatar + name placeholder keeps the header
+          // shape without printing throwaway text like "Conversation".
+          ? const Row(
               children: [
-                Text(
-                  conv?.otherUsername ?? 'Conversation',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: -0.3,
+                SkeletonCircle(size: 36),
+                SizedBox(width: 10),
+                Expanded(child: SkeletonBox(height: 14)),
+              ],
+            )
+          : Row(
+              children: [
+                UserAvatar(username: conv.otherUsername, radius: 18),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        conv.otherUsername,
+                        style:
+                            Theme.of(context).textTheme.titleMedium?.copyWith(
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: -0.3,
+                                ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                if (isTyping)
-                  Text(
-                    'typing…',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: colorScheme.primary,
-                          fontStyle: FontStyle.italic,
-                        ),
-                  )
-                else if (conv != null)
-                  Text(
-                    'Tap for more info',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: colorScheme.onSurfaceVariant,
-                          fontSize: 11,
-                        ),
+                      Text(
+                        isTyping ? 'typing…' : 'Tap for more info',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: isTyping
+                                  ? colorScheme.primary
+                                  : colorScheme.onSurfaceVariant,
+                              fontStyle: isTyping
+                                  ? FontStyle.italic
+                                  : FontStyle.normal,
+                              fontSize: 11,
+                            ),
+                      ),
+                    ],
                   ),
+                ),
               ],
             ),
-          ),
-        ],
-      ),
       actions: [
         IconButton(
           onPressed: () {
@@ -522,7 +619,6 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
   }
 }
 
-
 class _ComposerBar extends ConsumerWidget {
   const _ComposerBar({
     required this.controller,
@@ -532,6 +628,9 @@ class _ComposerBar extends ConsumerWidget {
     required this.isSending,
     required this.replyTo,
     required this.editDraft,
+    required this.onCameraTap,
+    required this.onGalleryTap,
+    required this.onMicTap,
     required this.onCancelReply,
     required this.onCancelEdit,
   });
@@ -543,6 +642,9 @@ class _ComposerBar extends ConsumerWidget {
   final bool isSending;
   final Message? replyTo;
   final EditDraft? editDraft;
+  final VoidCallback onCameraTap;
+  final VoidCallback onGalleryTap;
+  final VoidCallback onMicTap;
   final VoidCallback onCancelReply;
   final VoidCallback onCancelEdit;
 
@@ -575,14 +677,12 @@ class _ComposerBar extends ConsumerWidget {
                 onDismiss: onCancelReply,
                 colorScheme: colorScheme,
               ),
-
             if (editDraft != null)
               _EditBanner(
                 originalText: editDraft!.text,
                 onDismiss: onCancelEdit,
                 colorScheme: colorScheme,
               ),
-
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
               child: ValueListenableBuilder<TextEditingValue>(
@@ -590,57 +690,48 @@ class _ComposerBar extends ConsumerWidget {
                 builder: (context, value, _) {
                   final hasText = value.text.trim().isNotEmpty;
                   final isMultiline =
-                      value.text.contains('\n') || value.text.length > 34;
+                      value.text.contains('\n') || value.text.length > 40;
 
+                  // Single capsule: text field + app bar-free icon row.
+                  // While typing, every affordance collapses into one send
+                  // action; while idle, camera / gallery / voice show through.
                   return Row(
                     crossAxisAlignment: isMultiline
                         ? CrossAxisAlignment.end
                         : CrossAxisAlignment.center,
                     children: [
-                      SizedBox(
-                        height: 44,
-                        child: Center(
-                          child: GestureDetector(
-                            onTap: () {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('Camera feature coming soon'),
-                                  duration: Duration(milliseconds: 900),
-                                  behavior: SnackBarBehavior.floating,
-                                ),
-                              );
-                            },
-                            child: Container(
-                              width: 40,
-                              height: 40,
-                              decoration: const BoxDecoration(
-                                color: brandBlue,
-                                shape: BoxShape.circle,
-                              ),
-                              child: const Icon(
-                                Icons.camera_alt_rounded,
-                                color: Colors.white,
-                                size: 21,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-
                       Expanded(
                         child: Container(
                           constraints: const BoxConstraints(minHeight: 44),
                           decoration: BoxDecoration(
                             color: capsuleBg,
-                            borderRadius: BorderRadius.circular(24),
+                            borderRadius: BorderRadius.circular(
+                              isMultiline ? 12 : 24,
+                            ),
                           ),
-                          padding: const EdgeInsets.symmetric(horizontal: 14),
                           child: Row(
                             crossAxisAlignment: isMultiline
                                 ? CrossAxisAlignment.end
                                 : CrossAxisAlignment.center,
                             children: [
+                              if (!hasText) ...[
+                                _ComposerIconButton(
+                                  icon: IonIcons.camera,
+                                  color: isDark ? Colors.white : Colors.black,
+                                  tooltip: 'Camera',
+                                  onTap: onCameraTap,
+                                ),
+                              ] else ...[
+                                _ComposerIconButton(
+                                  icon: IonIcons.send,
+                                  color: Colors.white,
+                                  forceBackgroundColor: brandBlue,
+                                  tooltip:
+                                      editDraft != null ? 'Update' : 'Send',
+                                  onTap: onSend,
+                                ),
+                              ],
+
                               Expanded(
                                 child: Theme(
                                   data: Theme.of(context).copyWith(
@@ -696,86 +787,37 @@ class _ComposerBar extends ConsumerWidget {
                                 ),
                               ),
 
+                              // Right affordances: gallery + voice note. Both
+                              // disappear the moment typing starts.
                               if (!hasText) ...[
-                                SizedBox(
-                                  height: 44,
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.center,
-                                    children: [
-                                      IconButton(
-                                        icon: const Icon(Icons.mic_none_rounded,
-                                            size: 22),
-                                        padding: EdgeInsets.zero,
-                                        style: IconButton.styleFrom(
-                                          backgroundColor: Colors.transparent,
-                                          foregroundColor: isDark
-                                              ? Colors.white70
-                                              : Colors.black87,
-                                          splashFactory:
-                                              NoSplash.splashFactory,
-                                        ),
-                                        constraints: const BoxConstraints(
-                                            minWidth: 32, minHeight: 44),
-                                        onPressed: () {},
-                                        tooltip: 'Voice message',
-                                      ),
-                                      IconButton(
-                                        icon: const Icon(
-                                            Icons
-                                                .sentiment_satisfied_alt_rounded,
-                                            size: 22),
-                                        padding: EdgeInsets.zero,
-                                        style: IconButton.styleFrom(
-                                          backgroundColor: Colors.transparent,
-                                          foregroundColor: isDark
-                                              ? Colors.white70
-                                              : Colors.black87,
-                                          splashFactory:
-                                              NoSplash.splashFactory,
-                                        ),
-                                        constraints: const BoxConstraints(
-                                            minWidth: 32, minHeight: 44),
-                                        onPressed: () {},
-                                        tooltip: 'Stickers',
-                                      ),
-                                    ],
-                                  ),
+                                _ComposerIconButton(
+                                  icon: IonIcons.image,
+                                  color: isDark ? Colors.white : Colors.black,
+                                  tooltip: 'Gallery',
+                                  onTap: onGalleryTap,
+                                ),
+                                _ComposerIconButton(
+                                  icon: Iconsax.microphone_2_outline,
+                                  color: isDark ? Colors.white : Colors.black,
+                                  tooltip: 'Voice note',
+                                  onTap: onMicTap,
                                 ),
                               ] else ...[
-                                SizedBox(
-                                  height: 44,
-                                  child: Center(
-                                    child: Padding(
-                                      padding: const EdgeInsets.only(
-                                          left: 6, right: 2),
-                                      child: isSending
-                                          ? const SizedBox(
-                                              width: 18,
-                                              height: 18,
-                                              child:
-                                                  CircularProgressIndicator(
-                                                strokeWidth: 2,
-                                                color: brandBlue,
-                                              ),
-                                            )
-                                          : GestureDetector(
-                                              onTap: onSend,
-                                              child: Text(
-                                                editDraft != null
-                                                    ? 'Update'
-                                                    : 'Send',
-                                                style: const TextStyle(
-                                                  color: brandBlue,
-                                                  fontWeight: FontWeight.w700,
-                                                  fontSize: 15,
-                                                ),
-                                              ),
-                                            ),
+                                if (isSending) ...[
+                                  const Padding(
+                                    padding:
+                                        EdgeInsets.symmetric(horizontal: 6),
+                                    child: SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: brandBlue,
+                                      ),
                                     ),
                                   ),
-                                ),
+                                  const SizedBox(width: 8),
+                                ],
                               ],
                             ],
                           ),
@@ -787,6 +829,50 @@ class _ComposerBar extends ConsumerWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 44px tap-target icon button inside the composer capsule.
+class _ComposerIconButton extends StatelessWidget {
+  const _ComposerIconButton({
+    required this.icon,
+    required this.color,
+    required this.tooltip,
+    required this.onTap,
+    this.forceBackgroundColor,
+  });
+
+  final IconData icon;
+  final Color color;
+  final String tooltip;
+  final VoidCallback onTap;
+  final Color? forceBackgroundColor;
+
+  @override
+  Widget build(BuildContext context) {
+    final inline = forceBackgroundColor != null;
+    return Padding(
+      padding: EdgeInsets.only(
+        left: inline ? 5 : 2,
+        right: 4,
+        top: 3,
+        bottom: 3,
+      ),
+      child: Material(
+        color: forceBackgroundColor ?? Colors.transparent,
+        shape: inline ? const CircleBorder() : null,
+        child: IconButton(
+          icon: Icon(icon, size: 22, color: color),
+          padding: EdgeInsets.zero,
+          tooltip: tooltip,
+          style: IconButton.styleFrom(
+            splashFactory: NoSplash.splashFactory,
+          ),
+          constraints: const BoxConstraints(minWidth: 34, minHeight: 38),
+          onPressed: onTap,
         ),
       ),
     );
@@ -806,7 +892,10 @@ class _ReplyBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final text = message.decryptedText ?? message.encryptedPayload ?? 'Message';
+    final text = message.mediaRef?.label ??
+        message.decryptedText ??
+        message.encryptedPayload ??
+        'Message';
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       decoration: BoxDecoration(
@@ -915,7 +1004,6 @@ class _EditBanner extends StatelessWidget {
     );
   }
 }
-
 
 class _SelectionBar extends StatelessWidget {
   const _SelectionBar({

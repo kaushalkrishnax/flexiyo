@@ -7,7 +7,7 @@ The project is now structurally restored and validated. The Worker and the Flutt
 ## Verified project state
 
 - The root package manifests are valid and dependencies install successfully.
-- The Cloudflare Worker backend compiles cleanly with `tsc --noEmit` in `functions/`.
+- The Cloudflare Worker backend compiles cleanly with `tsc --noEmit` in `worker/`.
 - The Flutter app analyzes without errors; the remaining output is info-level lint suggestions about const usage in placeholder UI screens.
 - The app shell includes the router, theme, API layer, local storage scaffolding, and auth flow foundation.
 - Core backend routes for auth, users, conversations, messages, and devices remain the main feature surface to continue building.
@@ -45,4 +45,4 @@ The project is now structurally restored and validated. The Worker and the Flutt
 
 ## Evidence
 
-The project was validated by running the backend type-check in `functions/` and a Flutter analysis in the app root. The backend check passes successfully, and the app has no analyzer errors; only non-blocking style suggestions remain.
+The project was validated by running the backend type-check in `worker/` and a Flutter analysis in the app root. The backend check passes successfully, and the app has no analyzer errors; only non-blocking style suggestions remain.

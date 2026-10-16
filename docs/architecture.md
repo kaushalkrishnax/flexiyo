@@ -64,7 +64,7 @@ flexiyo/
 │   ├── crypto/               # Signal Protocol integration
 │   ├── storage/              # Local DB and secure storage
 │   └── main.dart
-├── functions/                # Cloudflare Worker backend
+├── worker/                   # Cloudflare Worker backend
 │   ├── src/
 │   │   ├── index.ts          # Worker entry point
 │   │   ├── routes/           # API route handlers

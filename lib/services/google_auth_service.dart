@@ -20,8 +20,14 @@ class GoogleAuthService {
   GoogleAuthService._();
   static final GoogleAuthService instance = GoogleAuthService._();
 
+  // Web application OAuth client ID from Google Cloud Console → Credentials.
+  // Required on Android so Google returns an idToken for the backend to verify.
+  static const String serverClientId =
+      '1053892601915-pv8md97j50fb70u72rrdkfkvlfabog25.apps.googleusercontent.com';
+
   final GoogleSignIn _googleSignIn = GoogleSignIn(
     scopes: ['email', 'profile'],
+    serverClientId: serverClientId,
   );
 
   Future<GoogleAuthResult?> signIn() async {
@@ -40,7 +46,9 @@ class GoogleAuthService {
     } catch (e) {
       // Re-throw with clean user-facing error message
       final msg = e.toString().toLowerCase();
-      if (msg.contains('sign_in_canceled') || msg.contains('canceled') || msg.contains('cancelled')) {
+      if (msg.contains('sign_in_canceled') ||
+          msg.contains('canceled') ||
+          msg.contains('cancelled')) {
         return null;
       }
       throw Exception('Google sign in error: $e');
@@ -53,4 +61,3 @@ class GoogleAuthService {
     } catch (_) {}
   }
 }
-

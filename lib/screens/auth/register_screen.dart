@@ -627,8 +627,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                 : Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      const Icon(FontAwesome.google_brand,
-                          size: 20, color: Color(0xFF4285F4)),
+                      Brand(Brands.google, size: 20),
                       const SizedBox(width: 10),
                       Text(
                         'Sign up with Google',

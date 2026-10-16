@@ -2,7 +2,7 @@ import { integer, sqliteTable, text, index, unique } from 'drizzle-orm/sqlite-co
 
 // ---------------------------------------------------------------------------
 // Post-audit schema mirror (migrations 0001..0012 applied).
-// Authoritative DDL lives in functions/migrations/*.sql; this file is the
+// Authoritative DDL lives in worker/migrations/*.sql; this file is the
 // drizzle-orm view used by auth/users routes. Keep them in sync.
 // ---------------------------------------------------------------------------
 
@@ -257,6 +257,6 @@ export const userBlocks = sqliteTable(
 );
 
 export const SCHEMA_SQL = `
--- generated via drizzle schema for documentation; see /functions/src/database/schema.ts
+-- generated via drizzle schema for documentation; see /worker/src/database/schema.ts
 `;
 

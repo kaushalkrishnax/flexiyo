@@ -33,7 +33,7 @@ Paste the `database_id` into `wrangler.toml`:
 binding = "DB"
 database_name = "flexiyo-db"
 database_id = "PASTE_HERE"  # ← replace this
-migrations_dir = "functions/migrations"
+migrations_dir = "worker/migrations"
 ```
 
 ### 3. Apply local migrations
@@ -226,10 +226,10 @@ bunx wrangler d1 execute flexiyo-db --local --command "SELECT * FROM users LIMIT
 
 ### Create a new migration
 
-Create a numbered file in `functions/migrations/`:
+Create a numbered file in `worker/migrations/`:
 
 ```bash
-# e.g., functions/migrations/0003_add_column.sql
+# e.g., worker/migrations/0003_add_column.sql
 ```
 
 Wrangler applies migrations in filename order.
@@ -295,7 +295,7 @@ dart --version
 Check that:
 1. The Worker dev server is running (`bun run dev`)
 2. `API_BASE_URL` is set correctly for your device type
-3. The Durable Object class `ChatRoom` is exported from `functions/src/index.ts`
+3. The Durable Object class `ChatRoom` is exported from `worker/src/index.ts`
 
 ### Message decryption fails after reinstall
 

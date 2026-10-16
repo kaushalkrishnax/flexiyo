@@ -54,13 +54,13 @@
 
 ## ⬇ Download
 
-**Current Version:** `v1.0.0` · Android 7.0+ · iOS builds from source
+**Current Version:** `v1.0.1` · Android 7.0+ · iOS builds from source
 
 | Build Variant | Device Compatibility         | Download                                                                                                                                                                                                                   |
 | ------------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **arm64-v8a** | Modern Android devices       | [![Download arm64-v8a](https://img.shields.io/badge/Download-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/kaushalkrishnax/flexiyo/releases/download/v1.0.0/Flexiyo-1.0.0-arm64-v8a.apk) |
-| **armeabi-v7a** | Older Android devices        | [![Download armeabi-v7a](https://img.shields.io/badge/Download-5C6BC0?style=for-the-badge&logo=android&logoColor=white)](https://github.com/kaushalkrishnax/flexiyo/releases/download/v1.0.0/Flexiyo-1.0.0-armeabi-v7a.apk) |
-| **x86_64**    | Emulators and x86_64 devices | [![Download x86_64](https://img.shields.io/badge/Download-0288D1?style=for-the-badge&logo=android&logoColor=white)](https://github.com/kaushalkrishnax/flexiyo/releases/download/v1.0.0/Flexiyo-1.0.0-x86_64.apk)       |
+| **arm64-v8a** | Modern Android devices       | [![Download arm64-v8a](https://img.shields.io/badge/Download-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/kaushalkrishnax/flexiyo/releases/download/v1.0.1/Flexiyo-1.0.1-arm64-v8a.apk) |
+| **armeabi-v7a** | Older Android devices        | [![Download armeabi-v7a](https://img.shields.io/badge/Download-5C6BC0?style=for-the-badge&logo=android&logoColor=white)](https://github.com/kaushalkrishnax/flexiyo/releases/download/v1.0.1/Flexiyo-1.0.1-armeabi-v7a.apk) |
+| **x86_64**    | Emulators and x86_64 devices | [![Download x86_64](https://img.shields.io/badge/Download-0288D1?style=for-the-badge&logo=android&logoColor=white)](https://github.com/kaushalkrishnax/flexiyo/releases/download/v1.0.1/Flexiyo-1.0.1-x86_64.apk)       |
 
 > **Quick Guide:** Not sure? Pick **arm64-v8a**, it covers virtually every phone made since 2017. Emulator users should pick **x86_64**. iOS users can build from source, see [Quick Start](#-quick-start).
 
@@ -124,7 +124,7 @@
 - **Familiar, modern chat UI:** Clean responsive layout, Material 3 theming, adaptive light and dark modes, and long-press context menus.
 - **One codebase, two platforms:** Flutter for Android and iOS, with Android as the primary test target.
 
-Multi-device sync and media messaging are on the [Roadmap](#-roadmap).
+**Note:** Multi-device sync and media messaging are on the [Roadmap](#-roadmap).
 
 ---
 
@@ -153,7 +153,7 @@ Flutter (Android / iOS)
         │
         │  HTTPS + WebSocket (WSS)
         ▼
-Cloudflare Worker (functions/src/)
+Cloudflare Worker (worker/src/)
         │
         ├── Cloudflare D1 (SQLite)    encrypted message storage
         └── Durable Objects           per-conversation WebSocket hub
@@ -194,7 +194,7 @@ Screenshots coming soon.
 | ---------------------- | -------- | ------------------------------------------------------- |
 | **Flutter**            | ≥ 3.19.0 | [flutter.dev](https://flutter.dev/)                     |
 | **Dart**               | ≥ 3.3.0  | Bundled with Flutter                                    |
-| **Bun**                | ≥ 1.0.0  | [bun.sh](https://bun.sh/)                               |
+| **Bun**                | ≥ 1.0.1  | [bun.sh](https://bun.sh/)                               |
 | **Wrangler**           | ≥ 4.0.0  | Installed via `bun install`                             |
 | **Cloudflare account** | Free tier works | [cloudflare.com](https://www.cloudflare.com/)   |
 | **Android Studio**     | Latest   | [developer.android.com](https://developer.android.com/studio) |
@@ -209,7 +209,7 @@ cd flexiyo
 bun install
 ```
 
-Create the D1 database, then copy the `database_id` from the output into `wrangler.toml` under `[[d1_databases]]`:
+Create the D1 database, then copy the `database_id` from the output into `worker/wrangler.toml` under `[[d1_databases]]`:
 
 ```bash
 bunx wrangler d1 create flexiyo-db
@@ -278,8 +278,8 @@ See [`.env.example`](.env.example) for the full template.
 | Variable         | Where                   | Description                  |
 | ---------------- | ----------------------- | ---------------------------- |
 | `JWT_SECRET`     | Wrangler secret         | HS256 signing key for JWTs   |
-| `D1_DATABASE_ID` | `wrangler.toml`         | Cloudflare D1 database ID    |
-| `CORS_ORIGIN`    | `wrangler.toml` vars    | Allowed CORS origin          |
+| `D1_DATABASE_ID` | `worker/wrangler.toml`  | Cloudflare D1 database ID    |
+| `CORS_ORIGIN`    | `worker/wrangler.toml` vars | Allowed CORS origin      |
 | `API_BASE_URL`   | Flutter `--dart-define` | Override API URL for dev     |
 
 ---
@@ -289,14 +289,17 @@ See [`.env.example`](.env.example) for the full template.
 > **⚠️ Warning:** Do not deploy without setting all required secrets, and do not run `wrangler deploy` without explicit intent.
 
 ```bash
-# 1. Set secrets
+# 1. Set the production secret (from worker/)
+cd worker
 bunx wrangler secret put JWT_SECRET
 
-# 2. Apply migrations to remote D1
+# 2. Apply remote migrations and deploy the Worker
 bun run db:migrate:remote
+bun run deploy
 
-# 3. Deploy the Worker
-bunx wrangler deploy
+# 3. Build and deploy the web app (from the repo root)
+cd ..
+bun run build:web && bun run deploy:pages
 ```
 
 After deploying, build the app against your production URL:
@@ -332,7 +335,7 @@ flutter build apk --dart-define=API_BASE_URL=https://your-worker.workers.dev
 <summary><b>🗄️ Database errors or missing tables</b></summary>
 
 - Run `bun run db:migrate:local` for local dev
-- Confirm `database_id` in `wrangler.toml` matches the one from `wrangler d1 create`
+- Confirm `database_id` in `worker/wrangler.toml` matches the one from `wrangler d1 create`
 - For production, run `bun run db:migrate:remote`
 
 </details>

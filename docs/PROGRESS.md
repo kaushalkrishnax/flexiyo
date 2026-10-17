@@ -12,7 +12,7 @@ Flexiyo is a working end-to-end encrypted messenger. The Flutter client and the 
 
 ## Implemented areas
 
-- **Messaging:** Signal Protocol (X3DH + Double Ratchet) one-to-one E2EE on-device; edit, unsend for everyone, delete for me, and copy; disappearing messages with server-side pruning; offline catch-up through per-conversation Durable Object WebSocket hubs.
+- **Messaging:** Signal Protocol (X3DH + Double Ratchet) one-to-one E2EE on-device; edit, unsend for everyone, delete for me, and copy; disappearing messages that count down from the read receipt and purge on both sides; offline catch-up through per-conversation Durable Object WebSocket hubs.
 - **Message requests:** First-contact messages land in a request inbox, with per-conversation permissions enforced in the Worker.
 - **Encrypted media:** Photos (camera and gallery) and voice notes encrypted on-device (AES-GCM); view-once / view-twice / unlimited policies enforced server-side; expired media purged by the Worker.
 - **Accounts and devices:** Username/password auth, email verification, Google Sign-In on native and web, device-isolated key storage (Android Keystore / iOS Keychain).
@@ -39,4 +39,4 @@ None — the tree builds and passes all checks. The open items above are planned
 
 ## Evidence
 
-Flutter: `flutter analyze` clean, `flutter test` 18/18. Worker: `bun run type-check`, `bun run test` 31/31, and `wrangler deploy --dry-run` all pass locally.
+Flutter: `flutter analyze` clean, `flutter test` 30/30. Worker: `bun run type-check`, `bun run test` 31/31, and `wrangler deploy --dry-run` all pass locally.

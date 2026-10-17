@@ -15,14 +15,11 @@ class AppConstants {
 
   static const int maxMessageLength = 4000;
 
-  /// Disappearing timer options in seconds.
-  /// 0 = off, 30s, 1m, 5m, 1h, 1d, 1w
+  /// Disappearing timer options in seconds. -1 means immediately after read.
   static const List<int> disappearingTimerOptions = [
-    0,
-    30,
-    60,
-    300,
+    -1,
     3600,
+    21600,
     86400,
     604800,
   ];

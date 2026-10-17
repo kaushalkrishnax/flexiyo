@@ -16,13 +16,15 @@ class Conversation {
     this.isPinned = false,
     this.isMuted = false,
     this.isRestricted = false,
+    this.peerSeenAt,
+    this.lastMessageIsMine = false,
   });
 
   final String id;
   final String otherUserId;
   final String otherUsername;
 
-  /// Disappearing message timer in seconds (0 = disabled).
+  /// Timer after a recipient reads a message; -1 means immediately, 0 disabled.
   final int disappearingTimer;
   final DateTime? lastMessageAt;
   final String? lastMessagePreview;
@@ -32,6 +34,12 @@ class Conversation {
   final bool isPinned;
   final bool isMuted;
   final bool isRestricted;
+
+  /// When the other user last read a message of mine; drives "Seen …".
+  final DateTime? peerSeenAt;
+
+  /// Whether the newest message in the conversation is mine.
+  final bool lastMessageIsMine;
 
   factory Conversation.fromJson(Map<String, dynamic> json) {
     final otherUser =
@@ -63,7 +71,20 @@ class Conversation {
         isPinned: json['isPinned'] == true,
         isMuted: json['isMuted'] == true,
         isRestricted: json['isRestricted'] == true,
+        peerSeenAt: json['peerSeenAt'] != null
+            ? _parseTimestamp(json['peerSeenAt'])
+            : null,
+        lastMessageIsMine: json['lastMessageIsMine'] == true,
     );
+  }
+
+  static DateTime? _parseTimestamp(dynamic value) {
+    if (value is int) {
+      final ts = value > 1e12 ? value : value * 1000;
+      return DateTime.fromMillisecondsSinceEpoch(ts.toInt());
+    }
+    if (value is String) return DateTime.tryParse(value);
+    return null;
   }
 
       factory Conversation.fromDbJson(Map<String, dynamic> row) {
@@ -112,6 +133,8 @@ class Conversation {
     bool? isMuted,
     bool? isRestricted,
     bool? isBlocked,
+    DateTime? peerSeenAt,
+    bool? lastMessageIsMine,
   }) {
     return Conversation(
       id: id ?? this.id,
@@ -126,6 +149,8 @@ class Conversation {
       isPinned: isPinned ?? this.isPinned,
       isMuted: isMuted ?? this.isMuted,
       isRestricted: isRestricted ?? this.isRestricted,
+      peerSeenAt: peerSeenAt ?? this.peerSeenAt,
+      lastMessageIsMine: lastMessageIsMine ?? this.lastMessageIsMine,
     );
   }
 

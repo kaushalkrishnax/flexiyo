@@ -135,7 +135,7 @@ export default {
   },
 
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
-    await cleanExpiredMessages(env.DB);
+    await cleanExpiredMessages(env);
     await purgeExpiredMedia(env.DB, env);
   },
 };

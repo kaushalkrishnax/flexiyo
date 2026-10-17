@@ -60,13 +60,19 @@ if (platform === 'android') {
     path.join(ROOT, 'build', 'app', 'outputs', 'flutter-apk'),
   ];
 
+  const version = getCurrentVersion();
   // --split-per-abi emits per-ABI release APKs
-  run(['build', 'apk', '--release', '--split-per-abi']);
+  run([
+    'build',
+    'apk',
+    '--release',
+    '--split-per-abi',
+    `--dart-define=APP_VERSION=${version}`,
+  ]);
 
   fs.rmSync(outputDir, { recursive: true, force: true });
   fs.mkdirSync(outputDir, { recursive: true });
 
-  const version = getCurrentVersion();
   const archivedApks = [];
 
   for (const abi of architectures) {
@@ -124,7 +130,8 @@ if (platform === 'android') {
   const outputDir = path.join(ROOT, 'dist', 'release-ios');
   const ipaOutputDir = path.join(ROOT, 'build', 'ios', 'ipa');
 
-  run(['build', 'ipa', '--release']);
+  const version = getCurrentVersion();
+  run(['build', 'ipa', '--release', `--dart-define=APP_VERSION=${version}`]);
 
   if (!fs.existsSync(ipaOutputDir)) {
     console.error(`Expected IPA output directory is missing: ${ipaOutputDir}`);

@@ -159,11 +159,11 @@ class _MediaVoiceBubbleState extends ConsumerState<MediaVoiceBubble> {
             Row(
               children: [
                 SizedBox(
-                  width: 34,
-                  height: 34,
+                  width: 40,
+                  height: 40,
                   child: _preparing
                       ? const Padding(
-                          padding: EdgeInsets.all(7),
+                          padding: EdgeInsets.all(9),
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
                             color: Colors.white,
@@ -173,17 +173,17 @@ class _MediaVoiceBubbleState extends ConsumerState<MediaVoiceBubble> {
                           ? const HugeIcon(
                               icon: HugeIcons.strokeRoundedEyeOff,
                               color: Colors.white,
-                              size: 20,
+                              size: 24,
                             )
-                          : Icon(
-                              _playing
-                                  ? Icons.pause_rounded
-                                  : Icons.play_arrow_rounded,
+                          : HugeIcon(
+                              icon: _playing
+                                  ? HugeIcons.strokeRoundedPause
+                                  : HugeIcons.strokeRoundedPlay,
                               color: Colors.white,
-                              size: 22,
+                              size: 28,
                             ),
                 ),
-                const SizedBox(width: 6),
+                const SizedBox(width: 8),
                 Expanded(
                   child: SizedBox(
                     height: 30,

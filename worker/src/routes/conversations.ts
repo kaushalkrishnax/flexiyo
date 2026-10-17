@@ -25,14 +25,13 @@ const requestDecisionSchema = z.object({
   action: z.enum(['accept', 'reject']),
 });
 
-const VALID_TIMERS = [0, 30, 60, 300, 3600, 86400, 604800] as const;
+const VALID_TIMERS = [-1, 0, 3600, 21600, 86400, 604800] as const;
 const disappearingTimerSchema = z.object({
   timer: z.union([
     z.literal(0),
-    z.literal(30),
-    z.literal(60),
-    z.literal(300),
+    z.literal(-1),
     z.literal(3600),
+    z.literal(21600),
     z.literal(86400),
     z.literal(604800),
   ]),
@@ -453,28 +452,11 @@ conversationsRouter.patch(
     }
 
     const { timer } = parsed.data;
-    const now = Math.floor(Date.now() / 1000);
 
     await env.DB.prepare(
       'UPDATE conversations SET disappearing_timer = ? WHERE id = ?',
     )
       .bind(timer, id)
-      .run();
-
-    // Insert a system message to record the change
-    const msgId = generateId();
-    await env.DB.prepare(
-      `INSERT INTO messages
-         (id, conversation_id, sender_id, message_type, is_unsent, created_at, system_data)
-       VALUES (?, ?, ?, 'system', 0, ?, ?)`,
-    )
-      .bind(
-        msgId,
-        id,
-        userId,
-        now,
-        JSON.stringify({ event: 'disappearing_timer_changed', timer, changedBy: userId }),
-      )
       .run();
 
     // Notify via Durable Object
@@ -492,6 +474,11 @@ conversationsRouter.patch(
         }),
       }),
     );
+
+    // Both chat lists mirror the shared timer immediately.
+    await notifyInboxes(env, [conv.user_a_id, conv.user_b_id], () => [
+      { type: 'conversation_refresh', conversationId: id },
+    ]);
 
     return new Response(
       JSON.stringify({ conversationId: id, disappearingTimer: timer }),

@@ -173,9 +173,9 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
   }
 
   Future<void> _pickFromGallery() async {
-    final bytes = await showMediaGallerySheet(context);
-    if (bytes != null && mounted) {
-      setState(() => _captured = bytes);
+    final result = await showMediaGallerySheet(context);
+    if (result != null && mounted) {
+      setState(() => _captured = result.bytes);
     }
   }
 

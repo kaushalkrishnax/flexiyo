@@ -5,6 +5,7 @@ import 'package:flexiyo/widgets/confirm_popup.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:hugeicons/hugeicons.dart';
 
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
@@ -18,7 +19,7 @@ class SettingsScreen extends ConsumerWidget {
       appBar: AppBar(
         title: const Text('Settings'),
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
+          icon: const HugeIcon(icon: HugeIcons.strokeRoundedArrowLeft01),
           onPressed: () {
             if (context.canPop()) {
               context.pop();
@@ -33,17 +34,17 @@ class SettingsScreen extends ConsumerWidget {
         child: ListView(
           children: [
             ListTile(
-              leading: const Icon(Icons.person_outline_rounded),
+              leading: const HugeIcon(icon: HugeIcons.strokeRoundedUserCircle),
               title: const Text('Account'),
               subtitle: Text(authState.user?.username ?? 'Signed out'),
             ),
             const ListTile(
-              leading: Icon(Icons.lock_outline_rounded),
+              leading: HugeIcon(icon: HugeIcons.strokeRoundedLock),
               title: Text('Privacy'),
               subtitle: Text('End-to-end encryption is enabled by the client.'),
             ),
             ListTile(
-              leading: const Icon(Icons.dark_mode_outlined),
+              leading: const HugeIcon(icon: HugeIcons.strokeRoundedMoon02),
               title: const Text('Appearance'),
               subtitle: Text(
                 themeMode == ThemeMode.system
@@ -56,7 +57,7 @@ class SettingsScreen extends ConsumerWidget {
             ),
             const Divider(),
             ListTile(
-              leading: const Icon(Icons.system_update_alt_rounded),
+              leading: const HugeIcon(icon: HugeIcons.strokeRoundedSystemUpdate01),
               title: const Text('Check for updates'),
               subtitle: const Text('Download and install the latest release'),
               onTap: () async {
@@ -76,7 +77,7 @@ class SettingsScreen extends ConsumerWidget {
             ),
             const Divider(),
             ListTile(
-              leading: const Icon(Icons.logout_rounded, color: Colors.red),
+              leading: const HugeIcon(icon: HugeIcons.strokeRoundedLogOut, color: Colors.red),
               title: const Text('Log out'),
               onTap: () async {
                 final confirmed = await _showLogoutDialog(context);

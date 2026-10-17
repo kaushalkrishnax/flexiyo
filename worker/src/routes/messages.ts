@@ -9,6 +9,7 @@ import {
   getMessageSendDenial,
 } from '../services/messagePermissions.js';
 import { notifyInboxes } from '../services/inbox.js';
+import { deleteMessages } from '../services/message_deletion.js';
 import { sendPushToUser } from '../services/push.js';
 import { getConversationForMember } from './conversations.js';
 
@@ -137,6 +138,8 @@ messagesRouter.get(
            ON myd.message_id = m.id AND myd.recipient_device_id = ?
          WHERE m.conversation_id = ?
            AND ld.id IS NULL
+           AND m.is_unsent = 0
+           AND m.message_type != 'system'
            AND (m.expires_at IS NULL OR m.expires_at > ?)
            AND (? IS NULL OR m.created_at >= ?)
            AND m.created_at < ?
@@ -172,6 +175,8 @@ messagesRouter.get(
            ON myd.message_id = m.id AND myd.recipient_device_id = ?
          WHERE m.conversation_id = ?
            AND ld.id IS NULL
+           AND m.is_unsent = 0
+           AND m.message_type != 'system'
            AND (m.expires_at IS NULL OR m.expires_at > ?)
            AND (? IS NULL OR m.created_at >= ?)
          ORDER BY m.created_at DESC
@@ -287,9 +292,8 @@ messagesRouter.post(
 
     const now = Math.floor(Date.now() / 1000);
 
-    // Calculate expiry based on conversation's disappearing timer
-    const expiresAt =
-      conv.disappearing_timer > 0 ? now + conv.disappearing_timer : null;
+    // Disappearing-message timers start when a recipient reads the message.
+    const expiresAt = null;
 
     const senderDevice = await resolveRequestDevice(request, env, userId);
     const recipientDeviceIds = (
@@ -593,6 +597,18 @@ messagesRouter.post(
     }
 
     const now = Math.floor(Date.now() / 1000);
+    const unreadMessages = await env.DB.prepare(
+      `SELECT DISTINCT m.id
+       FROM messages m
+       JOIN message_deliveries md ON md.message_id = m.id
+       WHERE m.conversation_id = ? AND m.sender_id != ? AND m.is_unsent = 0
+         AND md.read_at IS NULL
+         AND md.recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)`,
+    )
+      .bind(conversationId, userId, userId)
+      .all<{ id: string }>();
+    const newlyReadMessageIds = (unreadMessages.results ?? []).map((row) => row.id);
+
     // Reading is an ACCOUNT-level action: mark read (and implied delivered)
     // for every device of this account so sibling devices stay in sync.
     await env.DB.prepare(
@@ -619,6 +635,19 @@ messagesRouter.post(
         readAt: now,
       }),
     }));
+
+    if (newlyReadMessageIds.length > 0) {
+      if (conversation.disappearing_timer === -1) {
+        await deleteMessages(env, conversationId, newlyReadMessageIds);
+      } else if (conversation.disappearing_timer > 0) {
+        const placeholders = newlyReadMessageIds.map(() => '?').join(', ');
+        await env.DB.prepare(
+          `UPDATE messages SET expires_at = ? WHERE id IN (${placeholders})`,
+        )
+          .bind(now + conversation.disappearing_timer, ...newlyReadMessageIds)
+          .run();
+      }
+    }
 
     return new Response(JSON.stringify({ read: true, readAt: now }), {
       status: 200,
@@ -922,47 +951,7 @@ messagesRouter.delete(
       }
     }
 
-    if (message.is_unsent === 1) {
-      return new Response(JSON.stringify({ deleted: true, scope: 'global' }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    // Mark as unsent; clear payload everywhere to prevent payload leakage
-    await env.DB.prepare(
-      `UPDATE messages SET is_unsent = 1, encrypted_payload = NULL WHERE id = ?`,
-    )
-      .bind(messageId)
-      .run();
-    await env.DB.prepare(
-      `UPDATE message_deliveries SET payload = NULL WHERE message_id = ?`,
-    )
-      .bind(messageId)
-      .run();
-
-    const doId = env.CHAT_ROOM.idFromName(conversationId);
-    const stub = env.CHAT_ROOM.get(doId);
-    await stub.fetch(
-      new Request('https://internal/broadcast', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: 'message_unsent',
-          messageId,
-          conversationId,
-          unsentAt: now,
-        }),
-      }),
-    );
-
-    // Keep the other participant's chat-list preview in sync ("Message unsent").
-    const otherParticipant = conv.user_a_id === userId ? conv.user_b_id : conv.user_a_id;
-    await notifyInboxes(env, [otherParticipant], () => [{
-      type: 'message_unsent',
-      conversationId,
-      messageId,
-    }]);
+    await deleteMessages(env, conversationId, [messageId]);
 
     return new Response(JSON.stringify({ deleted: true, scope: 'global' }), {
       status: 200,
@@ -1122,4 +1111,3 @@ messagesRouter.post(
     );
   },
 );
-

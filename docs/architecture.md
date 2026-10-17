@@ -98,7 +98,6 @@ Sender device                   Worker                    Recipient device
      │                             │ 3. Validate auth             │
      │                             │    Validate membership       │
      │                             │    Store ciphertext in D1    │
-     │                             │    Compute expires_at        │
      │                             │                              │
      │                             │ 4. Durable Object broadcast  │
      │◄────────────────────────────│─────────────────────────────►│
@@ -219,20 +218,33 @@ Client                        Worker (D1)
 
 ## Message Expiry Architecture
 
+Disappearing timers start on read, never on send:
+
 ```
+Worker receives POST /conversations/:id/read
+  │
+  ├── Marks deliveries read and broadcasts the read receipt
+  │
+  ├── Timer = "disappear immediately"
+  │     DELETE messages rows, recompute last_message_at,
+  │     broadcast message_deleted, refresh both inboxes
+  │
+  └── Timer > 0
+        SET expires_at = now + timer on the newly read messages
+
 Worker receives GET /conversations/:id/messages
-  │
-  ├── WHERE expires_at IS NULL OR expires_at > unixepoch()
-  │   (never return expired messages, even before cleanup)
-  │
-  └── Scheduled cleanup (triggered on each request if last cleanup > X ago):
-        DELETE encrypted_payload FROM messages
-        WHERE expires_at IS NOT NULL AND expires_at < unixepoch()
-        (keeps row for delivery state, clears ciphertext)
+  └── WHERE expires_at IS NULL OR expires_at > unixepoch()
+      (never return expired messages, even before cleanup)
+
+Scheduled cleanup (each trigger, throttled to once a minute):
+  └── For messages with expires_at <= unixepoch():
+        DELETE messages rows, recompute last_message_at,
+        broadcast message_deleted, refresh both inboxes
 
 Flutter client:
-  ├── On message render: filter where expiresAt != null && expiresAt < DateTime.now()
-  └── On WebSocket event: remove from local list immediately
+  ├── Purges locally expired rows on conversation load and when a timer elapses
+  ├── Removes messages on message_deleted WebSocket events
+  └── Filters expired rows out of local reads
 ```
 
 ---

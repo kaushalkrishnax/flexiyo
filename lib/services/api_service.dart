@@ -438,8 +438,8 @@ class ApiService {
     return ApiException(message, statusCode: status);
   }
 
-  Future<void> markConversationRead(String conversationId) async {
-    await _post('/api/conversations/$conversationId/read', const {});
+  Future<Map<String, dynamic>> markConversationRead(String conversationId) {
+    return _post('/api/conversations/$conversationId/read', const {});
   }
 }
 

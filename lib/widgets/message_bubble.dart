@@ -1,8 +1,10 @@
+import 'package:flexiyo/core/seen_status.dart';
 import 'package:flexiyo/models/message.dart';
 import 'package:flexiyo/widgets/avatar.dart';
 import 'package:flexiyo/widgets/media_image_bubble.dart';
 import 'package:flexiyo/widgets/media_voice_bubble.dart';
 import 'package:flutter/material.dart';
+import 'package:hugeicons/hugeicons.dart';
 
 /// Distance (logical px) a bubble slides when fully swiped for a reply.
 const double kMessageSwipeMaxOffset = 96;
@@ -65,9 +67,8 @@ class MessageBubble extends StatelessWidget {
   /// Whether this bubble is the one currently under the reply swipe.
   final bool swiping;
 
-  /// Drives the timestamp peek: as its value grows a compact "5:33 pm"
-  /// label fades in beside the bubble (left of own bubbles, right of
-  /// incoming ones) without taking any layout space. Null disables it.
+  /// Drives the chat-wide timestamp peek: message rows slide left and their
+  /// timestamps appear in a shared right-aligned lane. Null disables it.
   final Animation<double>? timesReveal;
 
   BorderRadius _bubbleRadius() {
@@ -97,97 +98,71 @@ class MessageBubble extends StatelessWidget {
     }
   }
 
-  Widget _replyQuote(BuildContext context, Message replied) {
-    final cs = Theme.of(context).colorScheme;
-    final quoteText = replied.isUnsent
-        ? 'Message unsent'
-        : (replied.mediaRef?.label ?? replied.decryptedText ?? '');
-    final isQuoteUnsent = replied.isUnsent;
-
+  /// Caption above the quoted bubble, e.g. "You replied to aadha".
+  String _replyLabel(Message replied) {
     // Was the replied-to message sent by the current user? If the quoted
     // message shares this bubble's sender it comes from the same party.
     final quotedIsMine =
         replied.senderId == message.senderId ? isMine : !isMine;
 
-    final String label;
     if (isMine) {
-      label = quotedIsMine
+      return quotedIsMine
           ? 'You replied to yourself'
           : 'You replied to $otherUsername';
-    } else {
-      label = quotedIsMine
-          ? '$otherUsername replied to you'
-          : '$otherUsername replied to their own message';
     }
+    return quotedIsMine
+        ? '$otherUsername replied to you'
+        : '$otherUsername replied to themselves';
+  }
 
-    final labelColor =
-        isMine ? Colors.white.withValues(alpha: 0.75) : cs.onSurfaceVariant;
-    final barColor = isMine ? Colors.white.withValues(alpha: 0.9) : cs.primary;
+  /// Faded copy of the quoted message, sized like a regular bubble so the
+  /// reply visibly answers the real thing.
+  Widget _replyParentBubble(
+    BuildContext context,
+    Message replied, {
+    required double maxWidth,
+    required bool isDark,
+  }) {
+    final quoteText = replied.mediaRef?.label ?? replied.decryptedText ?? '';
 
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w500,
-              color: labelColor,
-            ),
-          ),
-          const SizedBox(height: 3),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Flexible(
-                child: Text(
-                  quoteText,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 14,
-                    color: isMine
-                        ? Colors.white.withValues(alpha: 0.95)
-                        : cs.onSurface,
-                    fontStyle:
-                        isQuoteUnsent ? FontStyle.italic : FontStyle.normal,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Container(
-                width: 3,
-                height: 24,
-                decoration: BoxDecoration(
-                  color: barColor,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ],
-          ),
-        ],
+    final quoteBg = isMine
+        ? const Color(0xFF1572DB).withValues(alpha: 0.38)
+        : (isDark
+            ? Colors.white.withValues(alpha: 0.06)
+            : const Color(0xFFEDEEF1));
+    final quoteTextColor = isMine
+        ? Colors.white.withValues(alpha: 0.82)
+        : (isDark ? Colors.white : const Color(0xFF000B13))
+            .withValues(alpha: 0.62);
+
+    return Container(
+      constraints: BoxConstraints(maxWidth: maxWidth),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: quoteBg,
+        borderRadius: BorderRadius.circular(24),
+      ),
+      child: Text(
+        quoteText.isEmpty ? 'Message' : quoteText,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: Theme.of(context)
+            .textTheme
+            .bodyMedium
+            ?.copyWith(color: quoteTextColor),
       ),
     );
   }
 
-  Widget _unsentBubble(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+  /// Vertical pipe hugging the quoted bubble on the side the reply came from:
+  /// right for my replies, left for the other person's.
+  Widget _replyPipe(bool isDark) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      key: const ValueKey('replyPipe'),
+      width: 3,
       decoration: BoxDecoration(
-        border: Border.all(color: cs.outlineVariant),
-        borderRadius: _bubbleRadius(),
-      ),
-      child: Text(
-        'Message unsent',
-        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: cs.onSurfaceVariant,
-              fontStyle: FontStyle.italic,
-            ),
+        color: isDark ? Colors.white30 : Colors.black26,
+        borderRadius: BorderRadius.circular(2),
       ),
     );
   }
@@ -199,19 +174,6 @@ class MessageBubble extends StatelessWidget {
     final screenWidth = MediaQuery.sizeOf(context).width;
 
     final verticalPad = isLast ? 14.0 : 6.0;
-
-    if (message.isUnsent) {
-      return _UnsentRow(
-        isMine: isMine,
-        showAvatar: showAvatar,
-        otherUsername: otherUsername,
-        verticalPad: verticalPad,
-        isSelected: isSelected,
-        onTap: onTap,
-        onLongPress: onLongPress,
-        child: _unsentBubble(context),
-      );
-    }
 
     final isMediaMessage = message.isMedia;
     final bodyText =
@@ -250,7 +212,9 @@ class MessageBubble extends StatelessWidget {
     final showFailed =
         isMine && isLast && message.status == MessageStatus.failed;
 
-    final bubble = GestureDetector(
+    final maxBubbleWidth = screenWidth * (isMediaMessage ? 0.78 : 0.7);
+
+    final bubbleCore = GestureDetector(
       onTap: onTap,
       onLongPress: onLongPress,
       onLongPressStart: onLongPressStart,
@@ -258,9 +222,7 @@ class MessageBubble extends StatelessWidget {
         clipBehavior: Clip.none,
         children: [
           Container(
-            constraints: BoxConstraints(
-              maxWidth: screenWidth * (isMediaMessage ? 0.78 : 0.7),
-            ),
+            constraints: BoxConstraints(maxWidth: maxBubbleWidth),
             padding: isMediaMessage
                 ? const EdgeInsets.all(0)
                 : const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -269,17 +231,10 @@ class MessageBubble extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                if (replyToMessage != null)
-                  _replyQuote(context, replyToMessage!),
                 if (isMediaMessage)
-                  Padding(
-                    padding: replyToMessage != null
-                        ? const EdgeInsets.only(top: 6)
-                        : EdgeInsets.zero,
-                    child: message.isVoiceMedia
-                        ? MediaVoiceBubble(message: message, isMine: isMine)
-                        : MediaImageBubble(message: message, isMine: isMine),
-                  )
+                  message.isVoiceMedia
+                      ? MediaVoiceBubble(message: message, isMine: isMine)
+                      : MediaImageBubble(message: message, isMine: isMine)
                 else
                   Text(
                     bodyText,
@@ -309,8 +264,8 @@ class MessageBubble extends StatelessWidget {
                         if (message.isEdited && showFailed)
                           const SizedBox(width: 5),
                         if (showFailed)
-                          const Icon(
-                            Icons.close,
+                          const HugeIcon(
+                            icon: HugeIcons.strokeRoundedCancel01,
                             size: 12,
                             color: Colors.redAccent,
                           ),
@@ -369,6 +324,59 @@ class MessageBubble extends StatelessWidget {
       ),
     );
 
+    // A reply is drawn as a grey caption naming the reply, the faded parent
+    // bubble with a pipe on the reply's side, then the answer itself.
+    final bubble = replyToMessage == null
+        ? bubbleCore
+        : Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment:
+                isMine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+            children: [
+              ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: maxBubbleWidth),
+                child: Text(
+                  _replyLabel(replyToMessage!),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13,
+                    height: 1.2,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.grey[500],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 4),
+              Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Padding(
+                    padding: EdgeInsets.only(
+                      right: isMine ? 10 : 0,
+                      left: isMine ? 0 : 10,
+                    ),
+                    child: _replyParentBubble(
+                      context,
+                      replyToMessage!,
+                      maxWidth: maxBubbleWidth,
+                      isDark: isDark,
+                    ),
+                  ),
+                  Positioned(
+                    top: 3,
+                    bottom: 3,
+                    right: isMine ? 0 : null,
+                    left: isMine ? null : 0,
+                    child: _replyPipe(isDark),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              bubbleCore,
+            ],
+          );
+
     final hasReaction =
         message.reaction != null && message.reaction!.isNotEmpty;
 
@@ -385,7 +393,7 @@ class MessageBubble extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.only(top: 3),
                 child: Text(
-                  'Seen',
+                  seenStatusLabel(message.readAt),
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
                         color: Colors.grey[500],
                       ),
@@ -440,44 +448,6 @@ class _BubbleRow extends StatelessWidget {
   final String? timesLabel;
   final Widget child;
 
-  /// Zero-width slot that paints the compact time beside the bubble while
-  /// the held timestamp peek is active; it occupies no layout space, so the
-  /// bubble never shifts while the times fade in.
-  Widget _timesGutter(BuildContext context) {
-    final reveal = timesReveal;
-    final label = timesLabel;
-    if (reveal == null || label == null) return const SizedBox.shrink();
-    return SizedBox(
-      width: 0,
-      height: 18,
-      child: AnimatedBuilder(
-        animation: reveal,
-        builder: (context, _) {
-          return Opacity(
-            opacity: reveal.value,
-            child: OverflowBox(
-              maxWidth: 220,
-              alignment: isMine ? Alignment.centerRight : Alignment.centerLeft,
-              child: Padding(
-                padding: EdgeInsets.only(
-                  left: isMine ? 0 : 8,
-                  right: isMine ? 8 : 0,
-                ),
-                child: Text(
-                  label,
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        fontSize: 12,
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -500,80 +470,82 @@ class _BubbleRow extends StatelessWidget {
       );
     }
 
+    final row = Row(
+      mainAxisAlignment: isMine ? MainAxisAlignment.end : MainAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        if (!isMine) ...[
+          if (showAvatar)
+            Padding(
+              padding: const EdgeInsets.only(right: 6),
+              child: UserAvatar(username: otherUsername, radius: 14),
+            )
+          else
+            const SizedBox(width: 34),
+        ],
+        bubble,
+      ],
+    );
+
+    final reveal = timesReveal;
+    final label = timesLabel;
+    final rowContent = reveal == null || label == null
+        ? row
+        : AnimatedBuilder(
+            animation: reveal,
+            child: row,
+            builder: (context, child) {
+              final progress = reveal.value;
+              return Stack(
+                children: [
+                  Transform.translate(
+                    offset: Offset(-88 * progress, 0),
+                    child: child,
+                  ),
+                  Positioned(
+                    top: 0,
+                    bottom: 0,
+                    right: 8,
+                    child: IgnorePointer(
+                      child: Opacity(
+                        opacity: progress,
+                        child: Center(
+                          child: Text(
+                            label,
+                            style: Theme.of(context)
+                                .textTheme
+                                .labelSmall
+                                ?.copyWith(
+                                  fontSize: 12,
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .onSurfaceVariant,
+                                ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            },
+          );
+
     return AnimatedContainer(
       duration: const Duration(milliseconds: 150),
-      color: isSelected
-          ? cs.primaryContainer.withValues(alpha: 0.25)
-          : Colors.transparent,
+      color: isSelected ? cs.primaryContainer.withValues(alpha: 0.25) : null,
       padding: EdgeInsets.only(
         left: 8,
-        right: 8,
+        right: isMine ? 4 : 8,
         top: verticalPad / 2,
         bottom: verticalPad / 2 + (hasReaction ? 8.0 : 0.0),
       ),
-      child: Row(
-        mainAxisAlignment:
-            isMine ? MainAxisAlignment.end : MainAxisAlignment.start,
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          if (!isMine) ...[
-            if (showAvatar)
-              Padding(
-                padding: const EdgeInsets.only(right: 6),
-                child: UserAvatar(username: otherUsername, radius: 14),
-              )
-            else
-              const SizedBox(width: 34),
-          ],
-          if (isMine) _timesGutter(context),
-          bubble,
-          if (!isMine) _timesGutter(context),
-        ],
-      ),
+      child: rowContent,
     );
   }
 }
 
-/// Variant of [_BubbleRow] used for unsent (tombstone) bubbles.
-class _UnsentRow extends StatelessWidget {
-  const _UnsentRow({
-    required this.isMine,
-    required this.showAvatar,
-    required this.otherUsername,
-    required this.verticalPad,
-    required this.isSelected,
-    required this.onTap,
-    required this.onLongPress,
-    required this.child,
-  });
-
-  final bool isMine;
-  final bool showAvatar;
-  final String otherUsername;
-  final double verticalPad;
-  final bool isSelected;
-  final VoidCallback? onTap;
-  final VoidCallback? onLongPress;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      onLongPress: onLongPress,
-      child: _BubbleRow(
-        isMine: isMine,
-        showAvatar: showAvatar,
-        otherUsername: otherUsername,
-        verticalPad: verticalPad,
-        isSelected: isSelected,
-        child: child,
-      ),
-    );
-  }
-}
-
-/// Compact "5:33 pm" label shown beside a message during the timestamp peek.
+/// Compact "5:33 pm" label shown in the right-side timestamp lane.
 String _compactTime(DateTime when) {
   final local = when.toLocal();
   final hour = local.hour % 12 == 0 ? 12 : local.hour % 12;

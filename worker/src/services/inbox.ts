@@ -29,9 +29,8 @@ export type InboxEvent =
       conversationId: string;
     }
   | {
-      type: 'message_unsent';
+      type: 'conversation_refresh';
       conversationId: string;
-      messageId: string;
     };
 
 /**

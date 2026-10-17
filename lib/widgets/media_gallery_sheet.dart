@@ -4,9 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:hugeicons/hugeicons.dart';
 import 'package:photo_manager/photo_manager.dart';
 
-/// Gallery picker popup; resolves with the selected image bytes.
-Future<Uint8List?> showMediaGallerySheet(BuildContext context) {
-  return showModalBottomSheet<Uint8List>(
+/// Gallery picker popup; resolves with the selected image bytes and whether
+/// the user picked "Edit" (open the preview/crop flow) or a direct send.
+Future<({Uint8List bytes, bool edit})?> showMediaGallerySheet(
+  BuildContext context,
+) {
+  return showModalBottomSheet<({Uint8List bytes, bool edit})>(
     context: context,
     isScrollControlled: true,
     backgroundColor: const Color(0xFF1B1B1D),
@@ -253,7 +256,7 @@ class _MediaGallerySheetState extends State<_MediaGallerySheet> {
     }
   }
 
-  Future<void> _confirm() async {
+  Future<void> _confirm({required bool edit}) async {
     final asset = _selected;
     if (asset == null || _preparing) return;
     setState(() => _preparing = true);
@@ -264,7 +267,7 @@ class _MediaGallerySheetState extends State<_MediaGallerySheet> {
         bytes = await file?.readAsBytes();
       }
       if (bytes != null && mounted) {
-        Navigator.of(context).pop(bytes);
+        Navigator.of(context).pop((bytes: bytes, edit: edit));
         return;
       }
     } catch (_) {}
@@ -381,25 +384,34 @@ class _MediaGallerySheetState extends State<_MediaGallerySheet> {
               child: Row(
                 children: [
                   const Spacer(),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 18, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: Colors.white12,
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: const Text(
-                      'Edit',
-                      style: TextStyle(
-                        color: Colors.white70,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
+                  GestureDetector(
+                    onTap: _selected == null || _preparing
+                        ? null
+                        : () => _confirm(edit: true),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 18, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: Colors.white12,
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Text(
+                        'Edit',
+                        style: TextStyle(
+                          color: _selected == null
+                              ? Colors.white38
+                              : Colors.white70,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ),
                   ),
                   const SizedBox(width: 12),
                   GestureDetector(
-                    onTap: _selected == null ? null : _confirm,
+                    onTap: _selected == null || _preparing
+                        ? null
+                        : () => _confirm(edit: false),
                     child: Container(
                       width: 74,
                       height: 42,
@@ -637,13 +649,13 @@ class _SourceMenu extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           _item(
-            icon: Icons.photo_library_outlined,
+            icon: HugeIcons.strokeRoundedImage01,
             label: 'Recents',
             selected: recentsSelected,
             onTap: () => onSelected(_SourceAction.recents),
           ),
           _item(
-            icon: Icons.grid_view_rounded,
+            icon: HugeIcons.strokeRoundedGridView,
             label: 'All albums',
             selected: allAlbumsSelected,
             onTap: () => onSelected(_SourceAction.allAlbums),
@@ -654,7 +666,7 @@ class _SourceMenu extends StatelessWidget {
   }
 
   Widget _item({
-    required IconData icon,
+    required List<List<dynamic>> icon,
     required String label,
     required bool selected,
     required VoidCallback onTap,
@@ -673,7 +685,7 @@ class _SourceMenu extends StatelessWidget {
         ),
         child: Row(
           children: [
-            Icon(icon, color: Colors.white, size: 23),
+            HugeIcon(icon: icon, color: Colors.white, size: 23),
             const SizedBox(width: 16),
             Text(
               label,

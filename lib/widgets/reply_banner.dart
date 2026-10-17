@@ -1,5 +1,6 @@
 import 'package:flexiyo/models/message.dart';
 import 'package:flutter/material.dart';
+import 'package:hugeicons/hugeicons.dart';
 
 /// Displays a reply preview banner in the composer area when the user has
 /// selected a message to reply to.
@@ -19,8 +20,7 @@ class ReplyBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final previewText =
-        message.isUnsent ? 'Message unsent' : (message.decryptedText ?? '');
+    final previewText = message.decryptedText ?? '';
 
     return Container(
       decoration: BoxDecoration(
@@ -62,9 +62,6 @@ class ReplyBanner extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: cs.onSurfaceVariant,
-                        fontStyle: message.isUnsent
-                            ? FontStyle.italic
-                            : FontStyle.normal,
                       ),
                 ),
               ],
@@ -73,7 +70,7 @@ class ReplyBanner extends StatelessWidget {
           // Dismiss button
           IconButton(
             onPressed: onDismiss,
-            icon: const Icon(Icons.close, size: 18),
+            icon: const HugeIcon(icon: HugeIcons.strokeRoundedCancel01, size: 18),
             color: cs.onSurfaceVariant,
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(minWidth: 32, minHeight: 32),

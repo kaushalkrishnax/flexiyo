@@ -35,6 +35,7 @@ const mode = arg.slice(2);
 const PUBSPEC = path.join(ROOT, 'pubspec.yaml');
 const PBXPROJ = path.join(ROOT, 'ios', 'Runner.xcodeproj', 'project.pbxproj');
 const PACKAGE_JSON = path.join(ROOT, 'package.json');
+const APP_VERSION_DART = path.join(ROOT, 'lib', 'core', 'app_version.dart');
 
 function getCurrentVersion() {
   const pubspec = fs.readFileSync(PUBSPEC, 'utf8');
@@ -60,6 +61,15 @@ function setVersion(newVersion) {
   fs.writeFileSync(
     PUBSPEC,
     pubspec.replace(/^version:\s*.+$/m, `version: ${newVersion}+${versionCode}`),
+  );
+
+  const appVersionDart = fs.readFileSync(APP_VERSION_DART, 'utf8');
+  fs.writeFileSync(
+    APP_VERSION_DART,
+    appVersionDart.replace(
+      /defaultValue: '[^']+'/,
+      `defaultValue: '${newVersion}'`,
+    ),
   );
 
   const packageJson = JSON.parse(fs.readFileSync(PACKAGE_JSON, 'utf8'));

@@ -6,6 +6,7 @@ import 'package:flexiyo/services/api_service.dart';
 import 'package:flexiyo/services/google_auth_service.dart';
 import 'package:flexiyo/widgets/auth_background.dart';
 import 'package:flexiyo/widgets/auth_text_field.dart';
+import 'package:flexiyo/widgets/google_sign_in_button.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -168,21 +169,13 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
     });
   }
 
-  Future<void> _handleGoogleSignUp() async {
-    if (_googleSubmitting) return;
-
+  Future<void> _handleGoogleResult(GoogleAuthResult googleResult) async {
     setState(() {
       _googleSubmitting = true;
       _usernameError = null;
     });
 
     try {
-      final googleResult = await GoogleAuthService.instance.signIn();
-      if (googleResult == null) {
-        if (mounted) setState(() => _googleSubmitting = false);
-        return;
-      }
-
       await ref.read(authProvider.notifier).loginWithGoogle(
             idToken: googleResult.idToken,
             email: googleResult.email,
@@ -201,6 +194,11 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
         setState(() => _googleSubmitting = false);
       }
     }
+  }
+
+  void _handleGoogleError(Object error) {
+    if (!mounted) return;
+    setState(() => _usernameError = _formatError(error));
   }
 
   // Step 2: Password Creation & Registration
@@ -489,14 +487,14 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                   ),
                 )
               : (hasError
-                  ? const Icon(
-                      Icons.error_outline_rounded,
+                  ? const HugeIcon(
+                      icon: HugeIcons.strokeRoundedAlertCircle,
                       color: Color(0xFFED4956),
                       size: 24,
                     )
                   : (isAvailable
-                      ? const Icon(
-                          Icons.check_circle_outline,
+                      ? const HugeIcon(
+                          icon: HugeIcons.strokeRoundedCheckmarkCircle02,
                           color: Color(0xFF22C55E),
                           size: 24,
                         )
@@ -583,65 +581,11 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
         const SizedBox(height: 20),
 
         // Google Sign Up Button
-        SizedBox(
-          height: 48,
-          child: OutlinedButton(
-            onPressed: _googleSubmitting ? null : _handleGoogleSignUp,
-            style: OutlinedButton.styleFrom(
-              backgroundColor: isDark ? const Color(0xFF18181B) : Colors.white,
-              side: BorderSide(
-                color:
-                    isDark ? AppTheme.borderDefault : const Color(0xFFE4E4E7),
-                width: 1.0,
-              ),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(24),
-              ),
-            ),
-            child: _googleSubmitting
-                ? Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2.0,
-                          color: isDark ? Colors.white : Colors.black87,
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        'Connecting to Google…',
-                        style: TextStyle(
-                          color:
-                              isDark ? Colors.white : const Color(0xFF18181B),
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14,
-                        ),
-                      ),
-                    ],
-                  )
-                : Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const HugeIcon(
-                        icon: HugeIcons.strokeRoundedGoogle,
-                        size: 20,
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        'Sign up with Google',
-                        style: TextStyle(
-                          color:
-                              isDark ? Colors.white : const Color(0xFF18181B),
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14,
-                        ),
-                      ),
-                    ],
-                  ),
-          ),
+        GoogleSignInButton(
+          busy: _googleSubmitting,
+          signUp: true,
+          onResult: _handleGoogleResult,
+          onError: _handleGoogleError,
         ),
 
         const SizedBox(height: 28),
@@ -712,10 +656,10 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
           autofocus: true,
           textInputAction: TextInputAction.next,
           trailing: IconButton(
-            icon: Icon(
-              _obscurePassword
-                  ? Icons.visibility_off_outlined
-                  : Icons.visibility_outlined,
+            icon: HugeIcon(
+              icon: _obscurePassword
+                  ? HugeIcons.strokeRoundedViewOff
+                  : HugeIcons.strokeRoundedView,
               size: 20,
               color: isDark ? Colors.white54 : Colors.black54,
             ),
@@ -734,10 +678,10 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
           textInputAction: TextInputAction.done,
           onSubmitted: (_) => _handleCreateAccount(),
           trailing: IconButton(
-            icon: Icon(
-              _obscureConfirmPassword
-                  ? Icons.visibility_off_outlined
-                  : Icons.visibility_outlined,
+            icon: HugeIcon(
+              icon: _obscureConfirmPassword
+                  ? HugeIcons.strokeRoundedViewOff
+                  : HugeIcons.strokeRoundedView,
               size: 20,
               color: isDark ? Colors.white54 : Colors.black54,
             ),
@@ -762,8 +706,8 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
             ),
             child: Row(
               children: [
-                const Icon(
-                  Icons.error_outline_rounded,
+                const HugeIcon(
+                  icon: HugeIcons.strokeRoundedAlertCircle,
                   color: Color(0xFFED4956),
                   size: 18,
                 ),
@@ -934,7 +878,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
               ),
               const SizedBox(height: 14),
               _buildBenefitRow(
-                icon: Icons.vpn_key_rounded,
+                icon: HugeIcons.strokeRoundedKey01,
                 iconColor: const Color(0xFF38BDF8),
                 title: 'Account Recovery',
                 desc:
@@ -943,7 +887,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
               ),
               const SizedBox(height: 12),
               _buildBenefitRow(
-                icon: Icons.shield_rounded,
+                icon: HugeIcons.strokeRoundedShield01,
                 iconColor: const Color(0xFF34D399),
                 title: 'Security Alerts',
                 desc:
@@ -952,7 +896,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
               ),
               const SizedBox(height: 12),
               _buildBenefitRow(
-                icon: Icons.mark_email_read_rounded,
+                icon: HugeIcons.strokeRoundedMailCheck,
                 iconColor: const Color(0xFFF472B6),
                 title: 'Zero Spam Guarantee',
                 desc:
@@ -1054,8 +998,8 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
             ),
             child: Row(
               children: [
-                const Icon(
-                  Icons.check_circle_outline,
+                const HugeIcon(
+                  icon: HugeIcons.strokeRoundedCheckmarkCircle02,
                   color: Color(0xFF22C55E),
                   size: 20,
                 ),
@@ -1192,7 +1136,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
   }
 
   Widget _buildBenefitRow({
-    required IconData icon,
+    required List<List<dynamic>> icon,
     required Color iconColor,
     required String title,
     required String desc,
@@ -1207,7 +1151,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
             color: iconColor.withValues(alpha: 0.15),
             shape: BoxShape.circle,
           ),
-          child: Icon(icon, color: iconColor, size: 16),
+          child: HugeIcon(icon: icon, color: iconColor, size: 16),
         ),
         const SizedBox(width: 12),
         Expanded(

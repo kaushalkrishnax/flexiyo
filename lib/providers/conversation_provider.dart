@@ -103,6 +103,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   WsService? _ws;
   StreamSubscription<Map<String, dynamic>>? _wsSub;
   Timer? _typingTimer;
+  Timer? _expiryTimer;
   bool _peerIsTyping = false;
 
   static const _uuid = Uuid();
@@ -111,6 +112,16 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
   Future<void> initialize() async {
     state = state.copyWith(isLoading: true, clearError: true);
+
+    // Clearing the badge as soon as the chat opens keeps the inbox in sync
+    // without waiting for the server round-trip below.
+    _ref.read(chatsProvider.notifier).setActiveConversation(conversationId);
+
+    // Drop stale local rows before they are rendered; the server has either
+    // deleted them or marked them expired.
+    try {
+      await LocalDb.instance.purgeExpiredMessages(conversationId);
+    } catch (_) {}
 
     final cachedConversation = _ref
         .read(chatsProvider)
@@ -213,8 +224,9 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
         // Mark as read only if accepted
         _ref.read(chatsProvider.notifier).markRead(conversationId);
+        _scheduleExpiryPurge();
         if (conv.requestStatus == 'accepted' && !(await _isRestricted())) {
-          unawaited(_api.markConversationRead(conversationId));
+          unawaited(_markConversationRead());
         }
       }
     } catch (e) {
@@ -252,8 +264,8 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         unawaited(_onRemoteNewMessage(event));
       case 'message_edited':
         unawaited(_onRemoteMessageEdited(event));
-      case 'message_unsent':
-        _onRemoteMessageUnsent(event);
+      case 'message_deleted':
+        _onRemoteMessageDeleted(event);
       case 'typing_start':
         _onPeerTypingStart();
       case 'typing_stop':
@@ -271,6 +283,8 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         _onMessagesRead(event);
       case 'message_reaction':
         _onRemoteMessageReaction(event);
+      case 'disappearing_timer_changed':
+        _onDisappearingTimerChanged(event);
       default:
         break;
     }
@@ -362,13 +376,14 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
     _upsertMessage(msg);
     await LocalDb.instance.upsertMessage(msg.toJson());
+    _scheduleExpiryPurge();
 
     // Send delivery acknowledgement
     _ws?.sendDeliveryAck(msgId);
 
     final isIncoming = senderId != _myUserId;
     if (isIncoming && state.conversation?.requestStatus == 'accepted' && !(await _isRestricted())) {
-      unawaited(_api.markConversationRead(conversationId));
+      unawaited(_markConversationRead());
     }
 
     // Media envelopes render as a friendly label in the chat list.
@@ -381,19 +396,123 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         );
   }
 
+  /// The disappearing timer is shared: whichever side changes it, both open
+  /// chats follow immediately.
+  void _onDisappearingTimerChanged(Map<String, dynamic> event) {
+    final timer = event['timer'];
+    final current = state.conversation;
+    if (timer is! int || current == null) return;
+    state = state.copyWith(
+      conversation: current.copyWith(disappearingTimer: timer),
+    );
+  }
+
   void _onMessagesRead(Map<String, dynamic> event) {
     if (event['readBy'] == _myUserId) return;
     final readAtRaw = event['readAt'];
     if (readAtRaw is! int) return;
     final readAtMs = readAtRaw > 1e12 ? readAtRaw : readAtRaw * 1000;
+    final readAt = DateTime.fromMillisecondsSinceEpoch(readAtMs);
+    final timer = state.conversation?.disappearingTimer ?? 0;
+    final expiresAt = timer == -1
+        ? readAt
+        : timer > 0
+            ? readAt.add(Duration(seconds: timer))
+            : null;
     final updated = state.messages.map((message) {
       if (message.senderId == _myUserId &&
           message.createdAt.millisecondsSinceEpoch <= readAtMs) {
-        return message.copyWith(status: MessageStatus.read);
+        return message.copyWith(
+          status: MessageStatus.read,
+          readAt: readAt,
+          expiresAt: expiresAt,
+        );
       }
       return message;
     }).toList();
     state = state.copyWith(messages: updated);
+    for (final message in updated) {
+      if (message.senderId == _myUserId &&
+          message.readAt == readAt &&
+          expiresAt != null) {
+        unawaited(LocalDb.instance.upsertMessage(message.toJson()));
+      }
+    }
+    _purgeExpiredMessages();
+
+    _ref.read(chatsProvider.notifier).markPeerSeen(conversationId, readAt);
+  }
+
+  Future<void> _markConversationRead() async {
+    try {
+      final result = await _api.markConversationRead(conversationId);
+      final readAtRaw = result['readAt'];
+      if (readAtRaw is! int) return;
+      final timer = state.conversation?.disappearingTimer ?? 0;
+      if (timer == 0) return;
+
+      final readAtSeconds = readAtRaw > 1e12 ? readAtRaw ~/ 1000 : readAtRaw;
+      final readAt = DateTime.fromMillisecondsSinceEpoch(readAtSeconds * 1000);
+      final expiresAt = timer == -1
+          ? readAt
+          : readAt.add(Duration(seconds: timer));
+      final updated = state.messages.map((message) {
+        if (message.senderId != _myUserId &&
+            message.createdAt.millisecondsSinceEpoch <= readAt.millisecondsSinceEpoch &&
+            message.expiresAt == null) {
+          return message.copyWith(expiresAt: expiresAt);
+        }
+        return message;
+      }).toList();
+      state = state.copyWith(messages: updated);
+      for (final message in updated) {
+        if (message.senderId != _myUserId && message.expiresAt == expiresAt) {
+          unawaited(LocalDb.instance.upsertMessage(message.toJson()));
+        }
+      }
+      _purgeExpiredMessages();
+    } catch (_) {}
+  }
+
+  /// Schedules a local purge for the next message expiry so the chat stays
+  /// clean without waiting for the server's cron pass.
+  void _scheduleExpiryPurge() {
+    _expiryTimer?.cancel();
+    final now = DateTime.now();
+    DateTime? next;
+    for (final message in state.messages) {
+      final expiresAt = message.expiresAt;
+      if (expiresAt != null &&
+          expiresAt.isAfter(now) &&
+          (next == null || expiresAt.isBefore(next))) {
+        next = expiresAt;
+      }
+    }
+    if (next == null) return;
+    _expiryTimer = Timer(next.difference(now), _purgeExpiredMessages);
+  }
+
+  void _purgeExpiredMessages() {
+    _expiryTimer?.cancel();
+    final now = DateTime.now();
+    final expired = state.messages
+        .where((message) =>
+            message.expiresAt != null && !message.expiresAt!.isAfter(now))
+        .toList();
+    if (expired.isNotEmpty) {
+      final expiredIds = expired.map((message) => message.id).toSet();
+      state = state.copyWith(
+        messages: state.messages
+            .where((message) => !expiredIds.contains(message.id))
+            .toList(),
+        clearReplyTo: expiredIds.contains(state.replyTo?.id),
+      );
+      for (final message in expired) {
+        unawaited(_deleteSecureMessageText(message.id));
+        unawaited(LocalDb.instance.deleteMessage(message.id));
+      }
+    }
+    _scheduleExpiryPurge();
   }
 
   Future<void> _onRemoteMessageEdited(Map<String, dynamic> event) async {
@@ -453,21 +572,16 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     }
   }
 
-  void _onRemoteMessageUnsent(Map<String, dynamic> event) {
+  void _onRemoteMessageDeleted(Map<String, dynamic> event) {
     final msgId = event['messageId'] as String?;
     if (msgId == null) return;
 
-    final updated = state.messages.map((m) {
-      if (m.id == msgId) {
-        return m.copyWith(isUnsent: true, clearDecryptedText: true);
-      }
-      return m;
-    }).toList();
-
-    state = state.copyWith(messages: updated);
+    state = state.copyWith(
+      messages: state.messages.where((message) => message.id != msgId).toList(),
+      clearReplyTo: state.replyTo?.id == msgId,
+    );
     unawaited(_deleteSecureMessageText(msgId));
-    LocalDb.instance.markUnsent(msgId);
-    _ref.read(chatsProvider.notifier).onMessageUnsent(conversationId);
+    unawaited(LocalDb.instance.deleteMessage(msgId));
   }
 
   void _onRemoteMessageReaction(Map<String, dynamic> event) {
@@ -677,18 +791,16 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     // the server can purge the file from storage along with the unsend.
     final mediaId = msg.mediaRef?.id;
 
-    // Optimistic remove
-    _upsertMessage(msg.copyWith(isUnsent: true, clearDecryptedText: true));
-    _ref.read(chatsProvider.notifier).onMessageUnsent(conversationId);
-
     try {
       await _api.unsendMessage(conversationId, messageId, mediaId: mediaId);
-      final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
-      await crypto.deleteLocalMessageText(messageId);
-      LocalDb.instance.markUnsent(messageId);
+      state = state.copyWith(
+        messages:
+            state.messages.where((message) => message.id != messageId).toList(),
+        clearReplyTo: state.replyTo?.id == messageId,
+      );
+      await _deleteSecureMessageText(messageId);
+      await LocalDb.instance.deleteMessage(messageId);
     } catch (e) {
-      // Rollback
-      _upsertMessage(msg);
       if (mounted) state = state.copyWith(error: 'Unsend failed: $e');
     }
   }
@@ -886,6 +998,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     _ws?.onConnectionChanged = null;
     _outgoingTypingTimer?.cancel();
     _typingTimer?.cancel();
+    _expiryTimer?.cancel();
     _wsSub?.cancel();
     _ws?.dispose();
     super.dispose();

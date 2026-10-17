@@ -9,6 +9,7 @@ import 'package:flexiyo/widgets/skeleton.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:hugeicons/hugeicons.dart';
 
 class MessageRequestsScreen extends ConsumerStatefulWidget {
   const MessageRequestsScreen({super.key});
@@ -59,9 +60,7 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
           final messages = await api.getMessages(request.id, limit: 1);
           if (messages.isNotEmpty) {
             final message = messages.first;
-            if (message.isUnsent) {
-              preview = 'Message unsent';
-            } else if (message.encryptedPayload != null) {
+            if (message.encryptedPayload != null) {
               preview = await crypto.getLocalMessageText(message.id) ??
                   await crypto.decryptFromUser(
                     senderId: message.senderId,
@@ -137,13 +136,13 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
                   ),
                 );
               },
-              icon: const Icon(Icons.more_vert_rounded),
+              icon: const HugeIcon(icon: HugeIcons.strokeRoundedMoreVertical),
             ),
           ),
           IconButton(
             onPressed: _loading ? null : _loadRequests,
             tooltip: 'Refresh requests',
-            icon: const Icon(Icons.refresh_rounded),
+            icon: const HugeIcon(icon: HugeIcons.strokeRoundedRefresh),
           ),
         ],
       ),
@@ -158,7 +157,7 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
                       const SizedBox(height: 12),
                       FilledButton.icon(
                         onPressed: _loadRequests,
-                        icon: const Icon(Icons.refresh_rounded),
+                        icon: const HugeIcon(icon: HugeIcons.strokeRoundedRefresh),
                         label: const Text('Retry'),
                       ),
                     ],
@@ -211,8 +210,8 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
                                         tooltip: 'Delete request',
                                         onPressed: () => _respond(request,
                                             accept: false),
-                                        icon: Icon(
-                                          Icons.close_rounded,
+                                        icon: HugeIcon(
+                                          icon: HugeIcons.strokeRoundedCancel01,
                                           color: colorScheme.error,
                                         ),
                                       ),
@@ -220,8 +219,8 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
                                         tooltip: 'Accept request',
                                         onPressed: () => _respond(request,
                                             accept: true),
-                                        icon: Icon(
-                                          Icons.check_rounded,
+                                        icon: HugeIcon(
+                                          icon: HugeIcons.strokeRoundedCheck,
                                           color: colorScheme.primary,
                                         ),
                                       ),

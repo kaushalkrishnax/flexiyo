@@ -12,6 +12,8 @@ export interface ConversationListRow {
   unread_count: number;
   conversant_username: string;
   conversant_id: string;
+  peer_seen_at: number | null;
+  last_message_is_mine: number | null;
 }
 
 export function parseScope(url: URL): ConversationScope {
@@ -24,14 +26,14 @@ const INBOX_WHERE = `
       (c.request_status = 'accepted'
         OR (c.request_status = 'pending'
           AND c.initiated_by_id = ?
-          AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)))
+          AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.is_unsent = 0)))
       AND NOT EXISTS (SELECT 1 FROM user_blocks ub
         WHERE ub.blocker_id = ? AND ub.blocked_id =
           CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END)`;
 
 const REQUESTS_WHERE = `
       (c.request_status = 'pending' AND c.initiated_by_id != ?)
-      AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
+       AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.is_unsent = 0)
       AND NOT EXISTS (SELECT 1 FROM user_blocks ub
         WHERE ub.blocker_id = ? AND ub.blocked_id =
           CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END)`;
@@ -40,7 +42,7 @@ const BLOCKED_WHERE = `
       EXISTS (SELECT 1 FROM user_blocks ub
         WHERE ub.blocker_id = ? AND ub.blocked_id =
           CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END)
-      AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)`;
+       AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.is_unsent = 0)`;
 
 const UNREAD_COUNT = `(SELECT COUNT(*) FROM message_deliveries md
       JOIN messages m ON m.id = md.message_id
@@ -49,12 +51,27 @@ const UNREAD_COUNT = `(SELECT COUNT(*) FROM message_deliveries md
         AND m.conversation_id = c.id AND m.is_unsent = 0
         AND m.sender_id != ?)`;
 
+/// When the conversant last read a message of mine (drives "Seen …" labels).
+const PEER_SEEN_AT = `(SELECT MAX(md.read_at) FROM message_deliveries md
+      JOIN messages m ON m.id = md.message_id
+      WHERE m.conversation_id = c.id AND m.sender_id = ?
+        AND m.is_unsent = 0 AND md.read_at IS NOT NULL)`;
+
+/// Whether the newest message is mine, so the inbox only shows a read
+/// receipt when the conversant has seen that message.
+const LAST_MESSAGE_IS_MINE = `(SELECT CASE WHEN m.sender_id = ? THEN 1 ELSE 0 END
+      FROM messages m
+      WHERE m.conversation_id = c.id AND m.is_unsent = 0
+      ORDER BY m.created_at DESC, m.id DESC LIMIT 1)`;
+
+
 export function conversationListQuery(
   userId: string,
   scope: Exclude<ConversationScope, 'all'>,
 ): { sql: string; binds: string[] } {
   const binds: string[] = [];
   binds.push(userId, userId); // unread sub-query
+  binds.push(userId, userId); // peer seen + last message sender
   binds.push(userId, userId); // participants selectors
   binds.push(userId, userId); // participants WHERE
   if (scope === 'inbox') {
@@ -76,10 +93,18 @@ export function conversationListQuery(
       c.id,
       c.disappearing_timer,
       c.created_at,
-      c.last_message_at,
+      CASE WHEN EXISTS (
+        SELECT 1 FROM messages old_deleted
+        WHERE old_deleted.conversation_id = c.id AND old_deleted.is_unsent = 1
+      ) THEN (
+        SELECT MAX(active_message.created_at) FROM messages active_message
+        WHERE active_message.conversation_id = c.id AND active_message.is_unsent = 0
+      ) ELSE c.last_message_at END AS last_message_at,
       c.request_status,
       c.initiated_by_id,
       ${UNREAD_COUNT} AS unread_count,
+      ${PEER_SEEN_AT} AS peer_seen_at,
+      ${LAST_MESSAGE_IS_MINE} AS last_message_is_mine,
       CASE WHEN c.user_a_id = ? THEN ub.username ELSE ua.username END AS conversant_username,
       CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END AS conversant_id
     FROM conversations c
@@ -103,6 +128,8 @@ export function mapConversationRow(
     lastMessageAt: row.last_message_at,
     lastMessagePreview: null,
     unreadCount: row.unread_count,
+    peerSeenAt: row.peer_seen_at ?? null,
+    lastMessageIsMine: row.last_message_is_mine === 1,
     createdAt: row.created_at,
   };
 }

@@ -373,8 +373,8 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar>
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             color: _phase == _RecPhase.paused
-                                ? const Color(0xFFFFC400)
-                                    .withValues(alpha: 0.22)
+                                ? const Color(0xFFFFD54F)
+                                    .withValues(alpha: 0.16)
                                 : Colors.transparent,
                           ),
                           child: IconButton(

@@ -27,7 +27,7 @@ class LocalDb {
 
     final database = await openDatabase(
       path,
-      version: 5,
+      version: 7,
       onCreate: _createSchema,
       onUpgrade: _onUpgrade,
     );
@@ -58,7 +58,8 @@ class LocalDb {
         edited_at INTEGER,
         status TEXT NOT NULL DEFAULT 'sent',
         reply_to_id TEXT,
-        reaction TEXT
+        reaction TEXT,
+        read_at INTEGER
       );
     ''');
 
@@ -183,6 +184,22 @@ class LocalDb {
         // Fresh installs or old upgrades already on the new layout.
       }
     }
+    if (oldVersion < 6) {
+      try {
+        await database.execute(
+          'ALTER TABLE messages ADD COLUMN read_at INTEGER;',
+        );
+      } catch (_) {}
+    }
+    if (oldVersion < 7) {
+      await database.delete('messages', where: 'is_unsent = 1');
+      await database.update(
+        'conversations',
+        {'last_message_preview': null},
+        where: 'last_message_preview = ?',
+        whereArgs: ['Message unsent'],
+      );
+    }
   }
 
   Future<void> upsertMessage(Map<String, dynamic> row) async {
@@ -200,12 +217,17 @@ class LocalDb {
     int? beforeCreatedAt,
   }) async {
     final database = await db;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
     final String where = beforeCreatedAt != null
-        ? 'conversation_id = ? AND is_locally_deleted = 0 AND created_at < ?'
-        : 'conversation_id = ? AND is_locally_deleted = 0';
+        ? 'conversation_id = ? AND is_locally_deleted = 0 AND is_unsent = 0 '
+            "AND message_type != 'system' "
+            'AND (expires_at IS NULL OR expires_at > ?) AND created_at < ?'
+        : 'conversation_id = ? AND is_locally_deleted = 0 AND is_unsent = 0 '
+            "AND message_type != 'system' "
+            'AND (expires_at IS NULL OR expires_at > ?)';
     final List<Object?> args = beforeCreatedAt != null
-        ? [conversationId, beforeCreatedAt]
-        : [conversationId];
+        ? [conversationId, nowMs, beforeCreatedAt]
+        : [conversationId, nowMs];
 
     return database.query(
       'messages',
@@ -230,13 +252,19 @@ class LocalDb {
     );
   }
 
-  Future<void> markUnsent(String messageId) async {
+  Future<void> deleteMessage(String messageId) async {
     final database = await db;
-    await database.update(
+    await database.delete('messages', where: 'id = ?', whereArgs: [messageId]);
+  }
+
+  /// Removes messages whose read-based disappearing timer has elapsed.
+  Future<void> purgeExpiredMessages(String conversationId) async {
+    final database = await db;
+    await database.delete(
       'messages',
-      {'is_unsent': 1, 'encrypted_payload': null},
-      where: 'id = ?',
-      whereArgs: [messageId],
+      where:
+          'conversation_id = ? AND expires_at IS NOT NULL AND expires_at <= ?',
+      whereArgs: [conversationId, DateTime.now().millisecondsSinceEpoch],
     );
   }
 

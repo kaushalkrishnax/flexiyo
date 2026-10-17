@@ -4,7 +4,6 @@ import 'package:flexiyo/screens/auth/register_screen.dart';
 import 'package:flexiyo/screens/chats/chats_screen.dart';
 import 'package:flexiyo/screens/chats/chat_state_lists_screen.dart';
 import 'package:flexiyo/screens/chats/message_requests_screen.dart';
-import 'package:flexiyo/screens/chats/new_chat_screen.dart';
 import 'package:flexiyo/screens/conversation/conversation_screen.dart';
 import 'package:flexiyo/screens/settings/settings_screen.dart';
 import 'package:flutter/material.dart';
@@ -29,6 +28,17 @@ class AppRouterNotifier extends ChangeNotifier {
   final Ref _ref;
   String? _pendingDeepLink;
 
+  /// Queued by a notification tap or an incoming link; consumed by the next
+  /// redirect once the session is ready.
+  String? _queuedDeepLink;
+
+  /// Routes the next redirect to [location] — used when an external event
+  /// (like a notification tap) arrives before the app can navigate directly.
+  void queueDeepLink(String location) {
+    _queuedDeepLink = location;
+    notifyListeners();
+  }
+
   String? redirect(BuildContext context, GoRouterState state) {
     final auth = _ref.read(authProvider);
     final hasSession = _ref.read(initialSessionProvider);
@@ -44,6 +54,16 @@ class AppRouterNotifier extends ChangeNotifier {
       final path = state.uri.path;
       final query = state.uri.query.isNotEmpty ? '?${state.uri.query}' : '';
       return '/$host$path$query';
+    }
+
+    // A queued deep link (notification tap) wins over the requested location
+    // as soon as a session exists.
+    if (auth.isAuthenticated) {
+      final queued = _queuedDeepLink;
+      if (queued != null) {
+        _queuedDeepLink = null;
+        if (queued != location) return queued;
+      }
     }
 
     if (!auth.isInitialized) {
@@ -130,11 +150,6 @@ final routerProvider = Provider<GoRouter>((ref) {
         name: 'chats',
         builder: (context, state) => const ChatsScreen(),
         routes: [
-          GoRoute(
-            path: 'new',
-            name: 'new-chat',
-            builder: (context, state) => const NewChatScreen(),
-          ),
           GoRoute(
             path: 'requests',
             name: 'message-requests',

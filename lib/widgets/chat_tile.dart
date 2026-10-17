@@ -36,7 +36,6 @@ class ChatTile extends StatelessWidget {
 
     final hasUnread = conversation.unreadCount > 0;
     final preview = conversation.lastMessagePreview;
-    final isUnsent = preview == 'Message unsent';
     final timestamp = conversation.lastMessageAt;
 
     return InkWell(
@@ -70,9 +69,7 @@ class ChatTile extends StatelessWidget {
                     const SizedBox(height: 2),
                     // Last message preview / message count
                     Text(
-                      isUnsent
-                          ? 'Message unsent'
-                          : hasUnread
+                      hasUnread
                               ? (conversation.unreadCount >= 4
                                   ? '4+ new messages'
                                   : conversation.unreadCount == 3
@@ -93,8 +90,6 @@ class ChatTile extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                       style: tt.bodySmall?.copyWith(
                         color: cs.onSurfaceVariant,
-                        fontStyle:
-                            isUnsent ? FontStyle.italic : FontStyle.normal,
                       ),
                     ),
                   ],

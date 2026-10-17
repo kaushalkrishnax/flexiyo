@@ -334,10 +334,9 @@ export type DOEvent =
       editedAt: number;
     }
   | {
-      type: 'message_unsent';
+      type: 'message_deleted';
       messageId: string;
       conversationId: string;
-      unsentAt: number;
     }
   | {
       type: 'message_reaction';

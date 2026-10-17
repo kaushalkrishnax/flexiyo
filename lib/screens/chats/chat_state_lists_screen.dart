@@ -1,6 +1,7 @@
 import 'package:flexiyo/models/conversation.dart';
 import 'package:flexiyo/providers/chat_provider.dart';
 import 'package:flexiyo/widgets/avatar.dart';
+import 'package:flexiyo/widgets/skeleton.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -29,21 +30,23 @@ class _RestrictedChatsScreenState
     final items = chatsState.restrictedChats;
     return Scaffold(
       appBar: AppBar(title: const Text('Restricted')),
-      body: items.isEmpty
-          ? const Center(child: Text('No restricted chats'))
-          : ListView.separated(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              itemCount: items.length,
-              separatorBuilder: (_, __) => const Divider(height: 1),
-              itemBuilder: (context, index) {
-                final conv = items[index];
-                return _StateChatTile(
-                  conversation: conv,
-                  onTap: () =>
-                      context.go('/chats/${conv.id}?browse=restricted'),
-                );
-              },
-            ),
+      body: !chatsState.hasLoaded && items.isEmpty
+          ? const ChatsSkeletonList(itemCount: 5)
+          : items.isEmpty
+              ? const Center(child: Text('No restricted chats'))
+              : ListView.separated(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  itemCount: items.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (context, index) {
+                    final conv = items[index];
+                    return _StateChatTile(
+                      conversation: conv,
+                      onTap: () =>
+                          context.go('/chats/${conv.id}?browse=restricted'),
+                    );
+                  },
+                ),
     );
   }
 }
@@ -71,20 +74,22 @@ class _BlockedChatsScreenState extends ConsumerState<BlockedChatsScreen> {
     final items = chatsState.blockedChats;
     return Scaffold(
       appBar: AppBar(title: const Text('Blocked')),
-      body: items.isEmpty
-          ? const Center(child: Text('No blocked chats'))
-          : ListView.separated(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              itemCount: items.length,
-              separatorBuilder: (_, __) => const Divider(height: 1),
-              itemBuilder: (context, index) {
-                final conv = items[index];
-                return _StateChatTile(
-                  conversation: conv,
-                  onTap: () => context.go('/chats/${conv.id}?browse=blocked'),
-                );
-              },
-            ),
+      body: !chatsState.hasLoaded && items.isEmpty
+          ? const ChatsSkeletonList(itemCount: 5)
+          : items.isEmpty
+              ? const Center(child: Text('No blocked chats'))
+              : ListView.separated(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  itemCount: items.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (context, index) {
+                    final conv = items[index];
+                    return _StateChatTile(
+                      conversation: conv,
+                      onTap: () => context.go('/chats/${conv.id}?browse=blocked'),
+                    );
+                  },
+                ),
     );
   }
 }

@@ -1,6 +1,10 @@
+import type { Env } from '../types.js';
+import { deleteMessages } from './message_deletion.js';
+
 const CLEANUP_INTERVAL_SECONDS = 60;
 
-export async function cleanExpiredMessages(db: D1Database): Promise<void> {
+export async function cleanExpiredMessages(env: Env): Promise<void> {
+  const db = env.DB;
   const now = Math.floor(Date.now() / 1000);
 
   // Skip if a cleanup ran recently (timestamp kept in the migration-managed
@@ -16,17 +20,23 @@ export async function cleanExpiredMessages(db: D1Database): Promise<void> {
     return; // Too soon — skip
   }
 
-  // Null out expired message payloads
-  await db
+  const expired = await db
     .prepare(
-      `UPDATE messages
-       SET encrypted_payload = NULL
-       WHERE expires_at IS NOT NULL
-         AND expires_at < ?
-         AND encrypted_payload IS NOT NULL`,
+      `SELECT id, conversation_id FROM messages
+       WHERE expires_at IS NOT NULL AND expires_at <= ?`,
     )
     .bind(now)
-    .run();
+    .all<{ id: string; conversation_id: string }>();
+
+  const byConversation = new Map<string, string[]>();
+  for (const message of expired.results ?? []) {
+    const ids = byConversation.get(message.conversation_id) ?? [];
+    ids.push(message.id);
+    byConversation.set(message.conversation_id, ids);
+  }
+  for (const [conversationId, ids] of byConversation) {
+    await deleteMessages(env, conversationId, ids);
+  }
 
   // Update last cleanup timestamp
   await db

@@ -16,6 +16,19 @@ class PushService {
 
   static bool _firebaseReady = false;
   static bool _refreshListenerAttached = false;
+  static bool _tapListenerAttached = false;
+  static bool _initialMessageChecked = false;
+
+  /// Invoked with the conversation id when the user taps a message
+  /// notification; the app shell owns the actual navigation.
+  static void Function(String conversationId)? onConversationOpened;
+
+  static void _handleNotificationTap(RemoteMessage message) {
+    final conversationId = message.data['conversationId'];
+    if (conversationId is String && conversationId.isNotEmpty) {
+      onConversationOpened?.call(conversationId);
+    }
+  }
 
   /// Registers this device's FCM token with the backend. [register] posts the
   /// token to the API (the caller owns auth), so this class stays free of
@@ -50,6 +63,21 @@ class PushService {
         } catch (_) {
           // Retried on the next sign-in or app start.
         }
+      }
+
+      if (!_tapListenerAttached) {
+        _tapListenerAttached = true;
+        // Taps that arrive while the app is running in the background.
+        FirebaseMessaging.onMessageOpenedApp.listen(_handleNotificationTap);
+      }
+
+      if (!_initialMessageChecked) {
+        _initialMessageChecked = true;
+        // Tap that launched the app from a terminated state.
+        try {
+          final initial = await messaging.getInitialMessage();
+          if (initial != null) _handleNotificationTap(initial);
+        } catch (_) {}
       }
 
       if (!_refreshListenerAttached) {

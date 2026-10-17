@@ -27,6 +27,7 @@ class Message {
     this.editedAt,
     this.replyToId,
     this.reaction,
+    this.readAt,
   });
 
   final String id;
@@ -48,6 +49,9 @@ class Message {
   final MessageStatus status;
   final String? replyToId;
   final String? reaction;
+
+  /// When the recipient read one of my messages; null until read.
+  final DateTime? readAt;
 
   /// Parses the inline media envelope (`FYMEDIA:...`) from the decrypted text.
   MediaRef? get mediaRef {
@@ -107,6 +111,9 @@ class Message {
       ),
       replyToId: json['replyToId'] as String?,
       reaction: json['reaction'] as String?,
+      readAt: json['readAt'] != null
+          ? _parseTimestamp(json['readAt'])
+          : null,
     );
   }
 
@@ -139,6 +146,9 @@ class Message {
       ),
       replyToId: json['reply_to_id'] as String?,
       reaction: json['reaction'] as String?,
+      readAt: json['read_at'] != null
+          ? _parseTimestamp(json['read_at'])
+          : null,
     );
   }
 
@@ -170,6 +180,7 @@ class Message {
         'status': status.name,
         if (replyToId != null) 'reply_to_id': replyToId,
         if (reaction != null) 'reaction': reaction,
+        if (readAt != null) 'read_at': readAt!.millisecondsSinceEpoch,
       };
 
   Message copyWith({
@@ -192,6 +203,7 @@ class Message {
     bool clearReplyToId = false,
     String? reaction,
     bool clearReaction = false,
+    DateTime? readAt,
   }) {
     return Message(
       id: id ?? this.id,
@@ -211,6 +223,7 @@ class Message {
       status: status ?? this.status,
       replyToId: clearReplyToId ? null : (replyToId ?? this.replyToId),
       reaction: clearReaction ? null : (reaction ?? this.reaction),
+      readAt: readAt ?? this.readAt,
     );
   }
 

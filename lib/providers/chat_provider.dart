@@ -15,6 +15,7 @@ class ChatsState {
     this.requestCount = 0,
     this.isLoading = false,
     this.error,
+    this.hasLoaded = false,
   });
 
   final List<Conversation> conversations;
@@ -24,6 +25,10 @@ class ChatsState {
   final bool isLoading;
   final String? error;
 
+  /// True once the first server seed (or a failed attempt) has been applied,
+  /// so empty states are not flashed while the initial load is in flight.
+  final bool hasLoaded;
+
   ChatsState copyWith({
     List<Conversation>? conversations,
     List<Conversation>? restrictedChats,
@@ -32,6 +37,7 @@ class ChatsState {
     bool? isLoading,
     String? error,
     bool clearError = false,
+    bool? hasLoaded,
   }) {
     return ChatsState(
       conversations: conversations ?? this.conversations,
@@ -40,6 +46,7 @@ class ChatsState {
       requestCount: requestCount ?? this.requestCount,
       isLoading: isLoading ?? this.isLoading,
       error: clearError ? null : (error ?? this.error),
+      hasLoaded: hasLoaded ?? this.hasLoaded,
     );
   }
 }
@@ -52,6 +59,16 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
   bool _initialized = false;
   WsService? _inboxWs;
   StreamSubscription<Map<String, dynamic>>? _inboxWsSub;
+
+  /// Conversation currently on screen; incoming messages for it must not bump
+  /// the unread badge the user is already looking at.
+  String? _activeConversationId;
+
+  static DateTime? _laterOf(DateTime? a, DateTime? b) {
+    if (a == null) return b;
+    if (b == null) return a;
+    return a.isAfter(b) ? a : b;
+  }
 
   static List<Conversation> _sort(List<Conversation> items) {
     final list = [...items];
@@ -98,6 +115,7 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
           conversation.lastMessageAt != null &&
           c.lastMessageAt!.millisecondsSinceEpoch ~/ 1000 ==
               conversation.lastMessageAt!.millisecondsSinceEpoch ~/ 1000;
+      final peerSeenAt = _laterOf(c.peerSeenAt, conversation.peerSeenAt);
       return sameLatestMessage
           ? conversation.copyWith(
               lastMessagePreview: c.lastMessagePreview,
@@ -105,8 +123,11 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
               isPinned: c.isPinned,
               isMuted: c.isMuted,
               isRestricted: c.isRestricted,
+              peerSeenAt: peerSeenAt,
+              lastMessageIsMine:
+                  c.lastMessageIsMine || conversation.lastMessageIsMine,
             )
-          : conversation;
+          : conversation.copyWith(peerSeenAt: peerSeenAt);
     }
 
     final hydrated = await _hydrate(
@@ -139,7 +160,7 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
             !blockedIds.contains(c.id) &&
             c.requestStatus == 'pending' &&
             c.initiatedById != null &&
-            c.initiatedById != c.otherUserId)
+            c.initiatedById == c.otherUserId)
         .length;
 
     final sortedActive = _sort(active);
@@ -152,6 +173,7 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
       blockedChats: sortedBlocked,
       requestCount: pendingCount,
       isLoading: false,
+      hasLoaded: true,
       clearError: true,
     );
 
@@ -201,7 +223,11 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
         await _applySeed(seed.conversations, seed.requests, blockedServer);
       } catch (e) {
         if (mounted) {
-          state = state.copyWith(isLoading: false, error: e.toString());
+          state = state.copyWith(
+            isLoading: false,
+            error: e.toString(),
+            hasLoaded: true,
+          );
         }
       }
     }
@@ -278,11 +304,8 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
           markRead(conversationId);
         }
         break;
-      case 'message_unsent':
-        final conversationId = event['conversationId'] as String?;
-        if (conversationId != null) {
-          onMessageUnsent(conversationId);
-        }
+      case 'conversation_refresh':
+        unawaited(load(forceRefresh: true));
         break;
       default:
         break;
@@ -300,6 +323,24 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
       isRestricted:
           row != null && (row['is_restricted'] as int? ?? 0) == 1,
     );
+
+    // Upsert payloads do not carry preview/read-receipt state; keep the local
+    // values while the latest message is unchanged.
+    final local = _findConversation(conversation.id);
+    final sameLatestMessage = local != null &&
+        local.lastMessageAt != null &&
+        hydrated.lastMessageAt != null &&
+        local.lastMessageAt!.millisecondsSinceEpoch ~/ 1000 ==
+            hydrated.lastMessageAt!.millisecondsSinceEpoch ~/ 1000;
+    final merged = sameLatestMessage
+        ? hydrated.copyWith(
+            lastMessagePreview:
+                hydrated.lastMessagePreview ?? local.lastMessagePreview,
+            peerSeenAt: _laterOf(local.peerSeenAt, hydrated.peerSeenAt),
+            lastMessageIsMine:
+                local.lastMessageIsMine || hydrated.lastMessageIsMine,
+          )
+        : hydrated;
 
     final isBlocked = state.blockedChats.any((c) => c.id == conversation.id);
 
@@ -333,17 +374,17 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     if (hydrated.isRestricted) {
       final list = [...state.restrictedChats]
         ..removeWhere((c) => c.id == conversation.id);
-      list.insert(0, hydrated);
+      list.insert(0, merged);
       state = state.copyWith(restrictedChats: _sort(list));
     } else if (isBlocked) {
       final list = [...state.blockedChats]
         ..removeWhere((c) => c.id == conversation.id);
-      list.insert(0, hydrated);
+      list.insert(0, merged);
       state = state.copyWith(blockedChats: _sort(list));
     } else {
       final list = [...state.conversations]
         ..removeWhere((c) => c.id == conversation.id);
-      list.insert(0, hydrated);
+      list.insert(0, merged);
       state = state.copyWith(conversations: _sort(list));
     }
     await LocalDb.instance.upsertConversation(_conversationToDbRow(conversation));
@@ -435,6 +476,28 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     );
   }
 
+  Future<void> updateDisappearingTimer(
+    String conversationId,
+    int timerSeconds,
+  ) async {
+    final conversation = _findConversation(conversationId);
+    if (conversation == null) return;
+
+    await _api.updateDisappearingTimer(conversationId, timerSeconds);
+    final updated = conversation.copyWith(disappearingTimer: timerSeconds);
+    List<Conversation> update(List<Conversation> list) => [
+          for (final item in list)
+            if (item.id == conversationId) updated else item,
+        ];
+
+    state = state.copyWith(
+      conversations: update(state.conversations),
+      restrictedChats: update(state.restrictedChats),
+      blockedChats: update(state.blockedChats),
+    );
+    await LocalDb.instance.upsertConversation(_conversationToDbRow(updated));
+  }
+
   Future<void> toggleRestrict(String conversationId) async {
     final idx = state.conversations.indexWhere((c) => c.id == conversationId);
     if (idx == -1) return;
@@ -509,6 +572,8 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     required DateTime lastMessageAt,
     bool isIncoming = false,
   }) {
+    final readWhileOpen =
+        isIncoming && _activeConversationId == conversationId;
     void update(List<Conversation> list) {
       final idx = list.indexWhere((c) => c.id == conversationId);
       if (idx == -1) return;
@@ -521,7 +586,10 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
       list[idx] = current.copyWith(
         lastMessagePreview: preview,
         lastMessageAt: lastMessageAt,
-        unreadCount: isIncoming ? current.unreadCount + 1 : current.unreadCount,
+        unreadCount: isIncoming && !readWhileOpen
+            ? current.unreadCount + 1
+            : current.unreadCount,
+        lastMessageIsMine: !isIncoming,
       );
     }
 
@@ -541,26 +609,83 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
       conversationId,
       preview: preview,
       lastMessageAt: lastMessageAt.millisecondsSinceEpoch,
-      unreadDelta: isIncoming ? 1 : 0,
+      unreadDelta: isIncoming && !readWhileOpen ? 1 : 0,
     );
   }
 
+  Conversation? _findConversation(String conversationId) {
+    for (final list in [
+      state.conversations,
+      state.restrictedChats,
+      state.blockedChats,
+    ]) {
+      for (final conversation in list) {
+        if (conversation.id == conversationId) return conversation;
+      }
+    }
+    return null;
+  }
+
+  /// Marks [conversationId] as on screen so incoming messages are counted as
+  /// already read, and clears any pending badge for it.
+  void setActiveConversation(String conversationId) {
+    _activeConversationId = conversationId;
+    markRead(conversationId);
+  }
+
+  void clearActiveConversation(String conversationId) {
+    if (_activeConversationId == conversationId) {
+      _activeConversationId = null;
+    }
+  }
+
   void markRead(String conversationId) {
-    final list = [...state.conversations];
-    final idx = list.indexWhere((c) => c.id == conversationId);
-    if (idx == -1) return;
-    if (list[idx].unreadCount == 0) return;
-    list[idx] = list[idx].copyWith(unreadCount: 0);
-    state = state.copyWith(conversations: list);
+    bool cleared = false;
+    List<Conversation> zeroed(List<Conversation> list) {
+      final idx = list.indexWhere((c) => c.id == conversationId);
+      if (idx == -1 || list[idx].unreadCount == 0) return list;
+      final next = [...list];
+      next[idx] = next[idx].copyWith(unreadCount: 0);
+      cleared = true;
+      return next;
+    }
+
+    final conversations = zeroed(state.conversations);
+    final restricted = zeroed(state.restrictedChats);
+    final blocked = zeroed(state.blockedChats);
+    if (!cleared) return;
+    state = state.copyWith(
+      conversations: conversations,
+      restrictedChats: restricted,
+      blockedChats: blocked,
+    );
     LocalDb.instance.clearUnreadCount(conversationId);
   }
 
-  void onMessageUnsent(String conversationId) {
-    final list = [...state.conversations];
-    final idx = list.indexWhere((c) => c.id == conversationId);
-    if (idx == -1) return;
-    list[idx] = list[idx].copyWith(lastMessagePreview: 'Message unsent');
-    state = state.copyWith(conversations: list);
+  /// Records that the other user saw my messages up to [seenAt].
+  void markPeerSeen(String conversationId, DateTime seenAt) {
+    bool touched = false;
+    List<Conversation> update(List<Conversation> list) {
+      final idx = list.indexWhere((c) => c.id == conversationId);
+      if (idx == -1) return list;
+      if (_laterOf(list[idx].peerSeenAt, seenAt) == list[idx].peerSeenAt) {
+        return list;
+      }
+      final next = [...list];
+      next[idx] = next[idx].copyWith(peerSeenAt: seenAt);
+      touched = true;
+      return next;
+    }
+
+    final conversations = update(state.conversations);
+    final restricted = update(state.restrictedChats);
+    final blocked = update(state.blockedChats);
+    if (!touched) return;
+    state = state.copyWith(
+      conversations: conversations,
+      restrictedChats: restricted,
+      blockedChats: blocked,
+    );
   }
 
   void updateRequestCount(int count) {

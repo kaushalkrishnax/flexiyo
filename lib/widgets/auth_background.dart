@@ -1,5 +1,6 @@
 import 'package:flexiyo/core/theme.dart';
 import 'package:flutter/material.dart';
+import 'package:hugeicons/hugeicons.dart';
 
 /// Renders the Flexiyo Music-inspired ambient background with glowing orbs.
 class AuthBackground extends StatelessWidget {
@@ -94,7 +95,7 @@ class AuthBackground extends StatelessWidget {
                     child: Align(
                       alignment: Alignment.centerLeft,
                       child: IconButton(
-                        icon: Icon(Icons.arrow_back_rounded, color: backArrowColor, size: 24),
+                        icon: HugeIcon(icon: HugeIcons.strokeRoundedArrowLeft01, color: backArrowColor, size: 24),
                         onPressed: onBack ?? () => Navigator.of(context).maybePop(),
                       ),
                     ),
@@ -151,7 +152,7 @@ class FlexiyoLogo extends StatelessWidget {
                 colors: [Color(0xFFD11D89), Color(0xFF00B4D8)],
               ),
             ),
-            child: const Icon(Icons.lock_rounded, color: Colors.white, size: 40),
+            child: const HugeIcon(icon: HugeIcons.strokeRoundedLock, color: Colors.white, size: 40),
           ),
         ),
       ],

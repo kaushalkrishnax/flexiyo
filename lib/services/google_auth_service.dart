@@ -30,33 +30,29 @@ class GoogleAuthService {
   static const String webClientId =
       '1053892601915-pv8md97j50fb70u72rrdkfkvlfabog25.apps.googleusercontent.com';
 
-  bool _initialized = false;
+  Future<void>? _initialization;
 
-  // Platform-specific configuration: web takes the client ID, other platforms
-  // take it as `serverClientId` so Google returns an idToken.
-  Future<void> _ensureInitialized() async {
-    if (_initialized) return;
-    if (kIsWeb) {
-      await GoogleSignIn.instance.initialize(clientId: webClientId);
-    } else {
-      await GoogleSignIn.instance.initialize(serverClientId: webClientId);
-    }
-    _initialized = true;
-  }
+  /// Initializes the Google Sign-In SDK once per app run, with the client ID
+  /// type each platform requires.
+  Future<void> ensureInitialized() => _initialization ??= kIsWeb
+      ? GoogleSignIn.instance.initialize(clientId: webClientId)
+      : GoogleSignIn.instance.initialize(serverClientId: webClientId);
+
+  /// Whether sign-in can be triggered from an app-drawn button. False on web,
+  /// where Google only allows it via the SDK-rendered button widget.
+  bool get supportsAppTriggeredSignIn =>
+      GoogleSignIn.instance.supportsAuthenticate();
 
   Future<GoogleAuthResult?> signIn() async {
-    try {
-      await _ensureInitialized();
-      final account = await GoogleSignIn.instance.authenticate();
-
-      final auth = account.authentication;
-      return GoogleAuthResult(
-        idToken: auth.idToken,
-        email: account.email,
-        displayName: account.displayName,
-        googleId: account.id,
-        photoUrl: account.photoUrl,
+    if (!supportsAppTriggeredSignIn) {
+      throw UnsupportedError(
+        'This platform requires the GoogleSignInButton widget.',
       );
+    }
+    try {
+      await ensureInitialized();
+      final account = await GoogleSignIn.instance.authenticate();
+      return _toResult(account);
     } catch (e) {
       // Re-throw with clean user-facing error message
       final msg = e.toString().toLowerCase();
@@ -65,7 +61,6 @@ class GoogleAuthService {
           msg.contains('cancelled')) {
         return null;
       }
-      // Web-only failure modes with console-side fixes worth surfacing.
       if (msg.contains('origin') && msg.contains('client id')) {
         throw Exception(
           'Google sign-in is not allowed for this site address. Add it under '
@@ -83,8 +78,28 @@ class GoogleAuthService {
     }
   }
 
+  /// Sign-in results emitted by the Google-rendered button widget, which is
+  /// the only way to sign in on web.
+  Stream<GoogleAuthResult> get authenticationEvents => GoogleSignIn
+      .instance.authenticationEvents
+      .where((event) => event is GoogleSignInAuthenticationEventSignIn)
+      .map((event) =>
+          _toResult((event as GoogleSignInAuthenticationEventSignIn).user));
+
+  GoogleAuthResult _toResult(GoogleSignInAccount account) {
+    final auth = account.authentication;
+    return GoogleAuthResult(
+      idToken: auth.idToken,
+      email: account.email,
+      displayName: account.displayName,
+      googleId: account.id,
+      photoUrl: account.photoUrl,
+    );
+  }
+
   Future<void> signOut() async {
     try {
+      await ensureInitialized();
       await GoogleSignIn.instance.signOut();
     } catch (_) {}
   }

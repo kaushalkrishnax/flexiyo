@@ -9,7 +9,6 @@ import 'package:flexiyo/storage/secure_keys.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:uuid/uuid.dart';
 
 enum ViewPolicy { once, twice, unlimited }
 
@@ -124,7 +123,6 @@ class MediaService {
 
   /// Matches the Worker-side cap in functions/src/routes/media.ts.
   static const int maxUploadBytes = 25 * 1024 * 1024;
-  static const Uuid _uuid = Uuid();
 
   final SecureKeys _secureKeys;
 
@@ -186,17 +184,6 @@ class MediaService {
     if (token == null) throw Exception('Not authenticated');
 
     final enc = await encryptBytes(bytes);
-    final mediaId = _uuid.v4();
-    final ref = MediaRef(
-      id: mediaId,
-      kind: kind,
-      policy: policy,
-      key: enc.key,
-      nonce: enc.nonce,
-      mac: enc.ctMac.sublist(enc.ctMac.length - 16),
-      durationMs: durationMs,
-      size: bytes.length,
-    );
 
     final url = Uri.parse('${AppConstants.apiBaseUrl}/api/media').replace(
       queryParameters: {
@@ -213,8 +200,9 @@ class MediaService {
       sendTimeout: const Duration(minutes: 2),
       headers: {'Authorization': 'Bearer $token'},
     ));
+    String mediaId;
     try {
-      await dio.post<void>(
+      final response = await dio.post<dynamic>(
         url.toString(),
         data: enc.ctMac,
         options: Options(
@@ -222,6 +210,14 @@ class MediaService {
           headers: {'Content-Type': 'application/octet-stream'},
         ),
       );
+      final data = response.data;
+      final serverId = data is Map ? data['id'] : null;
+      if (serverId is! String || serverId.isEmpty) {
+        throw Exception('Media upload failed');
+      }
+      // The Worker allocates the id that fetches and unsends look media up
+      // by; carrying a client-side id in the envelope would 404 on receipt.
+      mediaId = serverId;
     } on DioException catch (e) {
       final status = e.response?.statusCode;
       final message = e.response?.data is Map
@@ -233,6 +229,17 @@ class MediaService {
       }
       throw Exception(message ?? 'Media upload failed');
     }
+
+    final ref = MediaRef(
+      id: mediaId,
+      kind: kind,
+      policy: policy,
+      key: enc.key,
+      nonce: enc.nonce,
+      mac: enc.ctMac.sublist(enc.ctMac.length - 16),
+      durationMs: durationMs,
+      size: bytes.length,
+    );
 
     // Pre-seed the sender cache so their own bubble renders without a fetch.
     try {

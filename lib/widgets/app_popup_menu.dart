@@ -1,7 +1,9 @@
+import 'package:flexiyo/core/constants.dart';
 import 'package:flexiyo/models/conversation.dart';
 import 'package:flexiyo/models/message.dart';
 import 'package:flexiyo/widgets/avatar.dart';
 import 'package:flutter/material.dart';
+import 'package:hugeicons/hugeicons.dart';
 import 'package:intl/intl.dart';
 
 class AppPopupMenu {
@@ -60,6 +62,7 @@ class AppPopupMenu {
     required VoidCallback onToggleMute,
     required VoidCallback onToggleRestrict,
     required VoidCallback onToggleBlock,
+    required VoidCallback onSetDisappearingTimer,
     required VoidCallback onDelete,
   }) {
     return showGeneralDialog(
@@ -75,6 +78,7 @@ class AppPopupMenu {
           onToggleMute: onToggleMute,
           onToggleRestrict: onToggleRestrict,
           onToggleBlock: onToggleBlock,
+          onSetDisappearingTimer: onSetDisappearingTimer,
           onDelete: onDelete,
         );
       },
@@ -92,6 +96,63 @@ class AppPopupMenu {
         );
       },
     );
+  }
+
+  static Future<int?> showDisappearingTimerPicker(
+    BuildContext context, {
+    required int currentSeconds,
+  }) {
+    return showDialog<int>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Disappearing messages'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Messages disappear for both people after they are read.',
+              style: Theme.of(dialogContext).textTheme.bodyMedium,
+            ),
+            const SizedBox(height: 10),
+            RadioGroup<int>(
+              groupValue: currentSeconds,
+              onChanged: (value) => Navigator.of(dialogContext).pop(value),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: AppConstants.disappearingTimerOptions
+                    .map(
+                      (seconds) => RadioListTile<int>(
+                        value: seconds,
+                        title: Text(_timerLabel(seconds)),
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                    )
+                    .toList(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static String _timerLabel(int seconds) {
+    return switch (seconds) {
+      -1 => 'Disappear immediately',
+      3600 => 'After 1 hour',
+      21600 => 'After 6 hours',
+      86400 => 'After 24 hours',
+      604800 => 'After 7 days',
+      _ => 'After reading',
+    };
   }
 }
 
@@ -118,7 +179,7 @@ Future<void> showRequestsListsMenu(
           onTap: onRestricted,
           child: const Row(
             children: [
-              Icon(Icons.block_outlined, size: 22),
+              HugeIcon(icon: HugeIcons.strokeRoundedBlocked, size: 22),
               SizedBox(width: 14),
               Text('Restricted'),
             ],
@@ -128,7 +189,7 @@ Future<void> showRequestsListsMenu(
           onTap: onBlocked,
           child: const Row(
             children: [
-              Icon(Icons.person_off_outlined, size: 22),
+              HugeIcon(icon: HugeIcons.strokeRoundedUserRemove01, size: 22),
               SizedBox(width: 14),
               Text('Blocked'),
             ],
@@ -263,25 +324,6 @@ class _MessageMenuOverlay extends StatelessWidget {
                                 ),
                               );
                             }),
-                            GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onTap: () {
-                                Navigator.of(context).pop();
-                                onReact?.call('❤️');
-                              },
-                              child: Container(
-                                padding: const EdgeInsets.all(4),
-                                decoration: const BoxDecoration(
-                                  shape: BoxShape.circle,
-                                ),
-                                child: Icon(
-                                  Icons.add_rounded,
-                                  size: 24,
-                                  color:
-                                      isDark ? Colors.white70 : Colors.black54,
-                                ),
-                              ),
-                            ),
                           ],
                         ),
                       ],
@@ -328,7 +370,7 @@ class _MessageMenuOverlay extends StatelessWidget {
                         ),
                         _ActionRow(
                           label: 'Reply',
-                          icon: Icons.reply_rounded,
+                          icon: HugeIcons.strokeRoundedReply,
                           onTap: () {
                             Navigator.of(context).pop();
                             onReply();
@@ -337,7 +379,7 @@ class _MessageMenuOverlay extends StatelessWidget {
                         ),
                         _ActionRow(
                           label: 'Copy',
-                          icon: Icons.copy_rounded,
+                          icon: HugeIcons.strokeRoundedCopy01,
                           onTap: () {
                             Navigator.of(context).pop();
                             onCopy();
@@ -347,7 +389,7 @@ class _MessageMenuOverlay extends StatelessWidget {
                         if (showUnsend)
                           _ActionRow(
                             label: 'Unsend',
-                            icon: Icons.undo_rounded,
+                            icon: HugeIcons.strokeRoundedUndo,
                             isDestructive: true,
                             onTap: () {
                               Navigator.of(context).pop();
@@ -357,7 +399,7 @@ class _MessageMenuOverlay extends StatelessWidget {
                           ),
                         _ActionRow(
                           label: 'Delete for me',
-                          icon: Icons.delete_outline_rounded,
+                          icon: HugeIcons.strokeRoundedDelete02,
                           isDestructive: true,
                           onTap: () {
                             Navigator.of(context).pop();
@@ -389,7 +431,7 @@ class _ActionRow extends StatelessWidget {
   });
 
   final String label;
-  final IconData icon;
+  final List<List<dynamic>> icon;
   final VoidCallback onTap;
   final bool isDark;
   final bool isDestructive;
@@ -408,7 +450,7 @@ class _ActionRow extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 11),
           child: Row(
             children: [
-              Icon(icon, size: 22, color: color),
+              HugeIcon(icon: icon, size: 22, color: color),
               const SizedBox(width: 14),
               Expanded(
                 child: Text(
@@ -436,6 +478,7 @@ class _InboxModalContent extends StatelessWidget {
     required this.onToggleMute,
     required this.onToggleRestrict,
     required this.onToggleBlock,
+    required this.onSetDisappearingTimer,
     required this.onDelete,
   });
 
@@ -444,6 +487,7 @@ class _InboxModalContent extends StatelessWidget {
   final VoidCallback onToggleMute;
   final VoidCallback onToggleRestrict;
   final VoidCallback onToggleBlock;
+  final VoidCallback onSetDisappearingTimer;
   final VoidCallback onDelete;
 
   @override
@@ -458,8 +502,8 @@ class _InboxModalContent extends StatelessWidget {
       child: Material(
         color: Colors.transparent,
         child: Container(
-          width: 300,
-          margin: const EdgeInsets.symmetric(horizontal: 32),
+          width: 280,
+          margin: const EdgeInsets.symmetric(horizontal: 24),
           decoration: BoxDecoration(
             color: surfaceColor,
             borderRadius: BorderRadius.circular(22),
@@ -480,7 +524,7 @@ class _InboxModalContent extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(20, 18, 20, 14),
+                padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
                 child: Row(
                   children: [
                     UserAvatar(
@@ -506,9 +550,7 @@ class _InboxModalContent extends StatelessWidget {
               Divider(height: 1, color: dividerColor),
               _ModalActionRow(
                 label: conversation.isPinned ? 'Unpin' : 'Pin',
-                icon: conversation.isPinned
-                    ? Icons.push_pin_rounded
-                    : Icons.push_pin_outlined,
+                icon: HugeIcons.strokeRoundedPin,
                 onTap: () {
                   Navigator.of(context).pop();
                   onTogglePin();
@@ -518,8 +560,8 @@ class _InboxModalContent extends StatelessWidget {
               _ModalActionRow(
                 label: conversation.isMuted ? 'Unmute messages' : 'Mute messages',
                 icon: conversation.isMuted
-                    ? Icons.notifications_active_outlined
-                    : Icons.notifications_off_outlined,
+                    ? HugeIcons.strokeRoundedBell
+                    : HugeIcons.strokeRoundedBellOff,
                 onTap: () {
                   Navigator.of(context).pop();
                   onToggleMute();
@@ -527,8 +569,17 @@ class _InboxModalContent extends StatelessWidget {
                 textColor: textColor,
               ),
               _ModalActionRow(
+                label: 'Disappearing messages',
+                icon: HugeIcons.strokeRoundedTimer01,
+                onTap: () {
+                  Navigator.of(context).pop();
+                  onSetDisappearingTimer();
+                },
+                textColor: textColor,
+              ),
+              _ModalActionRow(
                 label: 'Restrict',
-                icon: Icons.block_outlined,
+                icon: HugeIcons.strokeRoundedBlocked,
                 onTap: () {
                   Navigator.of(context).pop();
                   onToggleRestrict();
@@ -537,7 +588,7 @@ class _InboxModalContent extends StatelessWidget {
               ),
               _ModalActionRow(
                 label: 'Block',
-                icon: Icons.person_off_outlined,
+                icon: HugeIcons.strokeRoundedUserRemove01,
                 onTap: () {
                   Navigator.of(context).pop();
                   onToggleBlock();
@@ -546,7 +597,7 @@ class _InboxModalContent extends StatelessWidget {
               ),
               _ModalActionRow(
                 label: 'Delete',
-                icon: Icons.delete_outline_rounded,
+                icon: HugeIcons.strokeRoundedDelete02,
                 isDestructive: true,
                 onTap: () {
                   Navigator.of(context).pop();
@@ -573,7 +624,7 @@ class _ModalActionRow extends StatelessWidget {
   });
 
   final String label;
-  final IconData icon;
+  final List<List<dynamic>> icon;
   final VoidCallback onTap;
   final Color textColor;
   final bool isDestructive;
@@ -585,16 +636,16 @@ class _ModalActionRow extends StatelessWidget {
       child: InkWell(
         onTap: onTap,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
           child: Row(
             children: [
-              Icon(icon, size: 22, color: textColor),
-              const SizedBox(width: 14),
+              HugeIcon(icon: icon, size: 21, color: textColor),
+              const SizedBox(width: 12),
               Expanded(
                 child: Text(
                   label,
                   style: TextStyle(
-                    fontSize: 15.5,
+                    fontSize: 16,
                     fontWeight:
                         isDestructive ? FontWeight.w600 : FontWeight.w500,
                     color: textColor,

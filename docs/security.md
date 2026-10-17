@@ -70,7 +70,7 @@ The Worker cannot see:
 | Replay attacks | JWT expiry; message version concurrency checks |
 | Unauthorized edits | Server validates sender_id from JWT |
 | Unauthorized unsend | Server validates sender_id from JWT |
-| Message resurrection after deletion | Tombstones persist across sync |
+| Message resurrection after deletion | Server rows are hard-deleted; local tombstones cover delete-for-me |
 | Expired message exposure | Server filters at query time; client enforces locally |
 
 ### Threats NOT Mitigated (Documented Limitations)
@@ -159,7 +159,7 @@ For security-sensitive deployments, full-disk encryption on the device is the pr
 
 ## Disappearing Messages — Guarantees and Limitations
 
-Disappearing messages are removed from D1 after their `expires_at` timestamp. The server filters expired messages from all API responses immediately, regardless of cleanup job status.
+Disappearing timers start when the recipient reads a message, not when it is sent. With "disappear immediately", the read route deletes the message rows outright; with a longer timer, the read route stamps `expires_at` and the cleanup job removes the rows once it passes. The server filters expired messages from all API responses immediately, regardless of cleanup job status, and connected devices purge them locally on the deletion events.
 
 Limitations:
 - A recipient who was online when the message was delivered received the plaintext locally. The expiry system cannot erase it from their memory or notes.

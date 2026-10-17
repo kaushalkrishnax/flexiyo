@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/images/icon.png" alt="Flexiyo" width="100" height="100" />
+<img src="assets/images/app_icon.png" alt="Flexiyo app icon" width="104" height="104" />
 
 # Flexiyo
 
@@ -31,38 +31,49 @@
 
 ---
 
-### 📌 Table of Contents
+### Contents
 
 - [⬇ Download](#-download)
+- [🆕 What's New in v1.0.2](#-whats-new-in-v102)
 - [✨ Highlights](#-highlights)
 - [📋 Features](#-features)
-- [🔌 Tech](#-tech)
 - [🏗 Architecture](#-architecture)
 - [🔐 Privacy and Security](#-privacy-and-security)
-- [📸 Preview](#-preview)
 - [🚀 Quick Start](#-quick-start)
-- [⌨ Commands](#-commands)
-- [⚙ Environment Variables](#-environment-variables)
-- [☁ Deployment](#-deployment)
-- [🛠 Troubleshooting](#-troubleshooting)
-- [🗺 Roadmap](#-roadmap)
 - [📚 Documentation](#-documentation)
-- [⚖ Legal Notice](#-legal-notice)
 - [License](#license)
 
 ---
 
 ## ⬇ Download
 
-**Current Version:** `v1.0.1` · Android 7.0+ · iOS builds from source
+**Current Version:** `v1.0.2` · Android 7.0+ · iOS builds from source
 
 | Build Variant | Device Compatibility         | Download                                                                                                                                                                                                                   |
 | ------------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **arm64-v8a** | Modern Android devices       | [![Download arm64-v8a](https://img.shields.io/badge/Download-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/kaushalkrishnax/flexiyo/releases/download/v1.0.1/Flexiyo-1.0.1-arm64-v8a.apk) |
-| **armeabi-v7a** | Older Android devices        | [![Download armeabi-v7a](https://img.shields.io/badge/Download-5C6BC0?style=for-the-badge&logo=android&logoColor=white)](https://github.com/kaushalkrishnax/flexiyo/releases/download/v1.0.1/Flexiyo-1.0.1-armeabi-v7a.apk) |
-| **x86_64**    | Emulators and x86_64 devices | [![Download x86_64](https://img.shields.io/badge/Download-0288D1?style=for-the-badge&logo=android&logoColor=white)](https://github.com/kaushalkrishnax/flexiyo/releases/download/v1.0.1/Flexiyo-1.0.1-x86_64.apk)       |
+| **arm64-v8a** | Modern Android devices       | [![Download arm64-v8a](https://img.shields.io/badge/Download-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/kaushalkrishnax/flexiyo/releases/download/v1.0.2/Flexiyo-1.0.2-arm64-v8a-RELEASE.apk) |
+| **armeabi-v7a** | Older Android devices      | [![Download armeabi-v7a](https://img.shields.io/badge/Download-5C6BC0?style=for-the-badge&logo=android&logoColor=white)](https://github.com/kaushalkrishnax/flexiyo/releases/download/v1.0.2/Flexiyo-1.0.2-armeabi-v7a-RELEASE.apk) |
+| **x86_64**    | Emulators and x86_64 devices | [![Download x86_64](https://img.shields.io/badge/Download-0288D1?style=for-the-badge&logo=android&logoColor=white)](https://github.com/kaushalkrishnax/flexiyo/releases/download/v1.0.2/Flexiyo-1.0.2-x86_64-RELEASE.apk) |
 
 > **Quick Guide:** Not sure? Pick **arm64-v8a**, it covers virtually every phone made since 2017. Emulator users should pick **x86_64**. iOS users can build from source, see [Quick Start](#-quick-start).
+
+---
+
+## 🆕 What's New in v1.0.2
+
+Compared with v1.0.1, this release adds media messaging and message requests, and substantially improves chat navigation, delivery status, and Android support:
+
+- **Encrypted media:** Send photos and voice notes encrypted on-device; set photo view limits, and edit gallery images before sending.
+- **Message requests:** First-contact chats enter a request inbox. Email verification and request controls help manage new conversations.
+- **Better inbox search:** Search existing conversations under **Friends** and find other accounts under **Search Results**, without leaving the chats screen.
+- **Chat controls:** Pin, mute, restrict, block, or delete conversations. Request and unread badges update without requiring a manual refresh.
+- **Delivery clarity:** See relative read receipts in chat and the inbox. Open a conversation directly from its message notification.
+- **Chat gestures:** Replies show a faded quoted parent with a connector; swiping open chat space slides rows left to reveal timestamps aligned in a compact lane.
+- **Polished interface:** Full-bleed adaptive Android launcher/splash icons, a branded inbox header, an enlarged composer with a blue camera action, direct-send/edit gallery flows, and larger voice-note controls.
+- **Loading and recording polish:** The composer stays visible while chats load, restricted/blocked lists avoid empty-state flicker, and paused voice recording has a softer indicator.
+- **Platform fixes:** Android 13 media access, push-notification routing, and more consistent Google sign-in on web and mobile.
+
+See [Features](#-features) for the full capability list and [Download](#-download) for Android builds.
 
 ---
 
@@ -94,7 +105,7 @@
       <td width="50%" align="center">
       <br/>🎨
       <h3>Modern design</h3>
-      <sub>Clean, familiar chat UI with Material 3 theming and adaptive light and dark modes.</sub>
+      <sub>Branded chat UI with adaptive themes, inline people search, read receipts, and fast media sharing.</sub>
       <br/><br/>
       </td>
     </tr>
@@ -110,24 +121,29 @@
 - **End-to-end encrypted by design:** Every message is encrypted on the sender's device with the Signal Protocol (X3DH key agreement and Double Ratchet) and decrypted only on the recipient's. The server stores ciphertext it has no way to read.
 - **Instant, with offline catch-up:** Each conversation gets its own WebSocket hub on a Durable Object, so delivery and typing indicators are real time. Anything sent while you were away syncs the moment you reconnect.
 - **Device-isolated accounts:** Sign up with a username and password. Session tokens live in the platform keychain and stay on the device.
+- **Message requests:** Messages from new people go to a request inbox, with controls to accept, restrict, or block conversations.
+- **Find people in the inbox:** Search existing chats locally and discover other users from the main chat search field.
 
 ### Control over what you send
 
 - **Edit:** Fix a sent message within the editing window. The edit is re-encrypted on the client, so the server never sees the new text.
-- **Unsend for everyone:** Pulls a message from both sides. A tombstone syncs to active participants and the stored payload is deleted from the server.
+- **Unsend for everyone:** Pulls a message from both sides. The row is deleted from the server and connected devices drop it immediately.
 - **Delete for me:** Clears a message from your device only. The other person's chat is untouched.
-- **Disappearing messages:** Set an expiry timer per conversation. The server prunes expired messages and the client filters them out as well, so nothing lingers between cleanup runs.
+- **Disappearing messages:** Pick a per-chat timer — disappear immediately, after 1 hour, 6 hours, 24 hours, or 7 days. The countdown starts when the other person reads the message, and the message is then purged from the server and both devices.
 - **Copy:** One tap copies the decrypted text to the clipboard.
 
 ### Media
 
-- **Encrypted photos and voice notes:** Snap a photo, pick one from the gallery, or record a voice note — media is encrypted on-device (AES-GCM) before it leaves your phone, and expired media is purged from the server.
-- **View limits:** Mark a photo as view-once or view-twice when sending; the server enforces the limit and refuses further opens once it is used up.
+- **Encrypted photos and voice notes:** Snap a photo, send a gallery pick directly, edit it before sending, or record a voice note. Media is encrypted on-device (AES-GCM) before upload.
+- **View limits:** Mark a photo as view-once or view-twice; the server enforces the limit and purges media when it expires or is unsent.
 
 ### Experience
 
-- **Familiar, modern chat UI:** Clean responsive layout, Material 3 theming, adaptive light and dark modes, long-press context menus, swipe to reply, and hold-and-swipe to peek at message times.
-- **Android notifications:** Firebase Cloud Messaging delivers a heads-up when a message or message request arrives while the app is closed. Notifications only include who sent it — never the message content.
+- **Familiar, modern chat UI:** Material 3 light/dark themes, long-press message actions, quoted reply cards, and a right-aligned timestamp lane revealed by swiping the open chat area.
+- **Read status:** Relative “Seen” timestamps appear in the conversation and inbox; unread badges clear as soon as a conversation is opened.
+- **Android notifications:** Firebase Cloud Messaging notifies about messages and requests while the app is closed. Tapping a notification opens its exact conversation; message content is never included.
+- **Google sign-in:** Sign in with Google on supported platforms, including the Google-rendered button on web.
+- **Branded interface:** Updated app and splash icons, a Flexiyo inbox header with version, and a larger composer with a direct camera action.
 - **One codebase, two platforms:** Flutter for Android and iOS, with Android as the primary test target.
 
 **Note:** Multi-device sync is on the [Roadmap](#-roadmap).
@@ -145,7 +161,9 @@
 | Cryptography   | `libsignal_protocol_dart` (X3DH, Double Ratchet)    |
 | Backend        | Cloudflare Workers · TypeScript · `itty-router`     |
 | Database       | Cloudflare D1 (SQLite) · Drizzle ORM                |
+| Media storage  | Cloudflare R2                                       |
 | Real-time      | Cloudflare Durable Objects · WebSockets             |
+| Push           | Firebase Cloud Messaging (Android)                   |
 | Validation     | Zod                                                 |
 | Backend tests  | Vitest                                              |
 | Package mgr    | Bun                                                 |
@@ -251,7 +269,7 @@ Point the app at your Worker with `API_BASE_URL`, using the right address for yo
 
 | Target                    | Command                                                              |
 | ------------------------- | -------------------------------------------------------------------- |
-| **Android emulator**      | `flutter run --dart-define=API_BASE_URL=http://localhost:8787` |
+| **Android emulator**      | `flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8787` |
 | **iOS simulator**         | `flutter run --dart-define=API_BASE_URL=http://localhost:8787`       |
 | **Physical device**       | `flutter run --dart-define=API_BASE_URL=http://<your-local-ip>:8787` |
 
@@ -274,6 +292,10 @@ Point the app at your Worker with `API_BASE_URL`, using the right address for yo
 | `flutter analyze`           | Static analysis                               |
 | `flutter build apk`         | Build Android APK                             |
 | `flutter build ios`         | Build iOS (requires macOS and Xcode)          |
+| `bun run release:android`   | Build and archive split-per-ABI release APKs  |
+| `bun run release:ios`       | Build and archive the iOS IPA (macOS/Xcode)   |
+| `bun run bump:release`      | Bump the app version for a stable release     |
+| `bun run bump:beta`         | Bump the app version for a beta release       |
 
 ---
 
@@ -387,7 +409,7 @@ flutter run
 - [x] Registration, login, and device-isolated tokens
 - [x] Signal Protocol one-to-one E2EE
 - [x] Edit, unsend, delete for me, and copy
-- [x] Disappearing messages with server-side pruning
+- [x] Disappearing messages that purge after the read receipt
 - [x] Offline delivery synchronization
 - [x] Encrypted photos and voice notes with view limits
 - [x] Android push notifications (FCM)

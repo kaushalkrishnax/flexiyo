@@ -4,6 +4,7 @@ import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/services/google_auth_service.dart';
 import 'package:flexiyo/widgets/auth_background.dart';
 import 'package:flexiyo/widgets/auth_text_field.dart';
+import 'package:flexiyo/widgets/google_sign_in_button.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -116,22 +117,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     }
   }
 
-  Future<void> _handleGoogleSignIn() async {
-    if (_googleSubmitting || _submitting) return;
-
+  Future<void> _handleGoogleResult(GoogleAuthResult googleResult) async {
     setState(() {
       _googleSubmitting = true;
       _error = null;
     });
 
     try {
-      final googleResult = await GoogleAuthService.instance.signIn();
-      if (googleResult == null) {
-        // User cancelled sign in
-        if (mounted) setState(() => _googleSubmitting = false);
-        return;
-      }
-
       await ref.read(authProvider.notifier).loginWithGoogle(
             idToken: googleResult.idToken,
             email: googleResult.email,
@@ -149,6 +141,11 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         setState(() => _googleSubmitting = false);
       }
     }
+  }
+
+  void _handleGoogleError(Object error) {
+    if (!mounted) return;
+    setState(() => _error = _formatError(error));
   }
 
   void _showForgotPasswordDialog() {
@@ -258,10 +255,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                         textInputAction: TextInputAction.done,
                         onSubmitted: (_) => _submit(),
                         trailing: IconButton(
-                          icon: Icon(
-                            _obscurePassword
-                                ? Icons.visibility_off_outlined
-                                : Icons.visibility_outlined,
+                          icon: HugeIcon(
+                            icon: _obscurePassword
+                                ? HugeIcons.strokeRoundedViewOff
+                                : HugeIcons.strokeRoundedView,
                             size: 20,
                             color: isDark ? Colors.white54 : Colors.black54,
                           ),
@@ -289,8 +286,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                           ),
                           child: Row(
                             children: [
-                              const Icon(
-                                Icons.error_outline_rounded,
+                              const HugeIcon(
+                                icon: HugeIcons.strokeRoundedAlertCircle,
                                 color: Color(0xFFED4956),
                                 size: 18,
                               ),
@@ -385,73 +382,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       // Google Sign In Button
-                      SizedBox(
-                        height: 48,
-                        child: OutlinedButton(
-                          onPressed: (_submitting || _googleSubmitting)
-                              ? null
-                              : _handleGoogleSignIn,
-                          style: OutlinedButton.styleFrom(
-                            backgroundColor:
-                                isDark ? const Color(0xFF18181B) : Colors.white,
-                            side: BorderSide(
-                              color: isDark
-                                  ? AppTheme.borderDefault
-                                  : const Color(0xFFE4E4E7),
-                              width: 1.0,
-                            ),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(24),
-                            ),
-                          ),
-                          child: _googleSubmitting
-                              ? Row(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    SizedBox(
-                                      width: 16,
-                                      height: 16,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2.0,
-                                        color: isDark
-                                            ? Colors.white
-                                            : Colors.black87,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 10),
-                                    Text(
-                                      'Connecting to Google…',
-                                      style: TextStyle(
-                                        color: isDark
-                                            ? Colors.white
-                                            : const Color(0xFF18181B),
-                                        fontWeight: FontWeight.w600,
-                                        fontSize: 14,
-                                      ),
-                                    ),
-                                  ],
-                                )
-                              : Row(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    const HugeIcon(
-                                      icon: HugeIcons.strokeRoundedGoogle,
-                                      size: 20,
-                                    ),
-                                    const SizedBox(width: 10),
-                                    Text(
-                                      'Continue with Google',
-                                      style: TextStyle(
-                                        color: isDark
-                                            ? Colors.white
-                                            : const Color(0xFF18181B),
-                                        fontWeight: FontWeight.w600,
-                                        fontSize: 14,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                        ),
+                      GoogleSignInButton(
+                        busy: _submitting || _googleSubmitting,
+                        onResult: _handleGoogleResult,
+                        onError: _handleGoogleError,
                       ),
 
                       const SizedBox(height: 18),

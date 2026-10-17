@@ -25,7 +25,8 @@ export function corsHeaders(env: Env, request?: Request): Record<string, string>
   return {
     'Access-Control-Allow-Origin': allowedOrigin,
     'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Authorization, Content-Type, Accept, Origin, X-Requested-With',
+    'Access-Control-Allow-Headers':
+      'Authorization, Content-Type, Accept, Origin, X-Requested-With, X-Installation-Id',
     'Access-Control-Allow-Credentials': 'true',
     'Access-Control-Max-Age': '86400',
   };

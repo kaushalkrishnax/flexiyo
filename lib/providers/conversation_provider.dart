@@ -126,8 +126,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     // Load from local cache first for instant display
     try {
       final cachedRows = await LocalDb.instance.getMessages(conversationId);
-      final cached =
-          cachedRows.reversed.map(Message.fromDbJson).toList();
+      final cached = cachedRows.reversed.map(Message.fromDbJson).toList();
       if (cached.isNotEmpty) {
         state = state.copyWith(messages: cached);
       }
@@ -142,8 +141,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
           conv = await _api.getConversation(conversationId);
         } catch (_) {
           final conversations = await _api.getConversations();
-          conv =
-              conversations.where((c) => c.id == conversationId).firstOrNull;
+          conv = conversations.where((c) => c.id == conversationId).firstOrNull;
         }
       }
       if (conv == null) {
@@ -159,8 +157,8 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         conversationId,
         limit: 60,
         after: latestCached == null
-          ? null
-          : latestCached.createdAt.millisecondsSinceEpoch ~/ 1000,
+            ? null
+            : latestCached.createdAt.millisecondsSinceEpoch ~/ 1000,
       )
         ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
       final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
@@ -515,7 +513,8 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       return;
     }
     if (conv.requestStatus == 'pending' &&
-        state.messages.any((m) => !m.isUnsent && m.status != MessageStatus.failed)) {
+        state.messages
+            .any((m) => !m.isUnsent && m.status != MessageStatus.failed)) {
       return;
     }
 
@@ -666,12 +665,16 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
     if (msg.senderId != _myUserId) return;
 
+    // Capture the media reference before the optimistic wipe clears it, so
+    // the server can purge the file from storage along with the unsend.
+    final mediaId = msg.mediaRef?.id;
+
     // Optimistic remove
     _upsertMessage(msg.copyWith(isUnsent: true, clearDecryptedText: true));
     _ref.read(chatsProvider.notifier).onMessageUnsent(conversationId);
 
     try {
-      await _api.unsendMessage(conversationId, messageId);
+      await _api.unsendMessage(conversationId, messageId, mediaId: mediaId);
       final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
       await crypto.deleteLocalMessageText(messageId);
       LocalDb.instance.markUnsent(messageId);
@@ -726,7 +729,8 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         return m;
       }).toList();
       state = state.copyWith(messages: reverted);
-      await LocalDb.instance.updateMessageReaction(messageId, existing.reaction);
+      await LocalDb.instance
+          .updateMessageReaction(messageId, existing.reaction);
     }
   }
 
@@ -884,8 +888,8 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
 // Provider family
 
-final conversationProvider = StateNotifierProvider.autoDispose.family<ConversationNotifier,
-    ConversationState, String>(
+final conversationProvider = StateNotifierProvider.autoDispose
+    .family<ConversationNotifier, ConversationState, String>(
   (ref, conversationId) {
     final api = ref.watch(apiServiceProvider);
     final auth = ref.watch(authProvider);

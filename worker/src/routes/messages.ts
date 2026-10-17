@@ -878,6 +878,27 @@ messagesRouter.delete(
       });
     }
 
+    // Purge attached media from storage right away. The media id travels
+    // with the request from the app because it lives inside the end-to-end
+    // encrypted payload, so the server cannot derive it from the message.
+    const mediaId = url.searchParams.get('mediaId');
+    if (mediaId) {
+      const media = await env.DB.prepare(
+        `SELECT id, r2_key FROM media WHERE id = ? AND conversation_id = ? AND sender_id = ?`,
+      )
+        .bind(mediaId, conversationId, userId)
+        .first<{ id: string; r2_key: string }>();
+      if (media) {
+        try {
+          await env.MEDIA.delete(media.r2_key);
+        } catch (_) {}
+        await env.DB.prepare('DELETE FROM media_views WHERE media_id = ?')
+          .bind(media.id)
+          .run();
+        await env.DB.prepare('DELETE FROM media WHERE id = ?').bind(media.id).run();
+      }
+    }
+
     if (message.is_unsent === 1) {
       return new Response(JSON.stringify({ deleted: true, scope: 'global' }), {
         status: 200,

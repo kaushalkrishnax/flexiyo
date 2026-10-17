@@ -319,8 +319,17 @@ class ApiService {
   }
 
   /// Unsend (retract for everyone). Only the original sender may call this.
-  Future<void> unsendMessage(String conversationId, String messageId) async {
-    await _delete('/api/conversations/$conversationId/messages/$messageId');
+  /// Pass [mediaId] when the message carried media so the server can delete
+  /// the file from storage immediately.
+  Future<void> unsendMessage(
+    String conversationId,
+    String messageId, {
+    String? mediaId,
+  }) async {
+    final query = mediaId == null || mediaId.isEmpty ? '' : '?mediaId=$mediaId';
+    await _delete(
+      '/api/conversations/$conversationId/messages/$messageId$query',
+    );
   }
 
   /// React to a message with an emoji (or toggles it off if same emoji is tapped).

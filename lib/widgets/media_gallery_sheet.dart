@@ -18,6 +18,10 @@ Future<Uint8List?> showMediaGallerySheet(BuildContext context) {
   );
 }
 
+enum _GalleryView { recents, albums, album }
+
+enum _SourceAction { recents, allAlbums }
+
 class _MediaGallerySheet extends StatefulWidget {
   const _MediaGallerySheet();
 
@@ -26,9 +30,19 @@ class _MediaGallerySheet extends StatefulWidget {
 }
 
 class _MediaGallerySheetState extends State<_MediaGallerySheet> {
+  final GlobalKey _titleKey = GlobalKey();
+
+  _GalleryView _view = _GalleryView.recents;
+  AssetPathEntity? _openAlbum;
+  List<AssetEntity> _recentsAssets = [];
   List<AssetEntity> _assets = [];
+  List<AssetPathEntity> _albums = [];
+  List<AssetEntity?> _albumCovers = [];
+  List<int> _albumCounts = [];
   AssetEntity? _selected;
   bool _loading = true;
+  bool _albumsLoaded = false;
+  bool _albumsLoading = false;
   bool _denied = false;
   bool _hd = true;
   bool _preparing = false;
@@ -76,12 +90,166 @@ class _MediaGallerySheetState extends State<_MediaGallerySheet> {
       final assets = await albums.first.getAssetListRange(start: 0, end: 150);
       if (mounted) {
         setState(() {
+          _recentsAssets = assets;
           _assets = assets;
           _loading = false;
         });
       }
     } catch (_) {
       if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  String get _title {
+    switch (_view) {
+      case _GalleryView.recents:
+        return 'Recents';
+      case _GalleryView.albums:
+        return 'All albums';
+      case _GalleryView.album:
+        return _openAlbum?.name ?? 'Album';
+    }
+  }
+
+  Future<void> _loadAlbums() async {
+    if (_albumsLoaded || _albumsLoading) return;
+    setState(() => _albumsLoading = true);
+    try {
+      final paths = await PhotoManager.getAssetPathList(
+        type: RequestType.image,
+        onlyAll: false,
+      );
+      final albums = <AssetPathEntity>[];
+      final covers = <AssetEntity?>[];
+      final counts = <int>[];
+      for (final path in paths) {
+        if (path.isAll) continue;
+        final count = await path.assetCountAsync;
+        if (count == 0) continue;
+        final first = await path.getAssetListRange(start: 0, end: 1);
+        albums.add(path);
+        covers.add(first.isEmpty ? null : first.first);
+        counts.add(count);
+      }
+      if (!mounted) return;
+      setState(() {
+        _albums = albums;
+        _albumCovers = covers;
+        _albumCounts = counts;
+        _albumsLoaded = true;
+        _albumsLoading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _albumsLoading = false);
+    }
+  }
+
+  void _showRecents() {
+    setState(() {
+      _view = _GalleryView.recents;
+      _openAlbum = null;
+      _selected = null;
+      _assets = _recentsAssets;
+    });
+  }
+
+  Future<void> _showAlbums() async {
+    setState(() {
+      _view = _GalleryView.albums;
+      _openAlbum = null;
+      _selected = null;
+    });
+    await _loadAlbums();
+  }
+
+  Future<void> _openAlbumAssets(AssetPathEntity album) async {
+    setState(() {
+      _view = _GalleryView.album;
+      _openAlbum = album;
+      _selected = null;
+      _assets = [];
+      _loading = true;
+    });
+    try {
+      final assets = await album.getAssetListRange(start: 0, end: 300);
+      if (mounted && _openAlbum == album) {
+        setState(() {
+          _assets = assets;
+          _loading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  void _goBack() {
+    if (_view == _GalleryView.album) {
+      setState(() {
+        _view = _GalleryView.albums;
+        _openAlbum = null;
+        _selected = null;
+      });
+    } else {
+      _showRecents();
+    }
+  }
+
+  Future<void> _showSourcePopup() async {
+    final box = _titleKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final origin = box.localToGlobal(Offset.zero);
+    final screen = MediaQuery.sizeOf(context);
+    const cardWidth = 248.0;
+    const cardHeight = 52.0 * 2 + 16;
+    var left = origin.dx + box.size.width / 2 - cardWidth / 2;
+    left = left.clamp(12.0, screen.width - cardWidth - 12);
+    var top = origin.dy + box.size.height + 10;
+    if (top + cardHeight > screen.height - 12) {
+      top = origin.dy - cardHeight - 10;
+    }
+
+    final action = await showGeneralDialog<_SourceAction>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Dismiss',
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 140),
+      pageBuilder: (dialogContext, _, __) => Align(
+        alignment: Alignment.topLeft,
+        child: Padding(
+          padding: EdgeInsets.only(left: left, top: top),
+          child: _SourceMenu(
+            width: cardWidth,
+            recentsSelected: _view == _GalleryView.recents,
+            allAlbumsSelected: _view != _GalleryView.recents,
+            onSelected: (action) => Navigator.of(dialogContext).pop(action),
+          ),
+        ),
+      ),
+      transitionBuilder: (context, animation, _, child) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+          reverseCurve: Curves.easeInCubic,
+        );
+        return FadeTransition(
+          opacity: animation,
+          child: ScaleTransition(
+            scale: Tween<double>(begin: 0.94, end: 1).animate(curved),
+            alignment: Alignment.topCenter,
+            child: child,
+          ),
+        );
+      },
+    );
+
+    if (action == null || !mounted) return;
+    switch (action) {
+      case _SourceAction.recents:
+        _showRecents();
+      case _SourceAction.allAlbums:
+        await _showAlbums();
     }
   }
 
@@ -126,24 +294,51 @@ class _MediaGallerySheetState extends State<_MediaGallerySheet> {
             child: Stack(
               alignment: Alignment.center,
               children: [
-                const Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      'Recents',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 17,
-                        fontWeight: FontWeight.w700,
+                // Back out of albums back to Recents.
+                if (_view != _GalleryView.recents)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: _goBack,
+                      child: const Padding(
+                        padding: EdgeInsets.all(6),
+                        child: HugeIcon(
+                          icon: HugeIcons.strokeRoundedChevronLeft,
+                          color: Colors.white,
+                          size: 22,
+                        ),
                       ),
                     ),
-                    SizedBox(width: 4),
-                    HugeIcon(
-                      icon: HugeIcons.strokeRoundedChevronDown,
-                      color: Colors.white,
-                      size: 20,
+                  ),
+                // Tapping the title opens the source menu.
+                GestureDetector(
+                  key: _titleKey,
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _showSourcePopup,
+                  child: Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          _title,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 17,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        const HugeIcon(
+                          icon: HugeIcons.strokeRoundedChevronDown,
+                          color: Colors.white,
+                          size: 20,
+                        ),
+                      ],
                     ),
-                  ],
+                  ),
                 ),
                 Align(
                   alignment: Alignment.centerRight,
@@ -175,7 +370,9 @@ class _MediaGallerySheetState extends State<_MediaGallerySheet> {
             ),
           ),
           const SizedBox(height: 12),
-          Expanded(child: _buildGrid()),
+          Expanded(
+            child: _view == _GalleryView.albums ? _buildAlbums() : _buildGrid(),
+          ),
           Container(
             padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
             color: const Color(0xFF161618),
@@ -235,6 +432,76 @@ class _MediaGallerySheetState extends State<_MediaGallerySheet> {
           ),
         ],
       ),
+    );
+  }
+
+  /// Albums laid out as two horizontally scrollable rows.
+  Widget _buildAlbums() {
+    if (_albumsLoading) {
+      return const Center(
+        child: CircularProgressIndicator(color: Colors.white54),
+      );
+    }
+    if (_albums.isEmpty) {
+      return const Center(
+        child: Text(
+          'No albums found',
+          style: TextStyle(color: Colors.white54),
+        ),
+      );
+    }
+
+    return GridView.builder(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.fromLTRB(14, 2, 14, 14),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        mainAxisSpacing: 10,
+        crossAxisSpacing: 14,
+        childAspectRatio: 1.32,
+      ),
+      itemCount: _albums.length,
+      itemBuilder: (context, index) {
+        final album = _albums[index];
+        final cover = _albumCovers[index];
+        return GestureDetector(
+          onTap: () => _openAlbumAssets(album),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: SizedBox.expand(
+                    child: cover == null
+                        ? Container(color: const Color(0xFF232326))
+                        : _AssetThumb(asset: cover),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 7),
+              Text(
+                album.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 15.5,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 1),
+              Text(
+                '${_albumCounts[index]}',
+                style: const TextStyle(
+                  color: Colors.white54,
+                  fontSize: 12.5,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -332,6 +599,93 @@ class _MediaGallerySheetState extends State<_MediaGallerySheet> {
           ),
         );
       },
+    );
+  }
+}
+
+/// Dropdown with the available image sources.
+class _SourceMenu extends StatelessWidget {
+  const _SourceMenu({
+    required this.width,
+    required this.recentsSelected,
+    required this.allAlbumsSelected,
+    required this.onSelected,
+  });
+
+  final double width;
+  final bool recentsSelected;
+  final bool allAlbumsSelected;
+  final ValueChanged<_SourceAction> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: width,
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF2B2D31),
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black45,
+            blurRadius: 26,
+            offset: Offset(0, 12),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _item(
+            icon: Icons.photo_library_outlined,
+            label: 'Recents',
+            selected: recentsSelected,
+            onTap: () => onSelected(_SourceAction.recents),
+          ),
+          _item(
+            icon: Icons.grid_view_rounded,
+            label: 'All albums',
+            selected: allAlbumsSelected,
+            onTap: () => onSelected(_SourceAction.allAlbums),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _item({
+    required IconData icon,
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+        decoration: BoxDecoration(
+          color: selected
+              ? Colors.white.withValues(alpha: 0.08)
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, color: Colors.white, size: 23),
+            const SizedBox(width: 16),
+            Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 16.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

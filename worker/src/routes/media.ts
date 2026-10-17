@@ -181,6 +181,7 @@ mediaRouter.get(
     const isSender = media.sender_id === userId;
 
     // View-once / view-twice enforcement (non-sender).
+    let isFinalView = false;
     if (!isSender && media.view_policy !== 'unlimited') {
       const limit = media.view_policy === 'once' ? 1 : 2;
       const existing = await env.DB.prepare(
@@ -208,6 +209,7 @@ mediaRouter.get(
       )
         .bind(mediaId, userId, now)
         .run();
+      isFinalView = count + 1 >= limit;
     }
 
     const downloadCap = envNum(env, DOWNLOAD_CAP_VAR, 200 * 1024 * 1024);
@@ -249,6 +251,16 @@ mediaRouter.get(
 
     const r2Body = object as R2ObjectBody;
     const payload = await r2Body.arrayBuffer();
+    if (isFinalView) {
+      // Last allowed view served — purge the object now so nothing remains
+      // in storage even if the app never fetches it again.
+      try {
+        await env.MEDIA.delete(media.r2_key);
+      } catch (_) {}
+      await env.DB.prepare('UPDATE media SET consumed = 1 WHERE id = ?')
+        .bind(mediaId)
+        .run();
+    }
     return new Response(payload, {
       status: 200,
       headers: {

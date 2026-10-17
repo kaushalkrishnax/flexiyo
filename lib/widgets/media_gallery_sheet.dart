@@ -41,7 +41,18 @@ class _MediaGallerySheetState extends State<_MediaGallerySheet> {
 
   Future<void> _load() async {
     try {
-      final permission = await PhotoManager.requestPermissionExtend();
+      // Only images are picked here: the default RequestType.common also
+      // requests READ_MEDIA_VIDEO, which this app does not declare. On
+      // Android 13+ that makes the whole request report denied even after
+      // the user allows photos, so scope the grant to images.
+      final permission = await PhotoManager.requestPermissionExtend(
+        requestOption: const PermissionRequestOption(
+          androidPermission: AndroidPermission(
+            type: RequestType.image,
+            mediaLocation: false,
+          ),
+        ),
+      );
       if (!permission.hasAccess) {
         setState(() {
           _denied = true;

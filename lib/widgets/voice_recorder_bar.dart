@@ -367,21 +367,33 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar>
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        IconButton(
-                          onPressed:
-                              _phase == _RecPhase.stopped ? null : _togglePause,
-                          icon: HugeIcon(
-                            icon: _phase == _RecPhase.paused
-                                ? HugeIcons.strokeRoundedPlay
-                                : HugeIcons.strokeRoundedPause,
-                            color: _phase == _RecPhase.stopped
-                                ? Colors.grey
-                                : (isDark ? Colors.white : Colors.black87),
-                            size: 28,
+                        // Paused takes wear a translucent amber halo so the
+                        // hold is obvious; the mic returns on resume.
+                        Container(
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: _phase == _RecPhase.paused
+                                ? const Color(0xFFFFC400)
+                                    .withValues(alpha: 0.22)
+                                : Colors.transparent,
                           ),
-                          tooltip: _phase == _RecPhase.paused
-                              ? 'Resume listening'
-                              : 'Pause listening',
+                          child: IconButton(
+                            onPressed: _phase == _RecPhase.stopped
+                                ? null
+                                : _togglePause,
+                            icon: HugeIcon(
+                              icon: _phase == _RecPhase.paused
+                                  ? HugeIcons.strokeRoundedMic01
+                                  : HugeIcons.strokeRoundedMicOff01,
+                              color: _phase == _RecPhase.stopped
+                                  ? Colors.grey
+                                  : (isDark ? Colors.white : Colors.black87),
+                              size: 28,
+                            ),
+                            tooltip: _phase == _RecPhase.paused
+                                ? 'Resume listening'
+                                : 'Pause listening',
+                          ),
                         ),
                         const SizedBox(width: 6),
                         InkWell(

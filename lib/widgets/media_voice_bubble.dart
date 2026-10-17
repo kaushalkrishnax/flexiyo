@@ -169,15 +169,19 @@ class _MediaVoiceBubbleState extends ConsumerState<MediaVoiceBubble> {
                             color: Colors.white,
                           ),
                         )
-                      : HugeIcon(
-                          icon: _expired
-                              ? HugeIcons.strokeRoundedEyeOff
-                              : _playing
-                                  ? HugeIcons.strokeRoundedPause
-                                  : HugeIcons.strokeRoundedPlay,
-                          color: Colors.white,
-                          size: 25,
-                        ),
+                      : _expired
+                          ? const HugeIcon(
+                              icon: HugeIcons.strokeRoundedEyeOff,
+                              color: Colors.white,
+                              size: 20,
+                            )
+                          : Icon(
+                              _playing
+                                  ? Icons.pause_rounded
+                                  : Icons.play_arrow_rounded,
+                              color: Colors.white,
+                              size: 22,
+                            ),
                 ),
                 const SizedBox(width: 6),
                 Expanded(

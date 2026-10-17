@@ -4,6 +4,9 @@ import 'package:flexiyo/widgets/media_image_bubble.dart';
 import 'package:flexiyo/widgets/media_voice_bubble.dart';
 import 'package:flutter/material.dart';
 
+/// Distance (logical px) a bubble slides when fully swiped for a reply.
+const double kMessageSwipeMaxOffset = 96;
+
 class MessageBubble extends StatelessWidget {
   const MessageBubble({
     super.key,
@@ -19,6 +22,9 @@ class MessageBubble extends StatelessWidget {
     this.onReactionTap,
     required this.isSelected,
     this.replyToMessage,
+    this.swipeAnimation,
+    this.swiping = false,
+    this.timesReveal,
   });
 
   /// The message to display.
@@ -51,6 +57,18 @@ class MessageBubble extends StatelessWidget {
 
   /// If non-null, a quote of the replied-to message is shown above the content.
   final Message? replyToMessage;
+
+  /// Drives the per-message reply swipe: the bubble (not the avatar) slides
+  /// with it. Null disables the offset entirely.
+  final Animation<double>? swipeAnimation;
+
+  /// Whether this bubble is the one currently under the reply swipe.
+  final bool swiping;
+
+  /// Drives the timestamp peek: as its value grows a compact "5:33 pm"
+  /// label fades in beside the bubble (left of own bubbles, right of
+  /// incoming ones) without taking any layout space. Null disables it.
+  final Animation<double>? timesReveal;
 
   BorderRadius _bubbleRadius() {
     const r = Radius.circular(24);
@@ -384,6 +402,10 @@ class MessageBubble extends StatelessWidget {
       verticalPad: verticalPad,
       isSelected: isSelected,
       hasReaction: hasReaction,
+      swipeAnimation: swipeAnimation,
+      swiping: swiping,
+      timesReveal: timesReveal,
+      timesLabel: _compactTime(message.createdAt),
       child: rowChild,
     );
   }
@@ -399,6 +421,10 @@ class _BubbleRow extends StatelessWidget {
     required this.verticalPad,
     required this.isSelected,
     this.hasReaction = false,
+    this.swipeAnimation,
+    this.swiping = false,
+    this.timesReveal,
+    this.timesLabel,
     required this.child,
   });
 
@@ -408,11 +434,71 @@ class _BubbleRow extends StatelessWidget {
   final double verticalPad;
   final bool isSelected;
   final bool hasReaction;
+  final Animation<double>? swipeAnimation;
+  final bool swiping;
+  final Animation<double>? timesReveal;
+  final String? timesLabel;
   final Widget child;
+
+  /// Zero-width slot that paints the compact time beside the bubble while
+  /// the held timestamp peek is active; it occupies no layout space, so the
+  /// bubble never shifts while the times fade in.
+  Widget _timesGutter(BuildContext context) {
+    final reveal = timesReveal;
+    final label = timesLabel;
+    if (reveal == null || label == null) return const SizedBox.shrink();
+    return SizedBox(
+      width: 0,
+      height: 18,
+      child: AnimatedBuilder(
+        animation: reveal,
+        builder: (context, _) {
+          return Opacity(
+            opacity: reveal.value,
+            child: OverflowBox(
+              maxWidth: 220,
+              alignment: isMine ? Alignment.centerRight : Alignment.centerLeft,
+              child: Padding(
+                padding: EdgeInsets.only(
+                  left: isMine ? 0 : 8,
+                  right: isMine ? 8 : 0,
+                ),
+                child: Text(
+                  label,
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        fontSize: 12,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+
+    // Only the bubble slides during a reply swipe: incoming avatars stay
+    // anchored while the bubble travels away from them.
+    Widget bubble = child;
+    final swipe = swipeAnimation;
+    if (swipe != null) {
+      bubble = AnimatedBuilder(
+        animation: swipe,
+        child: child,
+        builder: (context, inner) {
+          final t = swiping ? swipe.value : 0.0;
+          return Transform.translate(
+            offset: Offset((isMine ? -1 : 1) * t * kMessageSwipeMaxOffset, 0),
+            child: inner,
+          );
+        },
+      );
+    }
 
     return AnimatedContainer(
       duration: const Duration(milliseconds: 150),
@@ -439,7 +525,9 @@ class _BubbleRow extends StatelessWidget {
             else
               const SizedBox(width: 34),
           ],
-          child,
+          if (isMine) _timesGutter(context),
+          bubble,
+          if (!isMine) _timesGutter(context),
         ],
       ),
     );
@@ -483,4 +571,12 @@ class _UnsentRow extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Compact "5:33 pm" label shown beside a message during the timestamp peek.
+String _compactTime(DateTime when) {
+  final local = when.toLocal();
+  final hour = local.hour % 12 == 0 ? 12 : local.hour % 12;
+  final minute = local.minute.toString().padLeft(2, '0');
+  return '$hour:$minute ${local.hour < 12 ? 'am' : 'pm'}';
 }

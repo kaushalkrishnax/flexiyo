@@ -43,14 +43,14 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
   bool _recordingVoice = false;
 
   /// Distance (logical px) a bubble slides at full swipe travel.
-  static const double _swipeMax = 96;
+  static const double _swipeMax = kMessageSwipeMaxOffset;
 
   /// Fraction of the swipe travel that arms the reply action.
   static const double _swipeReplyThreshold = 0.6;
 
-  /// 0 = at rest (time hidden), 1 = fully swiped. Only the message under the
-  /// finger moves; the time label and reply icon fade in on the edge the
-  /// bubble slides away from, and everything springs back on release.
+  /// 0 = at rest (icon hidden), 1 = fully swiped. Only the message under the
+  /// finger moves; the reply icon fades in on the edge the bubble slides
+  /// away from, and everything springs back on release.
   late final AnimationController _swipe = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 240),
@@ -58,6 +58,22 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
 
   /// Message currently under a swipe gesture.
   String? _swipingId;
+
+  /// Distance (logical px) of right-to-left travel that fully reveals every
+  /// timestamp while a message is held.
+  static const double _timesRevealDistance = 72;
+
+  /// 0 = timestamps hidden, 1 = fully revealed. Driven by holding a message
+  /// and sliding right-to-left; it clamps and springs back on release.
+  late final AnimationController _timesReveal = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 220),
+  );
+
+  /// Where the active long-press started (context-menu anchor) and whether
+  /// the finger has moved since (turning the hold into a timestamp peek).
+  Offset? _holdOrigin;
+  bool _holdMoved = false;
 
   @override
   void initState() {
@@ -125,12 +141,14 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
     });
   }
 
-  /// Compact "5:33 pm" label revealed beside each message while swiping.
-  String _revealTimeLabel(DateTime when) {
-    final local = when.toLocal();
-    final hour = local.hour % 12 == 0 ? 12 : local.hour % 12;
-    final minute = local.minute.toString().padLeft(2, '0');
-    return '$hour:$minute ${local.hour < 12 ? 'am' : 'pm'}';
+  /// Hides the timestamp gutter again; called on every release.
+  void _springBackTimes() {
+    if (_timesReveal.value == 0) return;
+    _timesReveal.animateTo(
+      0,
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOutCubic,
+    );
   }
 
   /// Reply arrow that fades in on the edge a bubble slides away from;
@@ -184,6 +202,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
     _messageController.dispose();
     _scrollController.dispose();
     _swipe.dispose();
+    _timesReveal.dispose();
     super.dispose();
   }
 
@@ -464,12 +483,14 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                                 children: [
                                   if (showSeparator)
                                     DateSeparator(date: message.createdAt),
-                                  // Swipe the bubble toward the inside of the
-                                  // screen (own messages right-to-left,
-                                  // incoming left-to-right) to peek at the
-                                  // time and arm a reply; releasing past the
-                                  // threshold replies, otherwise everything
-                                  // springs back.
+                                  // Slide the bubble toward the inside of
+                                  // the screen (own messages right-to-left,
+                                  // incoming left-to-right) to fade in the
+                                  // reply icon and arm a reply; releasing
+                                  // past the threshold replies, otherwise
+                                  // everything springs back. Holding a
+                                  // message and sliding right-to-left peeks
+                                  // at every timestamp instead.
                                   GestureDetector(
                                     behavior: HitTestBehavior.opaque,
                                     onHorizontalDragStart: swipeEnabled
@@ -489,6 +510,55 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                                     onHorizontalDragCancel: swipeEnabled
                                         ? () => _onMessageSwipeEnd(message.id)
                                         : null,
+                                    onLongPressStart: (details) {
+                                      if (conversationState.isSelectionMode) {
+                                        ref
+                                            .read(conversationProvider(
+                                                    widget.conversationId)
+                                                .notifier)
+                                            .toggleSelection(message.id);
+                                      } else if (!message.isUnsent) {
+                                        // Defer the menu to release: a hold
+                                        // that slides right-to-left peeks
+                                        // at all timestamps instead.
+                                        _holdOrigin = details.globalPosition;
+                                        _holdMoved = false;
+                                      }
+                                    },
+                                    onLongPressMoveUpdate: (details) {
+                                      if (_holdOrigin == null) return;
+                                      final dx =
+                                          details.localOffsetFromOrigin.dx;
+                                      // Only a deliberate right-to-left
+                                      // slide turns the hold into a peek;
+                                      // small drift keeps the menu.
+                                      if (dx < -14) _holdMoved = true;
+                                      _timesReveal.value =
+                                          (-dx / _timesRevealDistance)
+                                              .clamp(0.0, 1.0)
+                                              .toDouble();
+                                    },
+                                    onLongPressEnd: (_) {
+                                      final origin = _holdOrigin;
+                                      if (origin == null) return;
+                                      final moved = _holdMoved;
+                                      _holdOrigin = null;
+                                      _holdMoved = false;
+                                      _springBackTimes();
+                                      if (!moved) {
+                                        _showContextMenu(
+                                          context,
+                                          message,
+                                          origin,
+                                        );
+                                      }
+                                    },
+                                    onLongPressCancel: () {
+                                      if (_holdOrigin == null) return;
+                                      _holdOrigin = null;
+                                      _holdMoved = false;
+                                      _springBackTimes();
+                                    },
                                     child: AnimatedBuilder(
                                       animation: _swipe,
                                       child: MessageBubble(
@@ -501,6 +571,10 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                                             conv?.otherUsername ?? '',
                                         isSelected: isSelected,
                                         replyToMessage: replyToMsg,
+                                        swipeAnimation:
+                                            swipeEnabled ? _swipe : null,
+                                        swiping: _swipingId == message.id,
+                                        timesReveal: _timesReveal,
                                         onTap: conversationState.isSelectionMode
                                             ? () => ref
                                                 .read(conversationProvider(
@@ -518,45 +592,19 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                                                     .retryFailedMessage(
                                                         message.id)
                                                 : null),
-                                        onLongPressStart: (details) {
-                                          if (conversationState
-                                              .isSelectionMode) {
-                                            ref
-                                                .read(conversationProvider(
-                                                        widget.conversationId)
-                                                    .notifier)
-                                                .toggleSelection(message.id);
-                                          } else if (!message.isUnsent) {
-                                            _showContextMenu(
-                                              context,
-                                              message,
-                                              details.globalPosition,
-                                            );
-                                          }
-                                        },
                                       ),
                                       builder: (context, child) {
                                         final t = _swipingId == message.id
                                             ? _swipe.value
                                             : 0.0;
-                                        final timeLabel = Text(
-                                          _revealTimeLabel(message.createdAt),
-                                          style: Theme.of(context)
-                                              .textTheme
-                                              .labelSmall
-                                              ?.copyWith(
-                                                fontSize: 12,
-                                                color: Theme.of(context)
-                                                    .colorScheme
-                                                    .onSurfaceVariant,
-                                              ),
-                                        );
                                         return Stack(
                                           clipBehavior: Clip.none,
                                           children: [
-                                            // Time + reply affordance wait behind
-                                            // the bubble on the edge it slides
-                                            // away from, revealed as it moves.
+                                            // Reply affordance: fades in on
+                                            // the edge the bubble slides
+                                            // away from. Incoming icons
+                                            // surface in the gap between
+                                            // the avatar and the bubble.
                                             Positioned.fill(
                                               child: IgnorePointer(
                                                 child: Align(
@@ -567,46 +615,25 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                                                     opacity: t,
                                                     child: Padding(
                                                       padding: EdgeInsets.only(
-                                                        left: isMine ? 0 : 12,
+                                                        left: isMine ? 0 : 44,
                                                         right: isMine ? 12 : 0,
                                                       ),
-                                                      child: Row(
-                                                        mainAxisSize:
-                                                            MainAxisSize.min,
-                                                        children: [
-                                                          if (!isMine) ...[
-                                                            _replySwipeIcon(
-                                                              context,
-                                                              t,
-                                                            ),
-                                                            const SizedBox(
-                                                                width: 6),
-                                                          ],
-                                                          timeLabel,
-                                                          if (isMine) ...[
-                                                            const SizedBox(
-                                                                width: 6),
-                                                            _replySwipeIcon(
-                                                              context,
-                                                              t,
-                                                            ),
-                                                          ],
-                                                        ],
+                                                      child: _replySwipeIcon(
+                                                        context,
+                                                        t,
                                                       ),
                                                     ),
                                                   ),
                                                 ),
                                               ),
                                             ),
-                                            Transform.translate(
-                                              offset: Offset(
-                                                (isMine ? -1 : 1) *
-                                                    t *
-                                                    _swipeMax,
-                                                0,
-                                              ),
-                                              child: child,
-                                            ),
+                                            // The bubble itself slides
+                                            // inside MessageBubble so
+                                            // incoming avatars stay
+                                            // anchored; the held timestamp
+                                            // peek fades in beside each
+                                            // bubble from there too.
+                                            child!,
                                           ],
                                         );
                                       },
@@ -915,11 +942,14 @@ class _ComposerBar extends ConsumerWidget {
                   final isMultiline =
                       value.text.contains('\n') || value.text.length > 40;
 
-                  // Single capsule: text field + app bar-free icon row.
+                  // Single full-width capsule: text field with the camera
+                  // anchored on the left and the voice-note mic plus the
+                  // gallery at its right end (mic first, gallery rightmost).
                   // The camera button stays visible at all times, which also
-                  // keeps the text field anchored at a stable position so it
-                  // never loses focus (and the keyboard never closes) when
-                  // typing starts. Gallery / voice collapse into send.
+                  // keeps the text field anchored at a stable position so
+                  // it never loses focus (and the keyboard never closes)
+                  // when typing starts. Typing swaps mic + gallery for send
+                  // in place.
                   return Row(
                     crossAxisAlignment: isMultiline
                         ? CrossAxisAlignment.end
@@ -1003,22 +1033,24 @@ class _ComposerBar extends ConsumerWidget {
                                 ),
                               ),
 
-                              // Right affordances: gallery + voice note.
-                              // The moment typing starts they swap to the
-                              // send button (matched in place by Flutter,
-                              // so the field above keeps focus).
+                              // Right affordances inside the capsule:
+                              // voice note first, then gallery at the
+                              // capsule's right end. The moment typing
+                              // starts they swap to the send button
+                              // (matched in place by Flutter, so the field
+                              // above keeps focus).
                               if (!hasText) ...[
-                                _ComposerIconButton(
-                                  icon: HugeIcons.strokeRoundedImage01,
-                                  color: isDark ? Colors.white : Colors.black,
-                                  tooltip: 'Gallery',
-                                  onTap: onGalleryTap,
-                                ),
                                 _ComposerIconButton(
                                   icon: HugeIcons.strokeRoundedMic01,
                                   color: isDark ? Colors.white : Colors.black,
                                   tooltip: 'Voice note',
                                   onTap: onMicTap,
+                                ),
+                                _ComposerIconButton(
+                                  icon: HugeIcons.strokeRoundedImage01,
+                                  color: isDark ? Colors.white : Colors.black,
+                                  tooltip: 'Gallery',
+                                  onTap: onGalleryTap,
                                 ),
                               ] else ...[
                                 if (isSending) ...[

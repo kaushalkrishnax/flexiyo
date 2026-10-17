@@ -44,7 +44,7 @@ dependencies:
   # Utilities
   intl: ^0.20.3
   uuid: ^4.4.0
-  shared_preferences: ^2.2.3
+  shared_preferences: 2.3.5
 
   # Media: camera, gallery, voice notes, AES-GCM for media encryption
   camera: ^0.12.1
@@ -64,6 +64,7 @@ dependencies:
   firebase_core: ^5.0.0
   firebase_messaging: ^17.0.0
   image: ^4.12.0
+  shared_preferences_android: 2.4.28
 
 dev_dependencies:
   flutter_test:

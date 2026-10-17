@@ -4,7 +4,7 @@ import 'package:flexiyo/models/conversation.dart';
 import 'package:flexiyo/services/api_service.dart';
 import 'package:flexiyo/services/ws_service.dart';
 import 'package:flexiyo/storage/local_db.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
 
 // State
 

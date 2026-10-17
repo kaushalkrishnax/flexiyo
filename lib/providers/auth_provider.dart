@@ -8,6 +8,7 @@ import 'package:flexiyo/services/push_service.dart';
 import 'package:flexiyo/storage/local_db.dart';
 import 'package:flexiyo/storage/secure_keys.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
 
 class AuthState {
   const AuthState({

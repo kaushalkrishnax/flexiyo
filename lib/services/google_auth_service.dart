@@ -30,24 +30,26 @@ class GoogleAuthService {
   static const String webClientId =
       '1053892601915-pv8md97j50fb70u72rrdkfkvlfabog25.apps.googleusercontent.com';
 
-  // Platform-specific configuration: the web implementation asserts when
-  // `serverClientId` is set and crashes without a `clientId`.
-  late final GoogleSignIn _googleSignIn = kIsWeb
-      ? GoogleSignIn(
-          clientId: webClientId,
-          scopes: const ['email', 'profile'],
-        )
-      : GoogleSignIn(
-          scopes: const ['email', 'profile'],
-          serverClientId: webClientId,
-        );
+  bool _initialized = false;
+
+  // Platform-specific configuration: web takes the client ID, other platforms
+  // take it as `serverClientId` so Google returns an idToken.
+  Future<void> _ensureInitialized() async {
+    if (_initialized) return;
+    if (kIsWeb) {
+      await GoogleSignIn.instance.initialize(clientId: webClientId);
+    } else {
+      await GoogleSignIn.instance.initialize(serverClientId: webClientId);
+    }
+    _initialized = true;
+  }
 
   Future<GoogleAuthResult?> signIn() async {
     try {
-      final account = await _googleSignIn.signIn();
-      if (account == null) return null; // User cancelled
+      await _ensureInitialized();
+      final account = await GoogleSignIn.instance.authenticate();
 
-      final auth = await account.authentication;
+      final auth = account.authentication;
       return GoogleAuthResult(
         idToken: auth.idToken,
         email: account.email,
@@ -83,7 +85,7 @@ class GoogleAuthService {
 
   Future<void> signOut() async {
     try {
-      await _googleSignIn.signOut();
+      await GoogleSignIn.instance.signOut();
     } catch (_) {}
   }
 }

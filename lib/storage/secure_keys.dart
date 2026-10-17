@@ -14,7 +14,8 @@ class SecureKeys implements SecureKeyValueStore {
   static final SecureKeys instance = SecureKeys._();
 
   static const FlutterSecureStorage _storage = FlutterSecureStorage(
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+    // Encryption (AES-GCM with Keystore-backed key wrapping) is always on.
+    aOptions: AndroidOptions(),
     iOptions: IOSOptions(
       accessibility: KeychainAccessibility.first_unlock_this_device,
     ),

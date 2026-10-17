@@ -2,7 +2,7 @@ import 'package:flexiyo/core/exceptions.dart';
 import 'package:flexiyo/models/app_update.dart';
 import 'package:flexiyo/services/api_service.dart';
 import 'package:flexiyo/services/update_service.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
 
 enum UpdateDownloadState { idle, downloading, downloadFailed, installing }
 

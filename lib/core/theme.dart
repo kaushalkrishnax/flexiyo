@@ -17,6 +17,35 @@ class AppTheme {
 
   static const Color _seedColor = primary;
 
+  /// google_fonts 9 targets the standalone `material_ui` package, so its
+  /// [TextTheme] is a different type from the Flutter SDK's. Re-apply the Plus
+  /// Jakarta Sans family (and per-weight fallbacks) onto the SDK base theme.
+  static TextTheme _plusJakartaSans(TextTheme base) {
+    final themed = GoogleFonts.plusJakartaSansTextTheme();
+    TextStyle? styled(TextStyle? baseStyle, TextStyle? googleStyle) =>
+        baseStyle?.copyWith(
+          fontFamily: googleStyle?.fontFamily,
+          fontFamilyFallback: googleStyle?.fontFamilyFallback,
+        );
+    return TextTheme(
+      displayLarge: styled(base.displayLarge, themed.displayLarge),
+      displayMedium: styled(base.displayMedium, themed.displayMedium),
+      displaySmall: styled(base.displaySmall, themed.displaySmall),
+      headlineLarge: styled(base.headlineLarge, themed.headlineLarge),
+      headlineMedium: styled(base.headlineMedium, themed.headlineMedium),
+      headlineSmall: styled(base.headlineSmall, themed.headlineSmall),
+      titleLarge: styled(base.titleLarge, themed.titleLarge),
+      titleMedium: styled(base.titleMedium, themed.titleMedium),
+      titleSmall: styled(base.titleSmall, themed.titleSmall),
+      bodyLarge: styled(base.bodyLarge, themed.bodyLarge),
+      bodyMedium: styled(base.bodyMedium, themed.bodyMedium),
+      bodySmall: styled(base.bodySmall, themed.bodySmall),
+      labelLarge: styled(base.labelLarge, themed.labelLarge),
+      labelMedium: styled(base.labelMedium, themed.labelMedium),
+      labelSmall: styled(base.labelSmall, themed.labelSmall),
+    );
+  }
+
   static ThemeData get lightTheme {
     final colorScheme = ColorScheme.fromSeed(
       seedColor: _seedColor,
@@ -25,7 +54,7 @@ class AppTheme {
     return ThemeData(
       useMaterial3: true,
       colorScheme: colorScheme,
-      textTheme: GoogleFonts.plusJakartaSansTextTheme(
+      textTheme: _plusJakartaSans(
         ThemeData(useMaterial3: true, colorScheme: colorScheme).textTheme,
       ),
       appBarTheme: AppBarTheme(
@@ -98,7 +127,7 @@ class AppTheme {
       useMaterial3: true,
       scaffoldBackgroundColor: bgDark,
       colorScheme: colorScheme,
-      textTheme: GoogleFonts.plusJakartaSansTextTheme(
+      textTheme: _plusJakartaSans(
         ThemeData(useMaterial3: true, colorScheme: colorScheme).textTheme,
       ),
       appBarTheme: const AppBarTheme(

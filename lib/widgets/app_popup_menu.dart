@@ -99,75 +99,42 @@ Future<void> showRequestsListsMenu(
     BuildContext context, {
     required VoidCallback onRestricted,
     required VoidCallback onBlocked,
+    Rect? position,
   }) {
-    return showGeneralDialog(
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
+    final anchor = position ??
+        Rect.fromLTWH(
+          MediaQuery.of(context).size.width - 200,
+          80,
+          0,
+          0,
+        );
+    final relative = RelativeRect.fromRect(anchor, Offset.zero & overlay!.size);
+    return showMenu<void>(
       context: context,
-      barrierDismissible: true,
-      barrierLabel: 'RequestsLists',
-      barrierColor: Colors.black.withValues(alpha: 0.55),
-      transitionDuration: const Duration(milliseconds: 200),
-      pageBuilder: (ctx, animation, secondaryAnimation) {
-        final isDark = Theme.of(ctx).brightness == Brightness.dark;
-        final surfaceColor = isDark ? const Color(0xFF26272B) : Colors.white;
-        final dividerColor =
-            isDark ? const Color(0xFF383838) : const Color(0xFFEFEFEF);
-        final textColor = isDark ? Colors.white : Colors.black87;
-        return Center(
-          child: Material(
-            color: Colors.transparent,
-            child: Container(
-              width: 260,
-              margin: const EdgeInsets.symmetric(horizontal: 32),
-              decoration: BoxDecoration(
-                color: surfaceColor,
-                borderRadius: BorderRadius.circular(22),
-                border: Border.all(
-                  color: isDark
-                      ? const Color(0xFF383838)
-                      : const Color(0xFFE5E5EA),
-                  width: 1,
-                ),
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _ModalActionRow(
-                    label: 'Restricted',
-                    icon: Icons.block_outlined,
-                    onTap: () {
-                      Navigator.of(ctx).pop();
-                      onRestricted();
-                    },
-                    textColor: textColor,
-                  ),
-                  Divider(height: 1, color: dividerColor),
-                  _ModalActionRow(
-                    label: 'Blocked',
-                    icon: Icons.person_off_outlined,
-                    onTap: () {
-                      Navigator.of(ctx).pop();
-                      onBlocked();
-                    },
-                    textColor: textColor,
-                  ),
-                  const SizedBox(height: 6),
-                ],
-              ),
-            ),
+      position: relative,
+      items: [
+        PopupMenuItem<void>(
+          onTap: onRestricted,
+          child: const Row(
+            children: [
+              Icon(Icons.block_outlined, size: 22),
+              SizedBox(width: 14),
+              Text('Restricted'),
+            ],
           ),
-        );
-      },
-      transitionBuilder: (ctx, animation, secondaryAnimation, child) {
-        final curved = CurvedAnimation(
-          parent: animation,
-          curve: Curves.easeOutBack,
-        );
-        return FadeTransition(
-          opacity: animation,
-          child: ScaleTransition(scale: curved, child: child),
-        );
-      },
+        ),
+        PopupMenuItem<void>(
+          onTap: onBlocked,
+          child: const Row(
+            children: [
+              Icon(Icons.person_off_outlined, size: 22),
+              SizedBox(width: 14),
+              Text('Blocked'),
+            ],
+          ),
+        ),
+      ],
     );
   }
 

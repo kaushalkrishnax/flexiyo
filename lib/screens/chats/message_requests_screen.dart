@@ -117,13 +117,28 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
       appBar: AppBar(
         title: const Text('Message Requests'),
         actions: [
-          IconButton(
-            onPressed: () => showRequestsListsMenu(
-              context,
-              onRestricted: () => context.go('/chats/requests/restricted'),
-              onBlocked: () => context.go('/chats/requests/blocked'),
+          Builder(
+            builder: (buttonContext) => IconButton(
+              onPressed: () {
+                final box = buttonContext.findRenderObject() as RenderBox?;
+                final offset = box?.localToGlobal(Offset.zero) ?? Offset.zero;
+                final size = box?.size ?? Size.zero;
+                showRequestsListsMenu(
+                  context,
+                  onRestricted: () =>
+                      context.go('/chats/requests/restricted'),
+                  onBlocked: () =>
+                      context.go('/chats/requests/blocked'),
+                  position: Rect.fromLTWH(
+                    offset.dx,
+                    offset.dy + size.height,
+                    size.width,
+                    0,
+                  ),
+                );
+              },
+              icon: const Icon(Icons.more_vert_rounded),
             ),
-            icon: const Icon(Icons.more_vert_rounded),
           ),
           IconButton(
             onPressed: _loading ? null : _loadRequests,

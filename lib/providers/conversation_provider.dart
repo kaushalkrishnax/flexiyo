@@ -114,11 +114,20 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   Future<void> initialize() async {
     state = state.copyWith(isLoading: true, clearError: true);
 
+    final cachedConversation = _ref
+        .read(chatsProvider)
+        .conversations
+        .where((conversation) => conversation.id == conversationId)
+        .firstOrNull;
+    if (cachedConversation != null) {
+      state = state.copyWith(conversation: cachedConversation);
+    }
+
     // Load from local cache first for instant display
     try {
       final cachedRows = await LocalDb.instance.getMessages(conversationId);
       final cached =
-          cachedRows.reversed.map((r) => Message.fromJson(r)).toList();
+          cachedRows.reversed.map(Message.fromDbJson).toList();
       if (cached.isNotEmpty) {
         state = state.copyWith(messages: cached);
       }
@@ -127,23 +136,38 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     // Then load from server
     try {
       Conversation? conv;
-      try {
-        conv = await _api.getConversation(conversationId);
-      } catch (_) {
-        final conversations = await _api.getConversations();
-        conv = conversations.where((c) => c.id == conversationId).firstOrNull;
+      conv = state.conversation;
+      if (conv == null) {
+        try {
+          conv = await _api.getConversation(conversationId);
+        } catch (_) {
+          final conversations = await _api.getConversations();
+          conv =
+              conversations.where((c) => c.id == conversationId).firstOrNull;
+        }
       }
       if (conv == null) {
         throw Exception('Conversation not found');
       }
 
-      final messages = await _api.getMessages(conversationId, limit: 60)
+      final latestCached = state.messages.isEmpty
+          ? null
+          : state.messages.reduce(
+              (a, b) => a.createdAt.isAfter(b.createdAt) ? a : b,
+            );
+      final messages = await _api.getMessages(
+        conversationId,
+        limit: 60,
+        after: latestCached == null
+          ? null
+          : latestCached.createdAt.millisecondsSinceEpoch ~/ 1000,
+      )
         ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
       final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
       final cachedById = {
         for (final message in state.messages) message.id: message
       };
-      final hydratedMessages = <Message>[];
+      final hydratedMessages = [...state.messages];
 
       for (final msg in messages) {
         Message hydrated;
@@ -172,9 +196,17 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
           }
         }
 
-        hydratedMessages.add(hydrated);
+        final existingIndex =
+            hydratedMessages.indexWhere((message) => message.id == msg.id);
+        if (existingIndex == -1) {
+          hydratedMessages.add(hydrated);
+        } else {
+          hydratedMessages[existingIndex] = hydrated;
+        }
         await LocalDb.instance.upsertMessage(hydrated.toJson());
       }
+
+      hydratedMessages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
 
       if (mounted) {
         state = state.copyWith(
@@ -505,6 +537,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     );
 
     _upsertMessage(optimistic);
+    await LocalDb.instance.upsertMessage(optimistic.toJson());
     state = state.copyWith(clearReplyTo: true);
 
     // Update chats list preview.

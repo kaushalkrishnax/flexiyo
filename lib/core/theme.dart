@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 /// Material 3 theme configuration for Flexiyo.
-/// Seed color: Flexiyo Music primary magenta
 class AppTheme {
   AppTheme._();
 

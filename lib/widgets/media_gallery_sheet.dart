@@ -1,7 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
-import 'package:icon_plus/icon_plus.dart';
+import 'package:hugeicons/hugeicons.dart';
 import 'package:photo_manager/photo_manager.dart';
 
 /// Gallery picker popup; resolves with the selected image bytes.
@@ -127,7 +127,11 @@ class _MediaGallerySheetState extends State<_MediaGallerySheet> {
                       ),
                     ),
                     SizedBox(width: 4),
-                    Icon(HeroIcons.chevron_down, color: Colors.white, size: 20),
+                    HugeIcon(
+                      icon: HugeIcons.strokeRoundedChevronDown,
+                      color: Colors.white,
+                      size: 20,
+                    ),
                   ],
                 ),
                 Align(
@@ -206,8 +210,8 @@ class _MediaGallerySheetState extends State<_MediaGallerySheet> {
                                   color: Colors.black,
                                 ),
                               )
-                            : const Icon(
-                                IonIcons.send,
+                            : const HugeIcon(
+                                icon: HugeIcons.strokeRoundedSend,
                                 color: Colors.black,
                                 size: 20,
                               ),
@@ -286,8 +290,11 @@ class _MediaGallerySheetState extends State<_MediaGallerySheet> {
                     ),
                   ),
                   child: isSelected
-                      ? const Icon(FontAwesome.check_solid,
-                          size: 13, color: Colors.white)
+                      ? const HugeIcon(
+                          icon: HugeIcons.strokeRoundedCheck,
+                          size: 13,
+                          color: Colors.white,
+                        )
                       : null,
                 ),
               ),

@@ -90,6 +90,9 @@ messagesRouter.get(
 
     const url = new URL(request.url);
     const before = url.searchParams.get('before');
+    const afterRaw = url.searchParams.get('after');
+    const afterValue = afterRaw == null ? null : Number.parseInt(afterRaw, 10);
+    const after = Number.isFinite(afterValue) ? afterValue : null;
     const limitRaw = parseInt(url.searchParams.get('limit') ?? '50', 10);
     const limit = Math.min(Math.max(1, isNaN(limitRaw) ? 50 : limitRaw), 100);
 
@@ -134,11 +137,22 @@ messagesRouter.get(
          WHERE m.conversation_id = ?
            AND ld.id IS NULL
            AND (m.expires_at IS NULL OR m.expires_at > ?)
+           AND (? IS NULL OR m.created_at >= ?)
            AND m.created_at < ?
          ORDER BY m.created_at DESC
          LIMIT ?`,
       )
-        .bind(userId, userId, myDeviceId, conversationId, now, cursorMsg.created_at, limit)
+        .bind(
+          userId,
+          userId,
+          myDeviceId,
+          conversationId,
+          now,
+          after,
+          after,
+          cursorMsg.created_at,
+          limit,
+        )
         .all<MessageRow>();
     } else {
       rows = await env.DB.prepare(
@@ -158,10 +172,11 @@ messagesRouter.get(
          WHERE m.conversation_id = ?
            AND ld.id IS NULL
            AND (m.expires_at IS NULL OR m.expires_at > ?)
+           AND (? IS NULL OR m.created_at >= ?)
          ORDER BY m.created_at DESC
          LIMIT ?`,
       )
-        .bind(userId, userId, myDeviceId, conversationId, now, limit)
+        .bind(userId, userId, myDeviceId, conversationId, now, after, after, limit)
         .all<MessageRow>();
     }
 

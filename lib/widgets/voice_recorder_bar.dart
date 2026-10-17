@@ -4,7 +4,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
-import 'package:icon_plus/icon_plus.dart';
+import 'package:hugeicons/hugeicons.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
@@ -248,8 +248,11 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar> {
                       onTap:
                           _phase == _RecPhase.stopped ? _rerecord : _stopTake,
                       child: _phase == _RecPhase.stopped
-                          ? const Icon(Iconsax.microphone_2_outline,
-                              color: Colors.white, size: 22)
+                          ? const HugeIcon(
+                              icon: HugeIcons.strokeRoundedMic01,
+                              color: Colors.white,
+                              size: 22,
+                            )
                           : Container(
                               width: 16,
                               height: 16,
@@ -284,8 +287,8 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar> {
                 children: [
                   IconButton(
                     onPressed: _sending ? null : _discard,
-                    icon: Icon(
-                      IonIcons.trash,
+                    icon: HugeIcon(
+                      icon: HugeIcons.strokeRoundedTrash,
                       color: isDark ? Colors.white : Colors.black87,
                     ),
                     tooltip: 'Discard',
@@ -297,10 +300,10 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar> {
                         IconButton(
                           onPressed:
                               _phase == _RecPhase.stopped ? null : _togglePause,
-                          icon: Icon(
-                            _phase == _RecPhase.paused
-                                ? IonIcons.play
-                                : IonIcons.pause,
+                          icon: HugeIcon(
+                            icon: _phase == _RecPhase.paused
+                                ? HugeIcons.strokeRoundedPlay
+                                : HugeIcons.strokeRoundedPause,
                             color: _phase == _RecPhase.stopped
                                 ? Colors.grey
                                 : (isDark ? Colors.white : Colors.black87),
@@ -349,8 +352,8 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar> {
                                     color: Colors.white,
                                   ),
                                 )
-                              : const Icon(
-                                  IonIcons.send,
+                                : const HugeIcon(
+                                  icon: HugeIcons.strokeRoundedSend,
                                   color: Colors.white,
                                   size: 22,
                                 ),

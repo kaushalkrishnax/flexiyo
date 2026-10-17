@@ -5,7 +5,7 @@ import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/services/media_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:icon_plus/icon_plus.dart';
+import 'package:hugeicons/hugeicons.dart';
 
 /// Full-screen image viewer; view-limited media consumes a client view here.
 class MediaViewerScreen extends ConsumerStatefulWidget {
@@ -104,8 +104,11 @@ class _MediaViewerScreenState extends ConsumerState<MediaViewerScreen> {
                 left: 8,
                 child: IconButton(
                   onPressed: () => Navigator.of(context).pop(),
-                  icon: const Icon(HeroIcons.chevron_left,
-                      color: Colors.white, size: 24),
+                  icon: const HugeIcon(
+                    icon: HugeIcons.strokeRoundedChevronLeft,
+                    color: Colors.white,
+                    size: 24,
+                  ),
                 ),
               ),
               if (widget.message.mediaRef?.policy == ViewPolicy.once)
@@ -144,14 +147,14 @@ class _MediaViewerScreenState extends ConsumerState<MediaViewerScreen> {
     }
     if (_expired) {
       return _placeholder(
-        icon: IonIcons.eye_off,
+        icon: HugeIcons.strokeRoundedEyeOff,
         title: 'Media no longer available',
         subtitle: 'This photo reached its view limit.',
       );
     }
     if (_error != null || _bytes == null) {
       return _placeholder(
-        icon: IonIcons.cloud_offline,
+        icon: HugeIcons.strokeRoundedCloudOff,
         title: 'Could not load media',
         subtitle: 'Check your connection and try again.',
         action: TextButton(
@@ -169,7 +172,7 @@ class _MediaViewerScreenState extends ConsumerState<MediaViewerScreen> {
   }
 
   Widget _placeholder({
-    required IconData icon,
+    required List<List<dynamic>> icon,
     required String title,
     required String subtitle,
     Widget? action,
@@ -178,7 +181,7 @@ class _MediaViewerScreenState extends ConsumerState<MediaViewerScreen> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(icon, size: 44, color: Colors.white54),
+          HugeIcon(icon: icon, size: 44, color: Colors.white54),
           const SizedBox(height: 14),
           Text(
             title,

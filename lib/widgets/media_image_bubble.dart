@@ -6,7 +6,7 @@ import 'package:flexiyo/screens/media/media_viewer_screen.dart';
 import 'package:flexiyo/services/media_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:icon_plus/icon_plus.dart';
+import 'package:hugeicons/hugeicons.dart';
 
 /// Chat image bubble; view-limited recipient media stays locked until tapped.
 class MediaImageBubble extends ConsumerStatefulWidget {
@@ -93,7 +93,7 @@ class _MediaImageBubbleState extends ConsumerState<MediaImageBubble> {
     if (_expired) {
       return _tile(
         child: _message(
-          icon: IonIcons.eye_off,
+          icon: HugeIcons.strokeRoundedEyeOff,
           text: 'Media expired',
         ),
       );
@@ -139,7 +139,11 @@ class _MediaImageBubbleState extends ConsumerState<MediaImageBubble> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(IonIcons.camera, color: Colors.white70, size: 30),
+              const HugeIcon(
+                icon: HugeIcons.strokeRoundedCamera01,
+                color: Colors.white70,
+                size: 30,
+              ),
               const SizedBox(height: 8),
               Text(
                 'Tap to view',
@@ -162,7 +166,7 @@ class _MediaImageBubbleState extends ConsumerState<MediaImageBubble> {
       onTap: () => _load(force: true),
       child: _tile(
         child: _message(
-          icon: Iconsax.refresh_outline,
+          icon: HugeIcons.strokeRoundedRefresh,
           text: 'Tap to retry',
         ),
       ),
@@ -182,13 +186,13 @@ class _MediaImageBubbleState extends ConsumerState<MediaImageBubble> {
   }
 
   Widget _message({
-    required IconData icon,
+    required List<List<dynamic>> icon,
     required String text,
   }) {
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        Icon(icon, size: 26, color: Colors.white70),
+        HugeIcon(icon: icon, size: 26, color: Colors.white70),
         const SizedBox(height: 6),
         Text(
           text,
@@ -244,7 +248,11 @@ class ViewPolicyChip extends StatelessWidget {
           ),
           if (onTap != null) ...[
             const SizedBox(width: 4),
-            Icon(HeroIcons.chevron_up, size: compact ? 14 : 18, color: fg),
+            HugeIcon(
+              icon: HugeIcons.strokeRoundedChevronUp,
+              size: compact ? 14 : 18,
+              color: fg,
+            ),
           ],
         ],
       ),
@@ -269,7 +277,11 @@ class ViewPolicyGlyph extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (policy == ViewPolicy.unlimited) {
-      return Icon(Iconsax.tick_circle_outline, size: size, color: color);
+      return HugeIcon(
+        icon: HugeIcons.strokeRoundedCheckmarkCircle01,
+        size: size,
+        color: color,
+      );
     }
     return CustomPaint(
       size: Size.square(size),

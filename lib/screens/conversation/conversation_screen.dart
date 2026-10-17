@@ -19,7 +19,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:icon_plus/icon_plus.dart';
+import 'package:hugeicons/hugeicons.dart';
 
 class ConversationScreen extends ConsumerStatefulWidget {
   const ConversationScreen({
@@ -716,22 +716,12 @@ class _ComposerBar extends ConsumerWidget {
                             children: [
                               if (!hasText) ...[
                                 _ComposerIconButton(
-                                  icon: IonIcons.camera,
+                                  icon: HugeIcons.strokeRoundedCamera01,
                                   color: isDark ? Colors.white : Colors.black,
                                   tooltip: 'Camera',
                                   onTap: onCameraTap,
                                 ),
-                              ] else ...[
-                                _ComposerIconButton(
-                                  icon: IonIcons.send,
-                                  color: Colors.white,
-                                  forceBackgroundColor: brandBlue,
-                                  tooltip:
-                                      editDraft != null ? 'Update' : 'Send',
-                                  onTap: onSend,
-                                ),
                               ],
-
                               Expanded(
                                 child: Theme(
                                   data: Theme.of(context).copyWith(
@@ -791,13 +781,13 @@ class _ComposerBar extends ConsumerWidget {
                               // disappear the moment typing starts.
                               if (!hasText) ...[
                                 _ComposerIconButton(
-                                  icon: IonIcons.image,
+                                  icon: HugeIcons.strokeRoundedImage01,
                                   color: isDark ? Colors.white : Colors.black,
                                   tooltip: 'Gallery',
                                   onTap: onGalleryTap,
                                 ),
                                 _ComposerIconButton(
-                                  icon: Iconsax.microphone_2_outline,
+                                  icon: HugeIcons.strokeRoundedMic01,
                                   color: isDark ? Colors.white : Colors.black,
                                   tooltip: 'Voice note',
                                   onTap: onMicTap,
@@ -818,6 +808,14 @@ class _ComposerBar extends ConsumerWidget {
                                   ),
                                   const SizedBox(width: 8),
                                 ],
+                                _ComposerIconButton(
+                                  icon: HugeIcons.strokeRoundedSend,
+                                  color: Colors.white,
+                                  forceBackgroundColor: brandBlue,
+                                  tooltip:
+                                      editDraft != null ? 'Update' : 'Send',
+                                  onTap: onSend,
+                                ),
                               ],
                             ],
                           ),
@@ -845,7 +843,7 @@ class _ComposerIconButton extends StatelessWidget {
     this.forceBackgroundColor,
   });
 
-  final IconData icon;
+  final List<List<dynamic>> icon;
   final Color color;
   final String tooltip;
   final VoidCallback onTap;
@@ -865,7 +863,7 @@ class _ComposerIconButton extends StatelessWidget {
         color: forceBackgroundColor ?? Colors.transparent,
         shape: inline ? const CircleBorder() : null,
         child: IconButton(
-          icon: Icon(icon, size: 22, color: color),
+          icon: HugeIcon(icon: icon, size: 22, color: color),
           padding: EdgeInsets.zero,
           tooltip: tooltip,
           style: IconButton.styleFrom(

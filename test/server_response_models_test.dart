@@ -90,12 +90,11 @@ void main() {
   test('parses conversation pinned, muted, restricted flags', () {
     final conv = Conversation.fromJson(const {
       'id': 'conv-1',
-      'other_user_id': 'user-2',
-      'other_username': 'charlie',
-      'created_at': 1700000000,
-      'is_pinned': 1,
-      'is_muted': 1,
-      'is_restricted': 1,
+      'conversant': {'id': 'user-2', 'username': 'charlie'},
+      'createdAt': 1700000000,
+      'isPinned': true,
+      'isMuted': true,
+      'isRestricted': true,
     });
 
     expect(conv.isPinned, isTrue);

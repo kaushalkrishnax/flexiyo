@@ -12,7 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
-import 'package:icon_plus/icon_plus.dart';
+import 'package:hugeicons/hugeicons.dart';
 
 class ChatsScreen extends ConsumerStatefulWidget {
   const ChatsScreen({super.key});
@@ -150,7 +150,10 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                           alignment: Alignment.centerRight,
                           child: IconButton(
                             onPressed: () => context.go('/chats/new'),
-                            icon: const Icon(IonIcons.create, size: 23),
+                            icon: const HugeIcon(
+                              icon: HugeIcons.strokeRoundedAddToList,
+                              size: 23,
+                            ),
                             tooltip: 'New chat',
                           ),
                         ),

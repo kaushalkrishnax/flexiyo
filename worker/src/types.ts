@@ -11,6 +11,8 @@ export interface Env {
   BREVO_SENDER_NAME?: string;
   /// GitHub `owner/repo` publishing release APKs. Defaults to kaushalkrishnax/flexiyo.
   UPDATE_GITHUB_REPO?: string;
+  /// Optional GitHub PAT used by the Worker to avoid unauthenticated API limits.
+  GITHUB_TOKEN?: string;
   /** R2 bucket binding for media delivery (server-side only). */
   MEDIA: R2Bucket;
   /** Media object TTL in days. Default 14. */

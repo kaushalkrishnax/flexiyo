@@ -1,3 +1,4 @@
+import 'package:flexiyo/core/exceptions.dart';
 import 'package:flexiyo/models/user.dart';
 import 'package:flexiyo/providers/chat_provider.dart';
 import 'package:flexiyo/services/api_service.dart';
@@ -54,7 +55,7 @@ class AuthController extends StateNotifier<AuthState> {
 
     state = state.copyWith(token: token, isLoading: true);
     try {
-      final service = ApiService(_secureKeys);
+      final service = ApiService(_secureKeys, onServerRejected: invalidateSession);
       final me = await service.getMe();
       state = state.copyWith(
         token: token,
@@ -62,9 +63,10 @@ class AuthController extends StateNotifier<AuthState> {
         isLoading: false,
         isInitialized: true,
       );
+    } on UnauthorizedException {
+      await invalidateSession();
     } catch (_) {
-      await _secureKeys.clearJwt();
-      state = const AuthState(isInitialized: true);
+      state = state.copyWith(isLoading: false, isInitialized: true);
     }
   }
 
@@ -72,7 +74,7 @@ class AuthController extends StateNotifier<AuthState> {
       {required String username, required String password}) async {
     state = state.copyWith(isLoading: true);
     try {
-      final service = ApiService(_secureKeys);
+      final service = ApiService(_secureKeys, onServerRejected: invalidateSession);
       final result = await service.login(
         username: username,
         password: password,
@@ -107,7 +109,7 @@ class AuthController extends StateNotifier<AuthState> {
   }) async {
     state = state.copyWith(isLoading: true);
     try {
-      final service = ApiService(_secureKeys);
+      final service = ApiService(_secureKeys, onServerRejected: invalidateSession);
       final result = await service.register(
         username: username,
         password: password,
@@ -145,7 +147,7 @@ class AuthController extends StateNotifier<AuthState> {
   }) async {
     state = state.copyWith(isLoading: true);
     try {
-      final service = ApiService(_secureKeys);
+      final service = ApiService(_secureKeys, onServerRejected: invalidateSession);
       final result = await service.loginWithGoogle(
         idToken: idToken,
         email: email,
@@ -200,6 +202,10 @@ class AuthController extends StateNotifier<AuthState> {
     } catch (_) {
       // Network failures must never trap the user inside their own account.
     }
+    await invalidateSession();
+  }
+
+  Future<void> invalidateSession() async {
     await _secureKeys.clearJwt();
     await _ref?.read(chatsProvider.notifier).reset();
     await LocalDb.instance.clearAllUserData();

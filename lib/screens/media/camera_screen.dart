@@ -10,7 +10,7 @@ import 'package:flexiyo/widgets/media_gallery_sheet.dart';
 import 'package:flexiyo/widgets/media_image_bubble.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:icon_plus/icon_plus.dart';
+import 'package:hugeicons/hugeicons.dart';
 
 /// Camera capture + review flow; pass [initialImage] to open directly in
 /// review (used by the gallery picker so library photos get the same
@@ -174,10 +174,10 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     return _cameras[_cameraIndex].lensDirection == CameraLensDirection.back;
   }
 
-  IconData get _flashIcon => switch (_flashMode) {
-        FlashMode.off => Iconsax.flash_slash_bold,
-        FlashMode.auto => Iconsax.flash_1_outline,
-        _ => Iconsax.flash_1_bold,
+    List<List<dynamic>> get _flashIcon => switch (_flashMode) {
+      FlashMode.off => HugeIcons.strokeRoundedFlashOff,
+      FlashMode.auto => HugeIcons.strokeRoundedFlash,
+      _ => HugeIcons.strokeRoundedFlash,
       };
 
   Future<void> _cycleFlash() async {
@@ -394,8 +394,11 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
               children: [
                 IconButton(
                   onPressed: () => Navigator.of(context).pop(),
-                  icon:
-                      const Icon(IonIcons.close, color: Colors.white, size: 30),
+                  icon: const HugeIcon(
+                    icon: HugeIcons.strokeRoundedCancel01,
+                    color: Colors.white,
+                    size: 30,
+                  ),
                 ),
                 Expanded(
                   child: Center(
@@ -417,7 +420,11 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                   IconButton(
                     onPressed: _cycleFlash,
                     tooltip: 'Flash',
-                    icon: Icon(_flashIcon, color: Colors.white, size: 24),
+                    icon: HugeIcon(
+                      icon: _flashIcon,
+                      color: Colors.white,
+                      size: 24,
+                    ),
                   )
                 else
                   const SizedBox(width: 48),
@@ -440,8 +447,11 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      const Icon(Iconsax.camera_slash_outline,
-                          color: Colors.white38, size: 42),
+                      const HugeIcon(
+                        icon: HugeIcons.strokeRoundedCameraOff01,
+                        color: Colors.white38,
+                        size: 42,
+                      ),
                       const SizedBox(height: 10),
                       Text(
                         _initError ?? 'Camera unavailable',
@@ -470,8 +480,11 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                   children: [
                     _BottomSquareButton(
                       onTap: _pickFromGallery,
-                      child: const Icon(IonIcons.images,
-                          color: Colors.white, size: 26),
+                      child: const HugeIcon(
+                        icon: HugeIcons.strokeRoundedImages,
+                        color: Colors.white,
+                        size: 26,
+                      ),
                     ),
                     const Spacer(),
                     GestureDetector(
@@ -504,8 +517,8 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                     const Spacer(),
                     _BottomSquareButton(
                       onTap: _cameras.length > 1 ? _flip : null,
-                      child: Icon(
-                        IonIcons.camera_reverse,
+                      child: HugeIcon(
+                        icon: HugeIcons.strokeRoundedCameraRotated01,
                         color:
                             _cameras.length > 1 ? Colors.white : Colors.white30,
                         size: 28,
@@ -536,8 +549,11 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
             padding: const EdgeInsets.fromLTRB(8, 6, 8, 0),
             child: IconButton(
               onPressed: _handleBack,
-              icon: const Icon(HeroIcons.chevron_left,
-                  color: Colors.white, size: 26),
+              icon: const HugeIcon(
+                icon: HugeIcons.strokeRoundedChevronLeft,
+                color: Colors.white,
+                size: 26,
+              ),
             ),
           ),
         ),
@@ -608,7 +624,11 @@ class _EffectsChip extends StatelessWidget {
         child: const Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(IonIcons.sparkles, color: Colors.white, size: 15),
+            HugeIcon(
+              icon: HugeIcons.strokeRoundedSparkles,
+              color: Colors.white,
+              size: 15,
+            ),
             SizedBox(width: 6),
             Text(
               'Effects',
@@ -710,8 +730,11 @@ class _PolicyOption extends StatelessWidget {
               ),
             ),
             if (selected)
-              const Icon(FontAwesome.check_solid,
-                  color: Colors.white, size: 18),
+              const HugeIcon(
+                icon: HugeIcons.strokeRoundedCheck,
+                color: Colors.white,
+                size: 18,
+              ),
           ],
         ),
       ),

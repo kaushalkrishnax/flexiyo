@@ -5,7 +5,7 @@ description: Secure one-to-one encrypted messaging powered by the Signal Protoco
 
 publish_to: 'none'
 
-version: 1.0.2-beta.1+10002
+version: 1.0.2-beta.2+10002
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -55,7 +55,7 @@ dependencies:
 
   # Icons
   cupertino_icons: ^1.0.8
-  icon_plus: ^0.1.1
+  hugeicons: ^1.2.0
   google_sign_in: ^6.2.1
   sqflite_common_ffi_web: ^1.2.0
   sqflite_common_ffi: ^2.4.4

@@ -75,7 +75,7 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
       if (!_initialized) {
         try {
           final rows = await LocalDb.instance.getAllConversations();
-          final cached = rows.map((r) => _conversationFromDbRow(r)).toList();
+          final cached = rows.map(Conversation.fromDbJson).toList();
           if (cached.isNotEmpty) {
             state = state.copyWith(conversations: _sort(cached));
           }
@@ -416,24 +416,6 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
   }
 
   // Helpers
-
-  static Conversation _conversationFromDbRow(Map<String, dynamic> row) {
-    final lastMessageAtMs = row['last_message_at'] as int?;
-    return Conversation(
-      id: row['id'] as String,
-      otherUserId: row['other_user_id'] as String,
-      otherUsername: row['other_username'] as String,
-      disappearingTimer: (row['disappearing_timer'] as int?) ?? 0,
-      lastMessageAt: lastMessageAtMs != null
-          ? DateTime.fromMillisecondsSinceEpoch(lastMessageAtMs)
-          : null,
-      lastMessagePreview: row['last_message_preview'] as String?,
-      unreadCount: (row['unread_count'] as int?) ?? 0,
-      isPinned: (row['is_pinned'] as int?) == 1,
-      isMuted: (row['is_muted'] as int?) == 1,
-      isRestricted: (row['is_restricted'] as int?) == 1,
-    );
-  }
 
   static Map<String, dynamic> _conversationToDbRow(Conversation conv) => {
         'id': conv.id,

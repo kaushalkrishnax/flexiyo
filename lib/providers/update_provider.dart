@@ -128,7 +128,7 @@ class UpdateController extends StateNotifier<UpdateState> {
 
     setUpdateAvailable(info);
 
-    // Auto-show only for unseen, high-severity (stable) updates.
+    // Show every unseen release, including beta and release-candidate builds.
     final unseen =
         info.latestVersion != null && info.latestVersion != _seenVersion;
     if (info.isHighSeverity && unseen) {

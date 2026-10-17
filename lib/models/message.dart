@@ -73,30 +73,8 @@ class Message {
   }
 
   factory Message.fromJson(Map<String, dynamic> json) {
-    DateTime parseTimestamp(dynamic value) {
-      if (value is int) {
-        final ts = value > 1e12 ? value : value * 1000;
-        return DateTime.fromMillisecondsSinceEpoch(ts.toInt());
-      }
-      if (value is String) {
-        return DateTime.tryParse(value) ??
-            DateTime.fromMillisecondsSinceEpoch(0);
-      }
-      return DateTime.fromMillisecondsSinceEpoch(0);
-    }
-
-    // Handle both snake_case (server/sqflite) and camelCase (older JSON)
-    final isUnsent = json['is_unsent'] ?? json['isUnsent'];
-    final isLocallyDeleted =
-        json['is_locally_deleted'] ?? json['isLocallyDeleted'];
-    final isEdited = json['is_edited'] ?? json['isEdited'];
-    final messageType = json['message_type'] ?? json['messageType'];
-    final createdAt = json['created_at'] ?? json['createdAt'];
-    final expiresAt = json['expires_at'] ?? json['expiresAt'];
-    final editedAt = json['edited_at'] ?? json['editedAt'];
-    final replyToId = json['reply_to_id'] ?? json['replyToId'];
-    final deliveredAt = json['delivered_at'] ?? json['deliveredAt'];
-    final readAt = json['read_at'] ?? json['readAt'];
+    final deliveredAt = json['deliveredAt'];
+    final readAt = json['readAt'];
     final status = json['status'] ??
         (readAt != null
             ? 'read'
@@ -106,34 +84,73 @@ class Message {
 
     return Message(
       id: json['id'] as String,
-      conversationId: json['conversation_id'] as String? ??
-          json['conversationId'] as String? ??
-          '',
-      senderId:
-          json['sender_id'] as String? ?? json['senderId'] as String? ?? '',
-      decryptedText: json['decrypted_text'] as String?,
-      encryptedPayload: json['encrypted_payload'] as String? ??
-          json['encryptedPayload'] as String?,
+        conversationId: json['conversationId'] as String? ?? '',
+        senderId: json['senderId'] as String? ?? '',
+        encryptedPayload: json['encryptedPayload'] as String?,
       messageType: MessageType.values.firstWhere(
-        (e) => e.name == (messageType as String? ?? 'signal'),
+        (e) => e.name == ((json['messageType'] as String?) ?? 'signal'),
         orElse: () => MessageType.signal,
       ),
       version: (json['version'] as int?) ?? 1,
-      isUnsent: isUnsent is bool ? isUnsent : ((isUnsent as int?) ?? 0) == 1,
-      isLocallyDeleted: isLocallyDeleted is bool
-          ? isLocallyDeleted
-          : ((isLocallyDeleted as int?) ?? 0) == 1,
-      isEdited: isEdited is bool ? isEdited : ((isEdited as int?) ?? 0) == 1,
-      createdAt: parseTimestamp(createdAt),
-      expiresAt: expiresAt != null ? parseTimestamp(expiresAt) : null,
-      editedAt: editedAt != null ? parseTimestamp(editedAt) : null,
+        isUnsent: json['isUnsent'] == true,
+        isEdited: json['isEdited'] == true,
+        createdAt: _parseTimestamp(json['createdAt']),
+        expiresAt: json['expiresAt'] != null
+          ? _parseTimestamp(json['expiresAt'])
+          : null,
+        editedAt: json['editedAt'] != null
+          ? _parseTimestamp(json['editedAt'])
+          : null,
       status: MessageStatus.values.firstWhere(
         (e) => e.name == (status as String? ?? 'sent'),
         orElse: () => MessageStatus.sent,
       ),
-      replyToId: replyToId as String?,
+      replyToId: json['replyToId'] as String?,
       reaction: json['reaction'] as String?,
     );
+  }
+
+  factory Message.fromDbJson(Map<String, dynamic> json) {
+    final status = json['status'] as String? ?? 'sent';
+    return Message(
+      id: json['id'] as String,
+      conversationId: json['conversation_id'] as String,
+      senderId: json['sender_id'] as String,
+      decryptedText: json['decrypted_text'] as String?,
+      encryptedPayload: json['encrypted_payload'] as String?,
+      messageType: MessageType.values.firstWhere(
+        (e) => e.name == (json['message_type'] as String? ?? 'signal'),
+        orElse: () => MessageType.signal,
+      ),
+      version: (json['version'] as int?) ?? 1,
+      isUnsent: (json['is_unsent'] as int? ?? 0) == 1,
+      isLocallyDeleted: (json['is_locally_deleted'] as int? ?? 0) == 1,
+      isEdited: (json['is_edited'] as int? ?? 0) == 1,
+      createdAt: _parseTimestamp(json['created_at']),
+      expiresAt: json['expires_at'] != null
+          ? _parseTimestamp(json['expires_at'])
+          : null,
+      editedAt: json['edited_at'] != null
+          ? _parseTimestamp(json['edited_at'])
+          : null,
+      status: MessageStatus.values.firstWhere(
+        (e) => e.name == status,
+        orElse: () => MessageStatus.sent,
+      ),
+      replyToId: json['reply_to_id'] as String?,
+      reaction: json['reaction'] as String?,
+    );
+  }
+
+  static DateTime _parseTimestamp(dynamic value) {
+    if (value is int) {
+      final timestamp = value > 1e12 ? value : value * 1000;
+      return DateTime.fromMillisecondsSinceEpoch(timestamp.toInt());
+    }
+    if (value is String) {
+      return DateTime.tryParse(value) ?? DateTime.fromMillisecondsSinceEpoch(0);
+    }
+    return DateTime.fromMillisecondsSinceEpoch(0);
   }
 
   Map<String, dynamic> toJson() => {

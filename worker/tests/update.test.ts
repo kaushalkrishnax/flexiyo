@@ -29,6 +29,12 @@ describe('isNewerVersion', () => {
     expect(isNewerVersion('1.2', '1.1.9')).toBe(true);
     expect(isNewerVersion('1.2.0', '1.2')).toBe(false);
   });
+
+  it('orders prerelease versions before stable versions', () => {
+    expect(isNewerVersion('1.0.2-beta.2', '1.0.2-beta.1')).toBe(true);
+    expect(isNewerVersion('1.0.2', '1.0.2-beta.9')).toBe(true);
+    expect(isNewerVersion('1.0.2-beta.1', '1.0.2')).toBe(false);
+  });
 });
 
 describe('parseChangelog', () => {

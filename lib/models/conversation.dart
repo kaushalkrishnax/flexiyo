@@ -36,16 +36,12 @@ class Conversation {
   factory Conversation.fromJson(Map<String, dynamic> json) {
     final otherUser =
         json['conversant'] is Map ? json['conversant'] as Map : const {};
-    final otherUserId = (json['other_user_id'] ??
-        json['otherUserId'] ??
-        otherUser['id'] ??
-        '') as String;
-    final otherUsername = (json['other_username'] ??
-        json['otherUsername'] ??
-        otherUser['username'] ??
-        'Unknown') as String;
+    final otherUserId =
+      (json['otherUserId'] ?? otherUser['id'] ?? '') as String;
+    final otherUsername =
+      (json['otherUsername'] ?? otherUser['username'] ?? 'Unknown') as String;
 
-    final lastMessageAtValue = json['last_message_at'] ?? json['lastMessageAt'];
+    final lastMessageAtValue = json['lastMessageAt'];
     DateTime? parsedLastMessageAt;
     if (lastMessageAtValue is int) {
       final ts = lastMessageAtValue > 1e12
@@ -54,32 +50,39 @@ class Conversation {
       parsedLastMessageAt = DateTime.fromMillisecondsSinceEpoch(ts.toInt());
     }
 
-    final isPinnedVal = json['is_pinned'] ?? json['isPinned'];
-    final isMutedVal = json['is_muted'] ?? json['isMuted'];
-    final isRestrictedVal = json['is_restricted'] ?? json['isRestricted'];
-
     return Conversation(
       id: json['id'] as String,
       otherUserId: otherUserId,
       otherUsername: otherUsername,
-      disappearingTimer: (json['disappearing_timer'] as int?) ??
-          (json['disappearingTimer'] as int?) ??
-          0,
+        disappearingTimer: (json['disappearingTimer'] as int?) ?? 0,
       lastMessageAt: parsedLastMessageAt,
-      lastMessagePreview: json['last_message_preview'] as String? ??
-          json['lastMessagePreview'] as String?,
-      unreadCount:
-          (json['unread_count'] as int?) ?? (json['unreadCount'] as int?) ?? 0,
-      requestStatus: json['request_status'] as String? ??
-          json['requestStatus'] as String? ??
-          'accepted',
-      initiatedById: json['initiated_by_id'] as String? ??
-          json['initiatedById'] as String?,
-      isPinned: isPinnedVal == 1 || isPinnedVal == true,
-      isMuted: isMutedVal == 1 || isMutedVal == true,
-      isRestricted: isRestrictedVal == 1 || isRestrictedVal == true,
+        lastMessagePreview: json['lastMessagePreview'] as String?,
+        unreadCount: (json['unreadCount'] as int?) ?? 0,
+        requestStatus: json['requestStatus'] as String? ?? 'accepted',
+        initiatedById: json['initiatedById'] as String?,
+        isPinned: json['isPinned'] == true,
+        isMuted: json['isMuted'] == true,
+        isRestricted: json['isRestricted'] == true,
     );
   }
+
+      factory Conversation.fromDbJson(Map<String, dynamic> row) {
+      final lastMessageAt = row['last_message_at'] as int?;
+      return Conversation(
+        id: row['id'] as String,
+        otherUserId: row['other_user_id'] as String,
+        otherUsername: row['other_username'] as String,
+        disappearingTimer: (row['disappearing_timer'] as int?) ?? 0,
+        lastMessageAt: lastMessageAt == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(lastMessageAt),
+        lastMessagePreview: row['last_message_preview'] as String?,
+        unreadCount: (row['unread_count'] as int?) ?? 0,
+        isPinned: row['is_pinned'] == 1,
+        isMuted: row['is_muted'] == 1,
+        isRestricted: row['is_restricted'] == 1,
+      );
+      }
 
   Map<String, dynamic> toJson() => {
         'id': id,

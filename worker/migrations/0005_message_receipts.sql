@@ -1,1 +1,0 @@
-ALTER TABLE message_delivery ADD COLUMN read_at INTEGER;

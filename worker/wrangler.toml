@@ -6,7 +6,7 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "flexiyo-db"
-database_id = "355429d2-d252-4990-89ef-285d9b64e0f5"
+database_id = "a6d142a0-1b62-44b8-86b1-68f802eeaf54"
 migrations_dir = "migrations"
 
 [[durable_objects.bindings]]

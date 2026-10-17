@@ -57,29 +57,46 @@ export function findMatchingApkAsset(
   );
 }
 
-/// True when `latest` is strictly newer than `current`; tolerates a leading `v`,
-/// build metadata (`+123`) and missing segments.
+/// True when `latest` is strictly newer than `current`, including prerelease
+/// precedence (`beta.2` > `beta.1` and stable > any prerelease).
 export function isNewerVersion(latest: string, current: string): boolean {
-  const parse = (v: string): number[] =>
-    v
-      .trim()
-      .replace(/^v/i, '')
-      .split('+')[0]
-      .split('.')
-      .map((part) => {
-        const n = Number(part);
-        return Number.isFinite(n) ? n : 0;
-      });
+  const parse = (version: string) => {
+    const [withoutBuild, build] = version.trim().replace(/^v/i, '').split('+', 2);
+    const [core, prerelease] = withoutBuild.split('-', 2);
+    const coreParts = core.split('.').map((part) => Number.parseInt(part, 10));
+    return {
+      core: [coreParts[0] || 0, coreParts[1] || 0, coreParts[2] || 0],
+      prerelease: prerelease?.split('.') ?? [],
+      build,
+    };
+  };
 
   const l = parse(latest);
   const c = parse(current);
-  const len = Math.max(l.length, c.length);
+  for (let i = 0; i < l.core.length; i++) {
+    if (l.core[i] > c.core[i]) return true;
+    if (l.core[i] < c.core[i]) return false;
+  }
 
-  for (let i = 0; i < len; i++) {
-    const lv = l[i] ?? 0;
-    const cv = c[i] ?? 0;
-    if (lv > cv) return true;
-    if (lv < cv) return false;
+  if (l.prerelease.length === 0 || c.prerelease.length === 0) {
+    return l.prerelease.length === 0 && c.prerelease.length > 0;
+  }
+
+  const length = Math.max(l.prerelease.length, c.prerelease.length);
+  for (let i = 0; i < length; i++) {
+    if (i >= l.prerelease.length) return false;
+    if (i >= c.prerelease.length) return true;
+    const left = l.prerelease[i];
+    const right = c.prerelease[i];
+    if (left === right) continue;
+    const leftNumber = /^\d+$/.test(left) ? Number(left) : null;
+    const rightNumber = /^\d+$/.test(right) ? Number(right) : null;
+    if (leftNumber != null && rightNumber != null) {
+      return leftNumber > rightNumber;
+    }
+    if (leftNumber != null) return true;
+    if (rightNumber != null) return false;
+    return left > right;
   }
   return false;
 }
@@ -149,52 +166,67 @@ updateRouter.post(
     }
 
     try {
-      const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
+      const res = await fetch(
+        `https://api.github.com/repos/${repo}/releases?per_page=30`,
+        {
         headers: {
           Accept: 'application/vnd.github+json',
           'User-Agent': 'Flexiyo App',
+          ...(env.GITHUB_TOKEN
+            ? { Authorization: `Bearer ${env.GITHUB_TOKEN}` }
+            : {}),
         },
-      });
+        },
+      );
 
       if (!res.ok) {
         console.error('GitHub API failed:', res.status, await res.text());
         return json({ error: 'GitHub API failed' }, 502);
       }
 
-      const data = (await res.json()) as {
+      const data = (await res.json()) as Array<{
         tag_name?: string;
         name?: string | null;
         published_at?: string | null;
         html_url?: string | null;
         body?: string | null;
-        assets?: Array<{
-          name: string;
-          browser_download_url: string;
-          size: number;
-          digest?: string | null;
-          download_count?: number;
-          created_at?: string | null;
-        }>;
-      };
-
-      if (!data.tag_name || !data.assets) {
-        return json({ error: 'Invalid release data' }, 500);
+        draft?: boolean;
+        assets?: ReleaseAsset[];
+      }>;
+      const releases = data
+        .filter((release) => !release.draft && release.tag_name && release.assets)
+        .sort((a, b) =>
+          String(b.published_at ?? '').localeCompare(String(a.published_at ?? '')),
+        );
+      if (releases.length === 0) {
+        return json({ error: 'No published releases found' }, 404);
       }
 
-      const latestVersion = data.tag_name.replace(/^v/i, '');
       const archKey = typeof arch === 'string' ? arch : '';
-      const apk = findMatchingApkAsset(data.assets, archKey, latestVersion);
-      if (!apk) {
+      const selected = releases
+        .map((release) => {
+          const latestVersion = release.tag_name!.replace(/^v/i, '');
+          return {
+            release,
+            latestVersion,
+            apk: findMatchingApkAsset(release.assets!, archKey, latestVersion),
+          };
+        })
+        .find((candidate) => candidate.apk);
+      if (!selected || !selected.apk) {
         return json({ error: `No APK found for arch: ${archKey || 'unknown'}` }, 404);
       }
+
+      const { release, latestVersion } = selected;
+      const apk: ReleaseAsset = selected.apk as ReleaseAsset;
 
       const releaseInfo = {
         version: latestVersion,
         latestVersion,
-        name: data.name ?? null,
-        publishedAt: data.published_at ?? null,
-        releaseUrl: data.html_url ?? null,
-        changelog: parseChangelog(String(data.body ?? '')),
+        name: release.name ?? null,
+        publishedAt: release.published_at ?? null,
+        releaseUrl: release.html_url ?? null,
+        changelog: parseChangelog(String(release.body ?? '')),
         severity: getSeverity(latestVersion),
         apkUrl: apk.browser_download_url,
         apk: {

@@ -1,6 +1,6 @@
 {
   "name": "flexiyo",
-  "version": "1.0.2-beta.1",
+  "version": "1.0.2-beta.2",
   "private": true,
   "scripts": {
     "dev": "cd worker && bunx wrangler dev",
@@ -10,7 +10,6 @@
     "db:migrate:local": "cd worker && bunx wrangler d1 migrations apply flexiyo-db --local",
     "db:migrate:remote": "cd worker && bunx wrangler d1 migrations apply flexiyo-db --remote",
     "deploy": "cd worker && bunx wrangler deploy",
-    "deploy:worker": "cd worker && bunx wrangler deploy",
     "build:web": "flutter build web --release",
     "deploy:pages": "bunx wrangler pages deploy build/web --commit-dirty=true",
     "release:android": "node scripts/build-release.js --platform android",

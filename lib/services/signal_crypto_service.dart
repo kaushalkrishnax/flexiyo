@@ -6,6 +6,7 @@ import 'package:flexiyo/services/api_service.dart';
 import 'package:flexiyo/services/persistent_signal_store.dart';
 import 'package:flexiyo/storage/secure_keys.dart';
 import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
+import 'package:uuid/uuid.dart';
 
 class EncryptedPayload {
   const EncryptedPayload({required this.payload, required this.messageType});
@@ -50,10 +51,19 @@ class SignalCryptoService {
   }
 
   Future<void> ensureDeviceRegistered() async {
+    await _installationId();
     final registeredKey = _store.storageKey('device.registered');
     if (await _storage.readString(registeredKey) == 'true') {
-      await _replenishPreKeysIfNeeded();
-      return;
+      try {
+        final remaining = await _api.getPreKeyCount();
+        if (remaining >= _preKeyReplenishThreshold) return;
+        await _replenishPreKeysIfNeeded();
+        return;
+      } catch (_) {
+        // The backend may have been reset while this installation still has
+        // its local registration flag. Re-register the existing key material.
+        await _storage.deleteString(registeredKey);
+      }
     }
 
     final pendingKey = _store.storageKey('device.registration.pending');
@@ -65,6 +75,8 @@ class SignalCryptoService {
       payload = await _createDevicePayload();
       await _storage.saveString(pendingKey, jsonEncode(payload));
     }
+
+    payload['installationId'] = await _installationId();
 
     await _api.registerDevice(payload);
     await _storage.saveString(registeredKey, 'true');
@@ -96,7 +108,7 @@ class SignalCryptoService {
     );
 
     return {
-      'deviceId': _deviceId.toString(),
+      'installationId': await _installationId(),
       'registrationId': _store.registrationId,
       'identityKey': base64Encode(_store.identityKey.serialize()),
       'signedPreKey': {
@@ -117,6 +129,15 @@ class SignalCryptoService {
           )
           .toList(),
     };
+  }
+
+  Future<String> _installationId() async {
+    const key = 'flexiyo.installation_id';
+    final existing = await _storage.readString(key);
+    if (existing != null && existing.isNotEmpty) return existing;
+    final created = const Uuid().v4();
+    await _storage.saveString(key, created);
+    return created;
   }
 
   Future<void> _replenishPreKeysIfNeeded() async {

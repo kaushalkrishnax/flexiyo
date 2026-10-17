@@ -6,7 +6,7 @@ import 'package:flexiyo/models/message.dart';
 import 'package:flexiyo/services/media_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:icon_plus/icon_plus.dart';
+import 'package:hugeicons/hugeicons.dart';
 
 /// Voice-note bubble with play/pause, waveform progress and duration.
 class MediaVoiceBubble extends ConsumerStatefulWidget {
@@ -169,12 +169,12 @@ class _MediaVoiceBubbleState extends ConsumerState<MediaVoiceBubble> {
                             color: Colors.white,
                           ),
                         )
-                      : Icon(
-                          _expired
-                              ? IonIcons.eye_off
-                              : _playing
-                                  ? IonIcons.pause
-                                  : IonIcons.play,
+                        : HugeIcon(
+                          icon: _expired
+                            ? HugeIcons.strokeRoundedEyeOff
+                            : _playing
+                              ? HugeIcons.strokeRoundedPause
+                              : HugeIcons.strokeRoundedPlay,
                           color: Colors.white,
                           size: 30,
                         ),

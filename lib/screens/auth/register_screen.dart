@@ -4,13 +4,12 @@ import 'package:flexiyo/core/theme.dart';
 import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/services/api_service.dart';
 import 'package:flexiyo/services/google_auth_service.dart';
-import 'package:flexiyo/storage/secure_keys.dart';
 import 'package:flexiyo/widgets/auth_background.dart';
 import 'package:flexiyo/widgets/auth_text_field.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:icon_plus/icon_plus.dart';
+import 'package:hugeicons/hugeicons.dart';
 
 class RegisterScreen extends ConsumerStatefulWidget {
   const RegisterScreen({super.key});
@@ -121,8 +120,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
 
   Future<void> _checkUsernameAvailability(String username) async {
     try {
-      final secureKeys = ref.read(secureKeysProvider);
-      final apiService = ApiService(secureKeys);
+      final apiService = ref.read(apiServiceProvider);
       final result = await apiService.checkUsernameAvailability(username);
 
       if (!mounted || _usernameController.text.trim() != username) return;
@@ -627,7 +625,10 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                 : Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Brand(Brands.google, size: 20),
+                      const HugeIcon(
+                        icon: HugeIcons.strokeRoundedGoogle,
+                        size: 20,
+                      ),
                       const SizedBox(width: 10),
                       Text(
                         'Sign up with Google',

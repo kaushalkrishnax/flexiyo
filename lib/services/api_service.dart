@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
@@ -7,12 +8,13 @@ import 'package:flexiyo/models/conversation.dart';
 import 'package:flexiyo/models/key_bundle.dart';
 import 'package:flexiyo/models/message.dart';
 import 'package:flexiyo/models/user.dart';
+import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/storage/secure_keys.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 /// Dio HTTP client for the Flexiyo backend; attaches the JWT to every request.
 class ApiService {
-  ApiService(this._secureKeys) {
+  ApiService(this._secureKeys, {this.onServerRejected}) {
     _dio = Dio(
       BaseOptions(
         baseUrl: AppConstants.apiBaseUrl,
@@ -29,11 +31,19 @@ class ApiService {
           if (token != null) {
             options.headers['Authorization'] = 'Bearer $token';
           }
+          final installationId =
+              await _secureKeys.readString('flexiyo.installation_id');
+          if (installationId != null && installationId.isNotEmpty) {
+            options.headers['X-Installation-Id'] = installationId;
+          }
           handler.next(options);
         },
         onError: (error, handler) {
-          if (error.response?.statusCode == 401) {
-            throw const UnauthorizedException();
+          final status = error.response?.statusCode;
+          if (status == 401 || status == 403) {
+            if (onServerRejected != null) {
+              unawaited(onServerRejected!());
+            }
           }
           handler.next(error);
         },
@@ -43,6 +53,7 @@ class ApiService {
 
   late final Dio _dio;
   final SecureKeys _secureKeys;
+  final Future<void> Function()? onServerRejected;
 
   Future<Map<String, dynamic>> login({
     required String username,
@@ -243,9 +254,11 @@ class ApiService {
   Future<List<Message>> getMessages(
     String conversationId, {
     int limit = 60,
+    int? after,
     String? before,
   }) async {
     final params = <String, dynamic>{'limit': limit};
+    if (after != null) params['after'] = after;
     if (before != null) params['before'] = before;
     final data = await _get(
       '/api/conversations/$conversationId/messages',
@@ -409,7 +422,9 @@ class ApiService {
         e.type == DioExceptionType.connectionError) {
       return NetworkException(message);
     }
-    if (status == 401) return UnauthorizedException(message);
+    if (status == 401 || status == 403) {
+      return UnauthorizedException(message);
+    }
     if (status == 404) return NotFoundException(message);
     return ApiException(message, statusCode: status);
   }
@@ -421,5 +436,8 @@ class ApiService {
 
 final apiServiceProvider = Provider<ApiService>((ref) {
   final secureKeys = ref.watch(secureKeysProvider);
-  return ApiService(secureKeys);
+  return ApiService(
+    secureKeys,
+    onServerRejected: ref.read(authProvider.notifier).invalidateSession,
+  );
 });

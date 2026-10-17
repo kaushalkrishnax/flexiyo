@@ -3,6 +3,7 @@ import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/providers/chat_provider.dart';
 import 'package:flexiyo/providers/signal_crypto_provider.dart';
 import 'package:flexiyo/services/api_service.dart';
+import 'package:flexiyo/widgets/app_popup_menu.dart';
 import 'package:flexiyo/widgets/avatar.dart';
 import 'package:flexiyo/widgets/skeleton.dart';
 import 'package:flutter/material.dart';
@@ -116,6 +117,14 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
       appBar: AppBar(
         title: const Text('Message Requests'),
         actions: [
+          IconButton(
+            onPressed: () => showRequestsListsMenu(
+              context,
+              onRestricted: () => context.go('/chats/requests/restricted'),
+              onBlocked: () => context.go('/chats/requests/blocked'),
+            ),
+            icon: const Icon(Icons.more_vert_rounded),
+          ),
           IconButton(
             onPressed: _loading ? null : _loadRequests,
             tooltip: 'Refresh requests',

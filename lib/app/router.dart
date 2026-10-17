@@ -2,6 +2,7 @@ import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/screens/auth/login_screen.dart';
 import 'package:flexiyo/screens/auth/register_screen.dart';
 import 'package:flexiyo/screens/chats/chats_screen.dart';
+import 'package:flexiyo/screens/chats/chat_state_lists_screen.dart';
 import 'package:flexiyo/screens/chats/message_requests_screen.dart';
 import 'package:flexiyo/screens/chats/new_chat_screen.dart';
 import 'package:flexiyo/screens/conversation/conversation_screen.dart';
@@ -138,6 +139,18 @@ final routerProvider = Provider<GoRouter>((ref) {
             path: 'requests',
             name: 'message-requests',
             builder: (context, state) => const MessageRequestsScreen(),
+            routes: [
+              GoRoute(
+                path: 'restricted',
+                name: 'restricted-chats',
+                builder: (context, state) => const RestrictedChatsScreen(),
+              ),
+              GoRoute(
+                path: 'blocked',
+                name: 'blocked-chats',
+                builder: (context, state) => const BlockedChatsScreen(),
+              ),
+            ],
           ),
           GoRoute(
             path: ':conversationId',
@@ -148,6 +161,7 @@ final routerProvider = Provider<GoRouter>((ref) {
                 conversationId: conversationId,
                 isMessageRequest:
                     state.uri.queryParameters['request'] == 'true',
+                browseMode: state.uri.queryParameters['browse'],
               );
             },
           ),

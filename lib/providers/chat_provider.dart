@@ -6,23 +6,28 @@ import 'package:flexiyo/services/ws_service.dart';
 import 'package:flexiyo/storage/local_db.dart';
 import 'package:flutter_riverpod/legacy.dart';
 
-// State
 
 class ChatsState {
   const ChatsState({
     this.conversations = const [],
+    this.restrictedChats = const [],
+    this.blockedChats = const [],
     this.requestCount = 0,
     this.isLoading = false,
     this.error,
   });
 
   final List<Conversation> conversations;
+  final List<Conversation> restrictedChats;
+  final List<Conversation> blockedChats;
   final int requestCount;
   final bool isLoading;
   final String? error;
 
   ChatsState copyWith({
     List<Conversation>? conversations,
+    List<Conversation>? restrictedChats,
+    List<Conversation>? blockedChats,
     int? requestCount,
     bool? isLoading,
     String? error,
@@ -30,6 +35,8 @@ class ChatsState {
   }) {
     return ChatsState(
       conversations: conversations ?? this.conversations,
+      restrictedChats: restrictedChats ?? this.restrictedChats,
+      blockedChats: blockedChats ?? this.blockedChats,
       requestCount: requestCount ?? this.requestCount,
       isLoading: isLoading ?? this.isLoading,
       error: clearError ? null : (error ?? this.error),
@@ -37,7 +44,6 @@ class ChatsState {
   }
 }
 
-// Notifier
 
 class ChatsNotifier extends StateNotifier<ChatsState> {
   ChatsNotifier(this._api) : super(const ChatsState());
@@ -60,9 +66,107 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     return list;
   }
 
-  /// Load conversations — first from cache, then one single-seed refresh.
-  /// After seeding, all updates are pushed over the inbox WebSocket; there is
-  /// no polling anywhere in the app.
+  Future<List<Conversation>> _hydrate(List<Conversation> source) async {
+    final states = await LocalDb.instance.getChatStates();
+    final result = <Conversation>[];
+    for (final conv in source) {
+      final row = states[conv.id];
+      if (row != null && (row['is_deleted'] as int? ?? 0) == 1) continue;
+      result.add(conv.copyWith(
+        isPinned: row != null && (row['is_pinned'] as int? ?? 0) == 1,
+        isMuted: row != null && (row['is_muted'] as int? ?? 0) == 1,
+        isRestricted:
+            row != null && (row['is_restricted'] as int? ?? 0) == 1,
+      ));
+    }
+    return result;
+  }
+
+  Future<void> _applySeed(List<Conversation> inbox, List<Conversation> requests,
+      List<Conversation> blockedServer) async {
+    final cached = [
+      ...state.conversations,
+      ...state.restrictedChats,
+      ...state.blockedChats,
+    ];
+    final cachedById = {for (final conv in cached) conv.id: conv};
+
+    Conversation merge(Conversation conversation) {
+      final c = cachedById[conversation.id];
+      if (c == null) return conversation;
+      final sameLatestMessage = c.lastMessageAt != null &&
+          conversation.lastMessageAt != null &&
+          c.lastMessageAt!.millisecondsSinceEpoch ~/ 1000 ==
+              conversation.lastMessageAt!.millisecondsSinceEpoch ~/ 1000;
+      return sameLatestMessage
+          ? conversation.copyWith(
+              lastMessagePreview: c.lastMessagePreview,
+              unreadCount: c.unreadCount,
+              isPinned: c.isPinned,
+              isMuted: c.isMuted,
+              isRestricted: c.isRestricted,
+            )
+          : conversation;
+    }
+
+    final hydrated = await _hydrate(
+      [...inbox, ...requests, ...blockedServer].map(merge).toList(),
+    );
+
+    final byId = <String, Conversation>{};
+    for (final conv in hydrated) {
+      byId[conv.id] = conv;
+    }
+    final deduped = byId.values.toList();
+
+    final active = <Conversation>[];
+    final restricted = <Conversation>[];
+    final blocked = <Conversation>[];
+    final blockedIds = {for (final conv in blockedServer) conv.id};
+    for (final conv in deduped) {
+      if (conv.isRestricted) {
+        restricted.add(conv);
+      } else if (blockedIds.contains(conv.id)) {
+        blocked.add(conv);
+      } else {
+        active.add(conv);
+      }
+    }
+
+    final pendingCount = deduped
+        .where((c) =>
+            !c.isRestricted &&
+            !blockedIds.contains(c.id) &&
+            c.requestStatus == 'pending' &&
+            c.initiatedById != null &&
+            c.initiatedById != c.otherUserId)
+        .length;
+
+    final sortedActive = _sort(active);
+    final sortedRestricted = _sort(restricted);
+    final sortedBlocked = _sort(blocked);
+
+    state = state.copyWith(
+      conversations: sortedActive,
+      restrictedChats: sortedRestricted,
+      blockedChats: sortedBlocked,
+      requestCount: pendingCount,
+      isLoading: false,
+      clearError: true,
+    );
+
+    // Persist rows + local flags.
+    for (final conv in deduped) {
+      await LocalDb.instance.upsertConversation(_conversationToDbRow(conv));
+      await LocalDb.instance.applyChatState(
+        conv.id,
+        isPinned: conv.isPinned,
+        isMuted: conv.isMuted,
+        isRestricted: conv.isRestricted,
+      );
+    }
+  }
+
   Future<void> load({bool forceRefresh = false}) async {
     if (state.isLoading) return;
 
@@ -71,7 +175,6 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     if (!_initialized || forceRefresh) {
       state = state.copyWith(isLoading: true, clearError: true);
 
-      // Show cached conversations immediately while the seed request runs
       if (!_initialized) {
         try {
           final rows = await LocalDb.instance.getAllConversations();
@@ -79,56 +182,26 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
           if (cached.isNotEmpty) {
             state = state.copyWith(conversations: _sort(cached));
           }
-        } catch (_) {
-          // ignore cache errors — server will provide data
-        }
+          final restrictedRows =
+              await LocalDb.instance.getRestrictedConversations();
+          final blockedRows = await LocalDb.instance.getBlockedConversations();
+          state = state.copyWith(
+            restrictedChats:
+                _sort(restrictedRows.map(Conversation.fromDbJson).toList()),
+            blockedChats:
+                _sort(blockedRows.map(Conversation.fromDbJson).toList()),
+          );
+        } catch (_) {}
         _initialized = true;
       }
 
       try {
-        // One round trip: accepted chats + request queue together.
         final seed = await _api.getConversationSeed();
-
-        final cachedById = {
-          for (final conv in state.conversations) conv.id: conv
-        };
-        Conversation merge(Conversation conversation) {
-          final cached = cachedById[conversation.id];
-          final sameLatestMessage = cached?.lastMessageAt != null &&
-              conversation.lastMessageAt != null &&
-              cached!.lastMessageAt!.millisecondsSinceEpoch ~/ 1000 ==
-                  conversation.lastMessageAt!.millisecondsSinceEpoch ~/ 1000;
-          return sameLatestMessage
-              ? conversation.copyWith(
-                  lastMessagePreview: cached.lastMessagePreview,
-                  unreadCount: cached.unreadCount,
-                  isPinned: cached.isPinned,
-                  isMuted: cached.isMuted,
-                  isRestricted: cached.isRestricted,
-                )
-              : conversation;
-        }
-
-        final merged = seed.conversations.map(merge).toList();
-        final sorted = _sort(merged);
-
-        // Persist to local cache
-        for (final conv in sorted) {
-          await LocalDb.instance.upsertConversation(_conversationToDbRow(conv));
-        }
-        if (mounted) {
-          state = state.copyWith(
-            conversations: sorted,
-            requestCount: seed.requests.length,
-            isLoading: false,
-          );
-        }
+        final blockedServer = await _api.getConversations(scope: 'blocked');
+        await _applySeed(seed.conversations, seed.requests, blockedServer);
       } catch (e) {
         if (mounted) {
-          state = state.copyWith(
-            isLoading: false,
-            error: e.toString(),
-          );
+          state = state.copyWith(isLoading: false, error: e.toString());
         }
       }
     }
@@ -149,25 +222,14 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
 
   bool _resyncing = false;
 
-  /// Silent repair for state that arrived partially over the socket (e.g. a
-  /// brand-new conversation tile). Consumes one seed call, rate-guarded.
   Future<void> _resync() async {
     if (_resyncing) return;
     _resyncing = true;
     try {
       final seed = await _api.getConversationSeed();
-      if (!mounted) return;
-      final merged = _sort(seed.conversations);
-      state = state.copyWith(
-        conversations: merged,
-        requestCount: seed.requests.length,
-        clearError: true,
-      );
-      for (final conv in merged) {
-        await LocalDb.instance.upsertConversation(_conversationToDbRow(conv));
-      }
+      final blockedServer = await _api.getConversations(scope: 'blocked');
+      await _applySeed(seed.conversations, seed.requests, blockedServer);
     } catch (_) {
-      // Socket-event repair is best-effort; pull-to-refresh is the fallback.
     } finally {
       _resyncing = false;
     }
@@ -180,10 +242,10 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
         final conversationId = event['conversationId'] as String?;
         if (conversationId == null) return;
 
-        final exists = state.conversations.any((c) => c.id == conversationId);
+        final exists = state.conversations.any((c) => c.id == conversationId) ||
+            state.restrictedChats.any((c) => c.id == conversationId) ||
+            state.blockedChats.any((c) => c.id == conversationId);
         if (!exists) {
-          // Brand-new chat pushed over the socket while this client had no
-          // tile for it — repair the list once (never a poll loop).
           unawaited(_resync());
           return;
         }
@@ -201,36 +263,7 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
         final payload = event['conversation'];
         if (payload is Map<String, dynamic>) {
           final conversation = Conversation.fromJson(payload);
-          // Events are already user-scoped (built per recipient inbox), so a
-          // pending tile addressed to me as the RECIPIENT feeds the requests
-          // badge; pending tiles for my own outgoing chats stay in the list.
-          if (conversation.requestStatus == 'pending' &&
-              conversation.initiatedById != null &&
-              conversation.initiatedById == conversation.otherUserId) {
-            final remaining = state.conversations
-                .where((c) => c.id != conversation.id)
-                .toList();
-            state = state.copyWith(
-              conversations: remaining,
-              requestCount: state.requestCount + 1,
-              clearError: true,
-            );
-            LocalDb.instance
-                .upsertConversation(_conversationToDbRow(conversation));
-          } else {
-            final wasInRequests = state.requestCount > 0 &&
-                !state.conversations.any((c) => c.id == conversation.id);
-            unawaited(upsertConversation(conversation));
-            if (wasInRequests &&
-                (conversation.requestStatus == 'accepted' ||
-                    conversation.requestStatus == 'rejected')) {
-              // A request from the queue transformed into (or vanished from)
-              // the main list — drain one from the badge.
-              state = state.copyWith(
-                requestCount: (state.requestCount - 1).clamp(0, 1 << 30),
-              );
-            }
-          }
+          unawaited(_hydrateUpsert(conversation));
         }
         break;
       case 'conversation_removed':
@@ -256,6 +289,78 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     }
   }
 
+  Future<void> _hydrateUpsert(Conversation conversation) async {
+    final states = await LocalDb.instance.getChatStates();
+    final row = states[conversation.id];
+    if (row != null && (row['is_deleted'] as int? ?? 0) == 1) return;
+
+    final hydrated = conversation.copyWith(
+      isPinned: row != null && (row['is_pinned'] as int? ?? 0) == 1,
+      isMuted: row != null && (row['is_muted'] as int? ?? 0) == 1,
+      isRestricted:
+          row != null && (row['is_restricted'] as int? ?? 0) == 1,
+    );
+
+    final isBlocked = state.blockedChats.any((c) => c.id == conversation.id);
+
+    if (hydrated.requestStatus == 'pending' &&
+        hydrated.initiatedById != null &&
+        hydrated.initiatedById == hydrated.otherUserId &&
+        !hydrated.isRestricted) {
+      final remaining = state.conversations
+          .where((c) => c.id != conversation.id)
+          .toList();
+      state = state.copyWith(
+        conversations: remaining,
+        requestCount: state.requestCount + 1,
+        clearError: true,
+      );
+      await LocalDb.instance.upsertConversation(_conversationToDbRow(conversation));
+      await LocalDb.instance.applyChatState(
+        conversation.id,
+        isPinned: hydrated.isPinned,
+        isMuted: hydrated.isMuted,
+        isRestricted: hydrated.isRestricted,
+      );
+      return;
+    }
+
+    final wasInRequests = state.requestCount > 0 &&
+        !state.conversations.any((c) => c.id == conversation.id) &&
+        !state.restrictedChats.any((c) => c.id == conversation.id) &&
+        !state.blockedChats.any((c) => c.id == conversation.id);
+
+    if (hydrated.isRestricted) {
+      final list = [...state.restrictedChats]
+        ..removeWhere((c) => c.id == conversation.id);
+      list.insert(0, hydrated);
+      state = state.copyWith(restrictedChats: _sort(list));
+    } else if (isBlocked) {
+      final list = [...state.blockedChats]
+        ..removeWhere((c) => c.id == conversation.id);
+      list.insert(0, hydrated);
+      state = state.copyWith(blockedChats: _sort(list));
+    } else {
+      final list = [...state.conversations]
+        ..removeWhere((c) => c.id == conversation.id);
+      list.insert(0, hydrated);
+      state = state.copyWith(conversations: _sort(list));
+    }
+    await LocalDb.instance.upsertConversation(_conversationToDbRow(conversation));
+    await LocalDb.instance.applyChatState(
+      conversation.id,
+      isPinned: hydrated.isPinned,
+      isMuted: hydrated.isMuted,
+      isRestricted: hydrated.isRestricted,
+    );
+    if (wasInRequests &&
+        (conversation.requestStatus == 'accepted' ||
+            conversation.requestStatus == 'rejected')) {
+      state = state.copyWith(
+        requestCount: (state.requestCount - 1).clamp(0, 1 << 30),
+      );
+    }
+  }
 
   Future<void> disconnect() async {
     await _inboxWsSub?.cancel();
@@ -280,22 +385,28 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     final conversations = [...state.conversations]
       ..removeWhere((item) => item.id == conversation.id);
     conversations.insert(0, conversation);
-    state = state.copyWith(
-      conversations: _sort(conversations),
-      clearError: true,
-    );
+    state = state.copyWith(conversations: _sort(conversations), clearError: true);
     await LocalDb.instance
         .upsertConversation(_conversationToDbRow(conversation));
   }
 
-  /// Delete conversation locally only — zero server tracking for privacy.
+  /// resurrecting it.
   Future<void> removeConversation(String conversationId) async {
+    final messageIds =
+        await LocalDb.instance.deleteConversationData(conversationId);
+    await LocalDb.instance.applyChatState(conversationId, isDeleted: true);
     state = state.copyWith(
       conversations: state.conversations
-          .where((conversation) => conversation.id != conversationId)
+          .where((c) => c.id != conversationId)
+          .toList(),
+      restrictedChats: state.restrictedChats
+          .where((c) => c.id != conversationId)
+          .toList(),
+      blockedChats: state.blockedChats
+          .where((c) => c.id != conversationId)
           .toList(),
     );
-    await LocalDb.instance.deleteConversation(conversationId);
+    void _ = messageIds;
   }
 
   Future<void> togglePin(String conversationId) async {
@@ -305,12 +416,10 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     final updated = list[idx].copyWith(isPinned: !list[idx].isPinned);
     list[idx] = updated;
     state = state.copyWith(conversations: _sort(list));
-    await LocalDb.instance
-        .updateConversationSettings(conversationId, isPinned: updated.isPinned);
-    try {
-      await _api.updateConversationSettings(conversationId,
-          isPinned: updated.isPinned);
-    } catch (_) {}
+    await LocalDb.instance.applyChatState(
+      conversationId,
+      isPinned: updated.isPinned,
+    );
   }
 
   Future<void> toggleMute(String conversationId) async {
@@ -320,66 +429,114 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     final updated = list[idx].copyWith(isMuted: !list[idx].isMuted);
     list[idx] = updated;
     state = state.copyWith(conversations: list);
-    await LocalDb.instance
-        .updateConversationSettings(conversationId, isMuted: updated.isMuted);
-    try {
-      await _api.updateConversationSettings(conversationId,
-          isMuted: updated.isMuted);
-    } catch (_) {}
+    await LocalDb.instance.applyChatState(
+      conversationId,
+      isMuted: updated.isMuted,
+    );
   }
 
   Future<void> toggleRestrict(String conversationId) async {
-    final list = [...state.conversations];
-    final idx = list.indexWhere((c) => c.id == conversationId);
+    final idx = state.conversations.indexWhere((c) => c.id == conversationId);
     if (idx == -1) return;
-    final newRestricted = !list[idx].isRestricted;
-    final updated = list[idx].copyWith(isRestricted: newRestricted);
+    final conv = state.conversations[idx];
+    final newRestricted = !conv.isRestricted;
+    final updated = conv.copyWith(isRestricted: newRestricted);
+    final conversations = [...state.conversations]..removeAt(idx);
+    final restricted = [...state.restrictedChats];
     if (newRestricted) {
-      // Moves out of main inbox into requests section
-      list.removeAt(idx);
+      restricted.insert(0, updated);
     } else {
-      list[idx] = updated;
+      conversations.add(updated);
     }
-    state = state.copyWith(conversations: _sort(list));
-    await LocalDb.instance.updateConversationSettings(conversationId,
-        isRestricted: newRestricted);
+    state = state.copyWith(
+      conversations: _sort(conversations),
+      restrictedChats: _sort(restricted),
+    );
+    await LocalDb.instance.applyChatState(
+      conversationId,
+      isRestricted: newRestricted,
+    );
+  }
+
+  Future<void> toggleBlock(String conversationId) async {
+    final idx = state.conversations.indexWhere((c) => c.id == conversationId);
+    if (idx == -1) return;
+    final conv = state.conversations[idx];
+    final conversations = [...state.conversations]..removeAt(idx);
+    final blocked = [...state.blockedChats, conv];
+    state = state.copyWith(
+      conversations: _sort(conversations),
+      blockedChats: _sort(blocked),
+    );
     try {
-      await _api.updateConversationSettings(conversationId,
-          isRestricted: newRestricted);
+      await _api.blockConversation(conversationId);
     } catch (_) {}
   }
 
-  // Real-time updates (called from ConversationNotifier / WsService events)
+  Future<void> unblock(String conversationId) async {
+    final idx = state.blockedChats.indexWhere((c) => c.id == conversationId);
+    if (idx == -1) return;
+    final conv = state.blockedChats[idx];
+    final blocked = [...state.blockedChats]..removeAt(idx);
+    final conversations = [...state.conversations, conv];
+    state = state.copyWith(
+      conversations: _sort(conversations),
+      blockedChats: _sort(blocked),
+    );
+    try {
+      await _api.unblockConversation(conversationId);
+    } catch (_) {}
+  }
 
-  /// Update the conversation preview when a new message arrives or is sent.
+  Future<void> unrestrict(String conversationId) async {
+    final idx = state.restrictedChats.indexWhere((c) => c.id == conversationId);
+    if (idx == -1) return;
+    final conv = state.restrictedChats[idx];
+    final restricted = [...state.restrictedChats]..removeAt(idx);
+    final updated = conv.copyWith(isRestricted: false);
+    final conversations = [...state.conversations, updated];
+    state = state.copyWith(
+      conversations: _sort(conversations),
+      restrictedChats: _sort(restricted),
+    );
+    await LocalDb.instance.applyChatState(conversationId, isRestricted: false);
+  }
+
+
   void onNewMessage({
     required String conversationId,
     required String preview,
     required DateTime lastMessageAt,
     bool isIncoming = false,
   }) {
-    final list = [...state.conversations];
-    final idx = list.indexWhere((c) => c.id == conversationId);
-    if (idx == -1) return;
-
-    final current = list[idx];
-    if (isIncoming &&
-        current.lastMessageAt != null &&
-        !current.lastMessageAt!.isBefore(lastMessageAt)) {
-      return;
+    void update(List<Conversation> list) {
+      final idx = list.indexWhere((c) => c.id == conversationId);
+      if (idx == -1) return;
+      final current = list[idx];
+      if (isIncoming &&
+          current.lastMessageAt != null &&
+          !current.lastMessageAt!.isBefore(lastMessageAt)) {
+        return;
+      }
+      list[idx] = current.copyWith(
+        lastMessagePreview: preview,
+        lastMessageAt: lastMessageAt,
+        unreadCount: isIncoming ? current.unreadCount + 1 : current.unreadCount,
+      );
     }
 
-    final updated = current.copyWith(
-      lastMessagePreview: preview,
-      lastMessageAt: lastMessageAt,
-      unreadCount:
-          isIncoming ? list[idx].unreadCount + 1 : list[idx].unreadCount,
-    );
+    final conversations = [...state.conversations];
+    update(conversations);
+    state = state.copyWith(conversations: _sort(conversations));
 
-    list[idx] = updated;
-    state = state.copyWith(conversations: _sort(list));
+    final restricted = [...state.restrictedChats];
+    update(restricted);
+    state = state.copyWith(restrictedChats: _sort(restricted));
 
-    // Persist preview to cache
+    final blocked = [...state.blockedChats];
+    update(blocked);
+    state = state.copyWith(blockedChats: _sort(blocked));
+
     LocalDb.instance.updateConversationPreview(
       conversationId,
       preview: preview,
@@ -388,25 +545,20 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     );
   }
 
-  /// Mark all messages in a conversation as read (clear unread count).
   void markRead(String conversationId) {
     final list = [...state.conversations];
     final idx = list.indexWhere((c) => c.id == conversationId);
     if (idx == -1) return;
-
     if (list[idx].unreadCount == 0) return;
-
     list[idx] = list[idx].copyWith(unreadCount: 0);
     state = state.copyWith(conversations: list);
     LocalDb.instance.clearUnreadCount(conversationId);
   }
 
-  /// Update the preview when a message is unsent (retracted).
   void onMessageUnsent(String conversationId) {
     final list = [...state.conversations];
     final idx = list.indexWhere((c) => c.id == conversationId);
     if (idx == -1) return;
-
     list[idx] = list[idx].copyWith(lastMessagePreview: 'Message unsent');
     state = state.copyWith(conversations: list);
   }
@@ -415,7 +567,6 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     state = state.copyWith(requestCount: count);
   }
 
-  // Helpers
 
   static Map<String, dynamic> _conversationToDbRow(Conversation conv) => {
         'id': conv.id,
@@ -428,13 +579,9 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
           'last_message_preview': conv.lastMessagePreview,
         'unread_count': conv.unreadCount,
         'created_at': DateTime.now().millisecondsSinceEpoch,
-        'is_pinned': conv.isPinned ? 1 : 0,
-        'is_muted': conv.isMuted ? 1 : 0,
-        'is_restricted': conv.isRestricted ? 1 : 0,
       };
 }
 
-// Provider
 
 final chatsProvider = StateNotifierProvider<ChatsNotifier, ChatsState>((ref) {
   final api = ref.watch(apiServiceProvider);

@@ -349,16 +349,14 @@ conversationsRouter.get(
       return new Response(
         JSON.stringify({
           conversations: rows.map((row) => mapConversationRow(row)),
-          requests: requestRows.map((row) => mapConversationRow(row, { restricted: true })),
+          requests: requestRows.map((row) => mapConversationRow(row)),
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
     }
 
     const rows = await listConversations(env, userId, scope);
-    const payload = rows.map((row) =>
-      mapConversationRow(row, scope === 'requests' ? { restricted: true } : {}),
-    );
+    const payload = rows.map((row) => mapConversationRow(row));
     return new Response(JSON.stringify(payload), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
@@ -497,94 +495,6 @@ conversationsRouter.patch(
 
     return new Response(
       JSON.stringify({ conversationId: id, disappearingTimer: timer }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
-    );
-  },
-);
-
-const conversationSettingsSchema = z.object({
-  isPinned: z.boolean().optional(),
-  isMuted: z.boolean().optional(),
-  isRestricted: z.boolean().optional(),
-});
-
-conversationsRouter.patch(
-  '/:id/settings',
-  (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
-  async (request: IRequest, env: Env): Promise<Response> => {
-    const authReq = request as unknown as AuthenticatedRequest;
-    const userId = authReq.user.sub;
-    const { id } = request.params as { id: string };
-
-    const conversation = await getConversationForMember(id, userId, env.DB);
-    if (!conversation) {
-      return new Response(JSON.stringify({ error: 'Conversation not found' }), {
-        status: 404,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    const parsed = conversationSettingsSchema.safeParse(body);
-    if (!parsed.success) {
-      return new Response(JSON.stringify({ error: 'Invalid settings body' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    const now = Math.floor(Date.now() / 1000);
-    const existing = await env.DB.prepare(
-      'SELECT * FROM conversation_user_settings WHERE conversation_id = ? AND user_id = ?',
-    )
-      .bind(id, userId)
-      .first<{ id: string; is_pinned: number; is_muted: number; is_restricted: number }>();
-
-    const isPinned = parsed.data.isPinned !== undefined
-      ? (parsed.data.isPinned ? 1 : 0)
-      : (existing?.is_pinned ?? 0);
-    const isMuted = parsed.data.isMuted !== undefined
-      ? (parsed.data.isMuted ? 1 : 0)
-      : (existing?.is_muted ?? 0);
-    const isRestricted = parsed.data.isRestricted !== undefined
-      ? (parsed.data.isRestricted ? 1 : 0)
-      : (existing?.is_restricted ?? 0);
-
-    if (existing) {
-      await env.DB.prepare(
-        `UPDATE conversation_user_settings
-         SET is_pinned = ?, is_muted = ?, is_restricted = ?, updated_at = ?
-         WHERE id = ?`,
-      )
-        .bind(isPinned, isMuted, isRestricted, now, existing.id)
-        .run();
-    } else {
-      const settingsId = generateId();
-      await env.DB.prepare(
-        `INSERT INTO conversation_user_settings
-         (id, conversation_id, user_id, is_pinned, is_muted, is_restricted, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-        .bind(settingsId, id, userId, isPinned, isMuted, isRestricted, now, now)
-        .run();
-    }
-
-    return new Response(
-      JSON.stringify({
-        conversationId: id,
-        isPinned: Boolean(isPinned),
-        isMuted: Boolean(isMuted),
-        isRestricted: Boolean(isRestricted),
-      }),
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     );
   },

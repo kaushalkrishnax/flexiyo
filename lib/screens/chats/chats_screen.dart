@@ -294,6 +294,12 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                             onToggleMute: () => ref
                                 .read(chatsProvider.notifier)
                                 .toggleMute(conv.id),
+                            onToggleRestrict: () => ref
+                                .read(chatsProvider.notifier)
+                                .toggleRestrict(conv.id),
+                            onToggleBlock: () => ref
+                                .read(chatsProvider.notifier)
+                                .toggleBlock(conv.id),
                             onDelete: () => ref
                                 .read(chatsProvider.notifier)
                                 .removeConversation(conv.id),

@@ -78,9 +78,6 @@ class Conversation {
           : DateTime.fromMillisecondsSinceEpoch(lastMessageAt),
         lastMessagePreview: row['last_message_preview'] as String?,
         unreadCount: (row['unread_count'] as int?) ?? 0,
-        isPinned: row['is_pinned'] == 1,
-        isMuted: row['is_muted'] == 1,
-        isRestricted: row['is_restricted'] == 1,
       );
       }
 
@@ -114,6 +111,7 @@ class Conversation {
     bool? isPinned,
     bool? isMuted,
     bool? isRestricted,
+    bool? isBlocked,
   }) {
     return Conversation(
       id: id ?? this.id,

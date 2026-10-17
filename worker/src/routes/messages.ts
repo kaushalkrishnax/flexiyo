@@ -216,11 +216,25 @@ messagesRouter.post(
       hasExistingMessage = existingMessage != null;
     }
 
+    // Restriction is the caller's own flag; either participant may have blocked
+    // the other.
+    const expectedRecipient =
+      conv.user_a_id === userId ? conv.user_b_id : conv.user_a_id;
+    const blockRow = await env.DB.prepare(
+      `SELECT 1 FROM user_blocks
+       WHERE (blocker_id = ? AND blocked_id = ?)
+          OR (blocker_id = ? AND blocked_id = ?)
+       LIMIT 1`,
+    )
+      .bind(userId, expectedRecipient, expectedRecipient, userId)
+      .first();
+
     const sendDenial = getMessageSendDenial({
       requestStatus: conv.request_status,
       initiatedById: conv.initiated_by_id,
       userId,
       hasExistingMessage,
+      isBlocked: blockRow != null,
     });
     if (sendDenial === 'rejected_request' ||
         sendDenial === 'recipient_has_not_accepted') {
@@ -232,6 +246,12 @@ messagesRouter.post(
     if (sendDenial === 'initial_request_already_sent') {
       return new Response(JSON.stringify({ error: 'Wait for the recipient to accept your request' }), {
         status: 409,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (sendDenial === 'blocked_chat') {
+      return new Response(JSON.stringify({ error: "You can't message this account" }), {
+        status: 403,
         headers: { 'Content-Type': 'application/json' },
       });
     }
@@ -258,8 +278,6 @@ messagesRouter.post(
     const legacyPayload = parsed.data.encryptedPayload;
 
     // Validate recipientId is the other conversation participant
-    const expectedRecipient =
-      conv.user_a_id === userId ? conv.user_b_id : conv.user_a_id;
     if (recipientId !== expectedRecipient) {
       return new Response(JSON.stringify({ error: 'Invalid recipientId' }), {
         status: 400,
@@ -429,7 +447,8 @@ messagesRouter.post(
     }]);
 
     // Best-effort FCM push so a backgrounded/offline recipient still learns
-    // about the message. Failures never affect delivery.
+    // about the message. Restricted and muted chats never notify. Failures
+    // never affect delivery.
     try {
       const senderUser = await env.DB.prepare(
         'SELECT username FROM users WHERE id = ?',
@@ -545,7 +564,7 @@ messagesRouter.post(
       });
     }
 
-    // Requests and restricted chats do not send seen receipts
+    // Requests and blocked chats do not send seen receipts
     if (conversation.request_status === 'pending') {
       return new Response(JSON.stringify({ read: false, reason: 'pending_request' }), {
         status: 200,
@@ -553,17 +572,21 @@ messagesRouter.post(
       });
     }
 
-    // Restriction is per-user: only the CALLER's own flag may suppress their
-    // read receipts (the other participant's flag must not leak into this).
-    const restrictedCheck = await env.DB.prepare(
-      `SELECT 1 FROM conversation_user_settings
-       WHERE conversation_id = ? AND user_id = ? AND is_restricted = 1 LIMIT 1`,
+    const expectedPeer =
+      conversation.user_a_id === userId
+        ? conversation.user_b_id
+        : conversation.user_a_id;
+    const blockCheck = await env.DB.prepare(
+      `SELECT 1 FROM user_blocks
+       WHERE (blocker_id = ? AND blocked_id = ?)
+          OR (blocker_id = ? AND blocked_id = ?)
+       LIMIT 1`,
     )
-      .bind(conversationId, userId)
+      .bind(userId, expectedPeer, expectedPeer, userId)
       .first();
 
-    if (restrictedCheck) {
-      return new Response(JSON.stringify({ read: false, reason: 'restricted' }), {
+    if (blockCheck) {
+      return new Response(JSON.stringify({ read: false, reason: 'blocked' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       });

@@ -13,14 +13,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 import 'package:uuid/uuid.dart';
 
-/// Ephemeral editing state while the user is composing an edit.
 class EditDraft {
   const EditDraft({required this.message, required this.text});
   final Message message;
   final String text;
 }
 
-/// State for the open conversation screen.
 class ConversationState {
   const ConversationState({
     this.conversation,
@@ -85,7 +83,6 @@ class ConversationState {
   }
 }
 
-// Notifier
 
 class ConversationNotifier extends StateNotifier<ConversationState> {
   ConversationNotifier({
@@ -216,7 +213,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
         // Mark as read only if accepted
         _ref.read(chatsProvider.notifier).markRead(conversationId);
-        if (conv.requestStatus == 'accepted') {
+        if (conv.requestStatus == 'accepted' && !(await _isRestricted())) {
           unawaited(_api.markConversationRead(conversationId));
         }
       }
@@ -228,6 +225,12 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
     // Connect WebSocket
     await _connectWs();
+  }
+
+  Future<bool> _isRestricted() async {
+    final states = await LocalDb.instance.getChatStates();
+    final row = states[conversationId];
+    return row != null && (row['is_restricted'] as int? ?? 0) == 1;
   }
 
   Future<void> _connectWs() async {
@@ -364,7 +367,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     _ws?.sendDeliveryAck(msgId);
 
     final isIncoming = senderId != _myUserId;
-    if (isIncoming && state.conversation?.requestStatus == 'accepted') {
+    if (isIncoming && state.conversation?.requestStatus == 'accepted' && !(await _isRestricted())) {
       unawaited(_api.markConversationRead(conversationId));
     }
 
@@ -510,6 +513,10 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       } catch (_) {}
     }
     if (text.isEmpty || conv == null || state.isSending) return;
+    if (await _isRestricted()) {
+      if (mounted) state = state.copyWith(error: 'Unrestrict this chat to send messages');
+      return;
+    }
     if (conv.requestStatus == 'pending' && conv.initiatedById != _myUserId) {
       return;
     }
@@ -795,7 +802,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     }
   }
 
-  // Reply / Edit compose state
 
   void setReplyTo(Message message) {
     state = state.copyWith(replyTo: message, clearEditDraft: true);
@@ -846,7 +852,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     );
   }
 
-  // Private helpers
 
   void _upsertMessage(Message msg) {
     final list = [...state.messages];
@@ -887,7 +892,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   }
 }
 
-// Provider family
 
 final conversationProvider = StateNotifierProvider.autoDispose
     .family<ConversationNotifier, ConversationState, String>(

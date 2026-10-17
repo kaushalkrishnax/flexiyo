@@ -2,14 +2,17 @@ export type MessageEditDenial = 'not_sender' | 'unsent' | 'expired';
 export type MessageSendDenial =
   | 'rejected_request'
   | 'recipient_has_not_accepted'
-  | 'initial_request_already_sent';
+  | 'initial_request_already_sent'
+  | 'blocked_chat';
 
 export function getMessageSendDenial(input: {
   requestStatus: 'pending' | 'accepted' | 'rejected';
   initiatedById: string | null;
   userId: string;
   hasExistingMessage: boolean;
+  isBlocked: boolean;
 }): MessageSendDenial | null {
+  if (input.isBlocked) return 'blocked_chat';
   if (input.requestStatus === 'rejected') return 'rejected_request';
   if (input.requestStatus === 'pending') {
     if (input.initiatedById !== input.userId) {

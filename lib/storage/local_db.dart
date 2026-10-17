@@ -27,7 +27,7 @@ class LocalDb {
 
     final database = await openDatabase(
       path,
-      version: 4,
+      version: 5,
       onCreate: _createSchema,
       onUpgrade: _onUpgrade,
     );
@@ -71,12 +71,23 @@ class LocalDb {
         last_message_at INTEGER,
         last_message_preview TEXT,
         unread_count INTEGER NOT NULL DEFAULT 0,
-        created_at INTEGER NOT NULL,
-        is_pinned INTEGER NOT NULL DEFAULT 0,
-        is_muted INTEGER NOT NULL DEFAULT 0,
-        is_restricted INTEGER NOT NULL DEFAULT 0
+        created_at INTEGER NOT NULL
       );
     ''');
+
+    await database.execute('''
+      CREATE TABLE conversation_settings (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        is_restricted INTEGER NOT NULL DEFAULT 0,
+        is_deleted INTEGER NOT NULL DEFAULT 0,
+        is_muted INTEGER NOT NULL DEFAULT 0,
+        is_pinned INTEGER NOT NULL DEFAULT 0
+      );
+    ''');
+    await database.execute(
+      'CREATE UNIQUE INDEX idx_conversation_settings_conversation ON conversation_settings(conversation_id);',
+    );
 
     await database.execute('''
       CREATE TABLE signal_sessions (
@@ -122,6 +133,55 @@ class LocalDb {
           'ALTER TABLE messages ADD COLUMN reaction TEXT;',
         );
       } catch (_) {}
+    }
+    if (oldVersion < 5) {
+      // conversation_settings takes over per-user flags; carry any existing ones over,
+      // then drop the flag columns from conversations (schema rebuild —
+      // SQLite DROP COLUMN is not available across all bundled engines).
+      await database.execute('''
+        CREATE TABLE IF NOT EXISTS conversation_settings (
+          id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL,
+          is_restricted INTEGER NOT NULL DEFAULT 0,
+          is_deleted INTEGER NOT NULL DEFAULT 0,
+          is_muted INTEGER NOT NULL DEFAULT 0,
+          is_pinned INTEGER NOT NULL DEFAULT 0
+        );
+      ''');
+      try {
+        await database.execute('''
+          INSERT OR IGNORE INTO conversation_settings (id, conversation_id, is_restricted, is_muted, is_pinned)
+          SELECT conversation_id, conversation_id, is_restricted, is_muted, is_pinned
+          FROM conversations;
+        ''');
+        await database.execute(
+          'CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_settings_conversation ON conversation_settings(conversation_id);',
+        );
+        await database.execute('ALTER TABLE conversations RENAME TO conversations_old;');
+        await database.execute('''
+          CREATE TABLE conversations (
+            id TEXT PRIMARY KEY,
+            other_user_id TEXT NOT NULL,
+            other_username TEXT NOT NULL,
+            disappearing_timer INTEGER NOT NULL DEFAULT 0,
+            last_message_at INTEGER,
+            last_message_preview TEXT,
+            unread_count INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL
+          );
+        ''');
+        await database.execute('''
+          INSERT INTO conversations
+            (id, other_user_id, other_username, disappearing_timer, last_message_at,
+             last_message_preview, unread_count, created_at)
+          SELECT id, other_user_id, other_username, disappearing_timer, last_message_at,
+             last_message_preview, unread_count, created_at
+          FROM conversations_old;
+        ''');
+        await database.execute('DROP TABLE conversations_old;');
+      } catch (_) {
+        // Fresh installs or old upgrades already on the new layout.
+      }
     }
   }
 
@@ -228,42 +288,122 @@ class LocalDb {
     );
   }
 
+  /// Removes every trace of a conversation from the device and returns the
+  /// affected message ids so callers can also purge plaintext caches. The
+  /// re-seeds never resurrect the chat.
+  Future<List<String>> deleteConversationData(String conversationId) async {
+    final database = await db;
+    final messageIds = (await database.query(
+      'messages',
+      columns: ['id'],
+      where: 'conversation_id = ?',
+      whereArgs: [conversationId],
+    ))
+        .map((row) => row['id'] as String)
+        .toList();
+
+    await database.transaction((txn) async {
+      await txn.delete(
+        'messages',
+        where: 'conversation_id = ?',
+        whereArgs: [conversationId],
+      );
+      await txn.delete(
+        'conversations',
+        where: 'id = ?',
+        whereArgs: [conversationId],
+      );
+    });
+    return messageIds;
+  }
+
+  /// Rows without any flag set are dropped so the table stays small.
+  Future<void> applyChatState(
+    String conversationId, {
+    bool? isRestricted,
+    bool? isDeleted,
+    bool? isMuted,
+    bool? isPinned,
+  }) async {
+    final database = await db;
+    final existing = await database.query(
+      'conversation_settings',
+      where: 'conversation_id = ?',
+      whereArgs: [conversationId],
+      limit: 1,
+    );
+
+    bool flag(String key) =>
+        existing.isNotEmpty && (existing.first[key] as int? ?? 0) == 1;
+
+    final row = {
+      'id': conversationId,
+      'conversation_id': conversationId,
+      'is_restricted': (isRestricted ?? flag('is_restricted')) ? 1 : 0,
+      'is_deleted': (isDeleted ?? flag('is_deleted')) ? 1 : 0,
+      'is_muted': (isMuted ?? flag('is_muted')) ? 1 : 0,
+      'is_pinned': (isPinned ?? flag('is_pinned')) ? 1 : 0,
+    };
+
+    if (row['is_restricted'] == 0 &&
+        row['is_deleted'] == 0 &&
+        row['is_muted'] == 0 &&
+        row['is_pinned'] == 0) {
+      await database.delete(
+        'conversation_settings',
+        where: 'conversation_id = ?',
+        whereArgs: [conversationId],
+      );
+      return;
+    }
+
+    await database.insert(
+      'conversation_settings',
+      row,
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<Map<String, Map<String, dynamic>>> getChatStates() async {
+    final database = await db;
+    final rows = await database.query('conversation_settings');
+    return {
+      for (final row in rows) row['conversation_id'] as String: row,
+    };
+  }
+
+  /// rows are filtered out.
   Future<List<Map<String, dynamic>>> getAllConversations() async {
     final database = await db;
-    return database.query(
-      'conversations',
-      orderBy: 'is_pinned DESC, last_message_at DESC NULLS LAST, created_at DESC',
-    );
+    return database.rawQuery('''
+      SELECT c.*
+      FROM conversations c
+      LEFT JOIN conversation_settings cs ON cs.conversation_id = c.id
+      WHERE COALESCE(cs.is_deleted, 0) = 0
+        AND COALESCE(cs.is_restricted, 0) = 0
+      ORDER BY COALESCE(cs.is_pinned, 0) DESC, c.last_message_at DESC NULLS LAST, c.created_at DESC
+    ''');
   }
 
   Future<List<Map<String, dynamic>>> getRestrictedConversations() async {
     final database = await db;
-    return database.query(
-      'conversations',
-      where: 'is_restricted = 1',
-      orderBy: 'last_message_at DESC NULLS LAST, created_at DESC',
-    );
+    return database.rawQuery('''
+      SELECT c.*
+      FROM conversations c
+      JOIN conversation_settings cs ON cs.conversation_id = c.id
+      WHERE cs.is_restricted = 1 AND cs.is_deleted = 0
+      ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC
+    ''');
   }
 
-  Future<void> updateConversationSettings(
-    String conversationId, {
-    bool? isPinned,
-    bool? isMuted,
-    bool? isRestricted,
-  }) async {
+  Future<List<Map<String, dynamic>>> getBlockedConversations() async {
     final database = await db;
-    final updates = <String, dynamic>{};
-    if (isPinned != null) updates['is_pinned'] = isPinned ? 1 : 0;
-    if (isMuted != null) updates['is_muted'] = isMuted ? 1 : 0;
-    if (isRestricted != null) updates['is_restricted'] = isRestricted ? 1 : 0;
-    if (updates.isEmpty) return;
-
-    await database.update(
-      'conversations',
-      updates,
-      where: 'id = ?',
-      whereArgs: [conversationId],
-    );
+    return database.rawQuery('''
+      SELECT c.*
+      FROM conversations c
+      JOIN conversation_settings cs ON cs.conversation_id = c.id
+      ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC
+    ''');
   }
 
   Future<void> updateConversationPreview(
@@ -311,6 +451,7 @@ class LocalDb {
     await database.transaction((txn) async {
       await txn.delete('messages');
       await txn.delete('conversations');
+      await txn.delete('conversation_settings');
       await txn.delete('signal_sessions');
     });
   }

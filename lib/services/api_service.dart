@@ -243,19 +243,6 @@ class ApiService {
     });
   }
 
-  Future<void> updateConversationSettings(
-    String conversationId, {
-    bool? isPinned,
-    bool? isMuted,
-    bool? isRestricted,
-  }) async {
-    final body = <String, dynamic>{};
-    if (isPinned != null) body['isPinned'] = isPinned;
-    if (isMuted != null) body['isMuted'] = isMuted;
-    if (isRestricted != null) body['isRestricted'] = isRestricted;
-    await _patch('/api/conversations/$conversationId/settings', body);
-  }
-
   Future<void> blockConversation(String conversationId) async {
     await _post('/api/conversations/$conversationId/block', const {});
   }

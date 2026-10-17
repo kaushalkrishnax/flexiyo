@@ -1,13 +1,6 @@
 import type { Env } from '../types.js';
 
-/**
- * Shared projection for the conversations list. The inbox list and the
- * message-requests list are the same shape — one SQL projection, one mapper,
- * filtered by scope. Routes stay thin and the payload contract stays
- * identical no matter which scope the client asks for.
- */
-
-export type ConversationScope = 'inbox' | 'requests' | 'all';
+export type ConversationScope = 'inbox' | 'requests' | 'blocked' | 'all';
 
 export interface ConversationListRow {
   id: string;
@@ -16,9 +9,6 @@ export interface ConversationListRow {
   last_message_at: number | null;
   request_status: string;
   initiated_by_id: string | null;
-  is_pinned: number;
-  is_muted: number;
-  is_restricted: number;
   unread_count: number;
   conversant_username: string;
   conversant_id: string;
@@ -26,41 +16,61 @@ export interface ConversationListRow {
 
 export function parseScope(url: URL): ConversationScope {
   const value = (url.searchParams.get('scope') || 'inbox').toLowerCase();
-  if (value === 'requests' || value === 'all') return value;
+  if (value === 'requests' || value === 'blocked' || value === 'all') return value;
   return 'inbox';
 }
 
 const INBOX_WHERE = `
-      COALESCE(cus.is_restricted, 0) = 0
-      AND (c.request_status = 'accepted'
+      (c.request_status = 'accepted'
         OR (c.request_status = 'pending'
           AND c.initiated_by_id = ?
-          AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)))`;
+          AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)))
+      AND NOT EXISTS (SELECT 1 FROM user_blocks ub
+        WHERE ub.blocker_id = ? AND ub.blocked_id =
+          CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END)`;
 
 const REQUESTS_WHERE = `
-      (
-        (c.request_status = 'pending' AND c.initiated_by_id != ?)
-        OR COALESCE(cus.is_restricted, 0) = 1
-      )
+      (c.request_status = 'pending' AND c.initiated_by_id != ?)
+      AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
+      AND NOT EXISTS (SELECT 1 FROM user_blocks ub
+        WHERE ub.blocker_id = ? AND ub.blocked_id =
+          CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END)`;
+
+const BLOCKED_WHERE = `
+      EXISTS (SELECT 1 FROM user_blocks ub
+        WHERE ub.blocker_id = ? AND ub.blocked_id =
+          CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END)
       AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)`;
 
-/** Per-device unread counter, scoped to one user's devices */
 const UNREAD_COUNT = `(SELECT COUNT(*) FROM message_deliveries md
-     JOIN messages m ON m.id = md.message_id
-     WHERE md.recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)
-       AND md.read_at IS NULL
-       AND m.conversation_id = c.id AND m.is_unsent = 0
-       AND m.sender_id != ?)`;
+      JOIN messages m ON m.id = md.message_id
+      WHERE md.recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)
+        AND md.read_at IS NULL
+        AND m.conversation_id = c.id AND m.is_unsent = 0
+        AND m.sender_id != ?)`;
 
-/**
- * Builds the chat-row projection for one user.
- * Binds (in order): device/unread sub-query (2), chat-list selectors (2),
- * settings join (1), participants (2), scope filter (1).
- */
 export function conversationListQuery(
   userId: string,
   scope: Exclude<ConversationScope, 'all'>,
 ): { sql: string; binds: string[] } {
+  const binds: string[] = [];
+  binds.push(userId, userId); // unread sub-query
+  binds.push(userId, userId); // participants selectors
+  binds.push(userId, userId); // participants WHERE
+  if (scope === 'inbox') {
+    binds.push(userId); // initiated_by_id
+    binds.push(userId, userId); // user_blocks blocker + case
+  } else if (scope === 'requests') {
+    binds.push(userId, userId, userId); // user_blocks (3)
+  } else {
+    binds.push(userId, userId); // user_blocks blocker + case (2)
+  }
+  const where =
+    scope === 'requests'
+      ? REQUESTS_WHERE
+      : scope === 'blocked'
+        ? BLOCKED_WHERE
+        : INBOX_WHERE;
   const sql = `
     SELECT
       c.id,
@@ -69,27 +79,20 @@ export function conversationListQuery(
       c.last_message_at,
       c.request_status,
       c.initiated_by_id,
-      COALESCE(cus.is_pinned, 0) AS is_pinned,
-      COALESCE(cus.is_muted, 0) AS is_muted,
-      COALESCE(cus.is_restricted, 0) AS is_restricted,
       ${UNREAD_COUNT} AS unread_count,
       CASE WHEN c.user_a_id = ? THEN ub.username ELSE ua.username END AS conversant_username,
       CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END AS conversant_id
     FROM conversations c
     JOIN users ua ON ua.id = c.user_a_id
     JOIN users ub ON ub.id = c.user_b_id
-    LEFT JOIN conversation_user_settings cus ON cus.conversation_id = c.id AND cus.user_id = ?
     WHERE (c.user_a_id = ? OR c.user_b_id = ?)
-      AND ${scope === 'requests' ? REQUESTS_WHERE : INBOX_WHERE}
-    ORDER BY COALESCE(cus.is_pinned, 0) DESC, c.last_message_at DESC NULLS LAST, c.created_at DESC`;
-
-  return { sql, binds: [userId, userId, userId, userId, userId, userId, userId, userId] };
+      AND ${where}
+    ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC`;
+  return { sql, binds };
 }
 
-/** Row → client payload (snake_case + camelCase tolerant, client-safe). */
 export function mapConversationRow(
   row: ConversationListRow,
-  opts: { restricted?: boolean } = {},
 ): Record<string, unknown> {
   return {
     id: row.id,
@@ -98,12 +101,9 @@ export function mapConversationRow(
     requestStatus: row.request_status,
     initiatedById: row.initiated_by_id,
     lastMessageAt: row.last_message_at,
-    lastMessagePreview: null, // E2EE — server never decrypts
+    lastMessagePreview: null,
     unreadCount: row.unread_count,
     createdAt: row.created_at,
-    isPinned: Boolean(row.is_pinned),
-    isMuted: Boolean(row.is_muted),
-    isRestricted: opts.restricted ?? Boolean(row.is_restricted),
   };
 }
 
@@ -112,7 +112,7 @@ export async function listConversations(
   userId: string,
   scope: Exclude<ConversationScope, 'all'>,
 ): Promise<ConversationListRow[]> {
-  const { sql, binds } = conversationListQuery(userId, scope as 'inbox');
+  const { sql, binds } = conversationListQuery(userId, scope);
   const rows = await env.DB.prepare(sql).bind(...binds).all<ConversationListRow>();
   return rows.results ?? [];
 }

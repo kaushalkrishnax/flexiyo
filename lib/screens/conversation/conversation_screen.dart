@@ -26,10 +26,12 @@ class ConversationScreen extends ConsumerStatefulWidget {
     super.key,
     required this.conversationId,
     this.isMessageRequest = false,
+    this.browseMode,
   });
 
   final String conversationId;
   final bool isMessageRequest;
+  final String? browseMode;
 
   @override
   ConsumerState<ConversationScreen> createState() => _ConversationScreenState();
@@ -662,7 +664,39 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                       ],
                     ),
                   ),
-                  if (widget.isMessageRequest)
+                  if (widget.browseMode != null)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton(
+                              onPressed: () => context.pop(),
+                              child: const Text('Cancel'),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: FilledButton(
+                              onPressed: () async {
+                                final notifier = ref.read(
+                                    chatsProvider.notifier);
+                                if (widget.browseMode == 'restricted') {
+                                  await notifier.unrestrict(widget.conversationId);
+                                } else {
+                                  await notifier.unblock(widget.conversationId);
+                                }
+                                if (context.mounted) context.pop();
+                              },
+                              child: Text(widget.browseMode == 'restricted'
+                                  ? 'Unrestrict'
+                                  : 'Unblock'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  else if (widget.isMessageRequest)
                     Padding(
                       padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
                       child: Row(

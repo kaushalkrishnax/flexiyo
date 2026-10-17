@@ -124,9 +124,9 @@ class _MessageMenuOverlay extends StatelessWidget {
     final screen = MediaQuery.sizeOf(context);
 
     final showUnsend = isMine && onUnsend != null;
-    const reactionBarWidth = 310.0;
-    const menuWidth = 240.0;
-    const reactionBarHeight = 76.0;
+    const reactionBarWidth = 290.0;
+    const menuWidth = 216.0;
+    const reactionBarHeight = 56.0;
     final actionCount = showUnsend ? 4 : 3;
     final menuHeight = actionCount * 48.0 + 52.0;
     final totalHeight = reactionBarHeight + 12.0 + menuHeight;
@@ -140,8 +140,9 @@ class _MessageMenuOverlay extends StatelessWidget {
     }
     top = top.clamp(44.0, screen.height - totalHeight - 16);
 
-    final formattedTime =
-        DateFormat('d MMM, h:mm a').format(message.createdAt.toLocal()).toUpperCase();
+    final formattedTime = DateFormat('d MMM, h:mm a')
+        .format(message.createdAt.toLocal())
+        .toUpperCase();
 
     return Stack(
       children: [
@@ -161,7 +162,7 @@ class _MessageMenuOverlay extends StatelessWidget {
                   Container(
                     width: reactionBarWidth,
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
+                      horizontal: 14,
                       vertical: 10,
                     ),
                     decoration: BoxDecoration(
@@ -186,17 +187,6 @@ class _MessageMenuOverlay extends StatelessWidget {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(
-                          'Tap and hold to super react',
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w500,
-                            letterSpacing: 0.15,
-                            color: isDark ? Colors.white60 : Colors.black45,
-                          ),
-                          textAlign: TextAlign.center,
-                        ),
-                        const SizedBox(height: 8),
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
@@ -240,9 +230,8 @@ class _MessageMenuOverlay extends StatelessWidget {
                                 child: Icon(
                                   Icons.add_rounded,
                                   size: 24,
-                                  color: isDark
-                                      ? Colors.white70
-                                      : Colors.black54,
+                                  color:
+                                      isDark ? Colors.white70 : Colors.black54,
                                 ),
                               ),
                             ),
@@ -251,9 +240,7 @@ class _MessageMenuOverlay extends StatelessWidget {
                       ],
                     ),
                   ),
-
                   const SizedBox(height: 10),
-
                   Container(
                     width: menuWidth,
                     decoration: BoxDecoration(
@@ -288,13 +275,10 @@ class _MessageMenuOverlay extends StatelessWidget {
                               fontSize: 11.5,
                               fontWeight: FontWeight.w600,
                               letterSpacing: 0.35,
-                              color: isDark
-                                  ? Colors.white54
-                                  : Colors.black45,
+                              color: isDark ? Colors.white54 : Colors.black45,
                             ),
                           ),
                         ),
-
                         _ActionRow(
                           label: 'Reply',
                           icon: Icons.reply_rounded,
@@ -304,7 +288,6 @@ class _MessageMenuOverlay extends StatelessWidget {
                           },
                           isDark: isDark,
                         ),
-
                         _ActionRow(
                           label: 'Copy',
                           icon: Icons.copy_rounded,
@@ -314,7 +297,6 @@ class _MessageMenuOverlay extends StatelessWidget {
                           },
                           isDark: isDark,
                         ),
-
                         if (showUnsend)
                           _ActionRow(
                             label: 'Unsend',
@@ -326,7 +308,6 @@ class _MessageMenuOverlay extends StatelessWidget {
                             },
                             isDark: isDark,
                           ),
-
                         _ActionRow(
                           label: 'Delete for me',
                           icon: Icons.delete_outline_rounded,
@@ -337,7 +318,6 @@ class _MessageMenuOverlay extends StatelessWidget {
                           },
                           isDark: isDark,
                         ),
-
                         const SizedBox(height: 6),
                       ],
                     ),
@@ -402,7 +382,6 @@ class _ActionRow extends StatelessWidget {
   }
 }
 
-
 class _InboxModalContent extends StatelessWidget {
   const _InboxModalContent({
     required this.conversation,
@@ -419,8 +398,7 @@ class _InboxModalContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final surfaceColor =
-        isDark ? const Color(0xFF26272B) : Colors.white;
+    final surfaceColor = isDark ? const Color(0xFF26272B) : Colors.white;
     final dividerColor =
         isDark ? const Color(0xFF383838) : const Color(0xFFEFEFEF);
     final textColor = isDark ? Colors.white : Colors.black87;
@@ -435,9 +413,7 @@ class _InboxModalContent extends StatelessWidget {
             color: surfaceColor,
             borderRadius: BorderRadius.circular(22),
             border: Border.all(
-              color: isDark
-                  ? const Color(0xFF383838)
-                  : const Color(0xFFE5E5EA),
+              color: isDark ? const Color(0xFF383838) : const Color(0xFFE5E5EA),
               width: 1,
             ),
             boxShadow: [
@@ -477,7 +453,6 @@ class _InboxModalContent extends StatelessWidget {
                 ),
               ),
               Divider(height: 1, color: dividerColor),
-
               _ModalActionRow(
                 label: conversation.isPinned ? 'Unpin' : 'Pin',
                 icon: conversation.isPinned
@@ -489,11 +464,9 @@ class _InboxModalContent extends StatelessWidget {
                 },
                 textColor: textColor,
               ),
-
               _ModalActionRow(
-                label: conversation.isMuted
-                    ? 'Unmute messages'
-                    : 'Mute messages',
+                label:
+                    conversation.isMuted ? 'Unmute messages' : 'Mute messages',
                 icon: conversation.isMuted
                     ? Icons.notifications_active_outlined
                     : Icons.notifications_off_outlined,
@@ -503,7 +476,6 @@ class _InboxModalContent extends StatelessWidget {
                 },
                 textColor: textColor,
               ),
-
               _ModalActionRow(
                 label: 'Delete',
                 icon: Icons.delete_outline_rounded,
@@ -514,7 +486,6 @@ class _InboxModalContent extends StatelessWidget {
                 },
                 textColor: const Color(0xFFED4956),
               ),
-
               const SizedBox(height: 6),
             ],
           ),

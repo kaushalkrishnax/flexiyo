@@ -2,47 +2,41 @@
 
 ## Project status
 
-The project is now structurally restored and validated. The Worker and the Flutter app bootstrapping skeleton are present and compiling at the project level, with the remaining gaps focused on product features rather than missing core files or broken tooling.
+Flexiyo is a working end-to-end encrypted messenger. The Flutter client and the Cloudflare Worker backend both build, analyze, and test cleanly, and the core product surface — encrypted text and media, message requests, real-time delivery, and Android notifications — is implemented end to end.
 
 ## Verified project state
 
-- The root package manifests are valid and dependencies install successfully.
-- The Cloudflare Worker backend compiles cleanly with `tsc --noEmit` in `worker/`.
-- The Flutter app analyzes without errors; the remaining output is info-level lint suggestions about const usage in placeholder UI screens.
-- The app shell includes the router, theme, API layer, local storage scaffolding, and auth flow foundation.
-- Core backend routes for auth, users, conversations, messages, and devices remain the main feature surface to continue building.
+- `flutter analyze` reports no issues and the Flutter test suite passes (widget, Signal store, server-response, and app-update coverage).
+- The Worker type-checks with `tsc --noEmit`, passes Vitest, and validates with `wrangler deploy --dry-run`.
+- Remote deployment is exercised through D1 migrations (`worker/migrations/0001`–`0004`), `bun run db:migrate:remote`, and `bun run deploy`.
 
 ## Implemented areas
 
-- Secure auth route layer with JWT verification and logout support.
-- Worker user search and auth middleware flow.
-- Message metadata and expiry scaffolding.
-- Local database and secure storage wrappers for app state.
-- Material 3 theme styling and route structure.
-- Login/register/chat/settings UI scaffolds connected to the app shell.
+- **Messaging:** Signal Protocol (X3DH + Double Ratchet) one-to-one E2EE on-device; edit, unsend for everyone, delete for me, and copy; disappearing messages with server-side pruning; offline catch-up through per-conversation Durable Object WebSocket hubs.
+- **Message requests:** First-contact messages land in a request inbox, with per-conversation permissions enforced in the Worker.
+- **Encrypted media:** Photos (camera and gallery) and voice notes encrypted on-device (AES-GCM); view-once / view-twice / unlimited policies enforced server-side; expired media purged by the Worker.
+- **Accounts and devices:** Username/password auth, email verification, Google Sign-In on native and web, device-isolated key storage (Android Keystore / iOS Keychain).
+- **Notifications:** Android push via Firebase Cloud Messaging — tokens register at sign-in and the Worker notifies on new messages and message requests without ever including message content.
+- **Apps and updates:** Android APK distribution with an in-app updater; Flutter web build deployed to Cloudflare Pages; branded "Flexiyo" across Android, iOS, and web.
 
 ## Partially implemented or missing
 
-- Real Signal Protocol session management and encryption implementation.
-- Full end-to-end chat state, search, sync, and conversation history.
-- Production-grade device key agreements and message decryption flow.
-- Automated backend and app integration tests beyond the initial structural validation.
+- Push notifications are Android-only. iOS needs APNs wiring (`GoogleService-Info.plist` + keys) and web push is not implemented.
+- Multi-device key synchronization is not built; reinstalling the app loses keys and old sessions.
+- Test depth around conversation and media flows is still growing.
+- Flexiyo has not undergone an independent security audit.
 
 ## Current blockers
 
-1. Completion of the end-to-end encrypted messaging flow.
-2. Full message synchronization and UI wiring beyond the placeholder screens.
-3. Production-ready key management and device registration logic.
-4. Additional end-to-end tests for auth and conversation behavior.
+None — the tree builds and passes all checks. The open items above are planned work rather than blockers.
 
 ## Recommended next steps
 
-1. Complete the real auth-to-chat flow with robust API responses and loading states.
-2. Implement conversation list and message history fetching against the Worker APIs.
-3. Add the Signal session setup and message encryption/decryption pipeline.
-4. Validate chat flows with focused tests and then continue into sync, expiration, and deletion behavior.
-5. Tighten the remaining const-based analyzer suggestions once the messaging UI is fully implemented.
+1. Wire iOS push and follow with web push.
+2. Design multi-device key synchronization and session backup.
+3. Expand widget and integration coverage around conversation and media flows.
+4. Schedule an independent security review before a broad launch.
 
 ## Evidence
 
-The project was validated by running the backend type-check in `worker/` and a Flutter analysis in the app root. The backend check passes successfully, and the app has no analyzer errors; only non-blocking style suggestions remain.
+Flutter: `flutter analyze` clean, `flutter test` 18/18. Worker: `bun run type-check`, `bun run test` 31/31, and `wrangler deploy --dry-run` all pass locally.

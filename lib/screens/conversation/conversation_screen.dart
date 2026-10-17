@@ -35,11 +35,29 @@ class ConversationScreen extends ConsumerStatefulWidget {
   ConsumerState<ConversationScreen> createState() => _ConversationScreenState();
 }
 
-class _ConversationScreenState extends ConsumerState<ConversationScreen> {
+class _ConversationScreenState extends ConsumerState<ConversationScreen>
+    with SingleTickerProviderStateMixin {
   final _messageController = TextEditingController();
   final _scrollController = ScrollController();
   bool _atBottom = true;
   bool _recordingVoice = false;
+
+  /// Distance (logical px) a bubble slides at full swipe travel.
+  static const double _swipeMax = 96;
+
+  /// Fraction of the swipe travel that arms the reply action.
+  static const double _swipeReplyThreshold = 0.6;
+
+  /// 0 = at rest (time hidden), 1 = fully swiped. Only the message under the
+  /// finger moves; the time label and reply icon fade in on the edge the
+  /// bubble slides away from, and everything springs back on release.
+  late final AnimationController _swipe = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 240),
+  );
+
+  /// Message currently under a swipe gesture.
+  String? _swipingId;
 
   @override
   void initState() {
@@ -48,6 +66,85 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initConversation();
     });
+  }
+
+  void _onMessageSwipeStart(String messageId) {
+    if (_swipingId != null) return; // One swipe at a time.
+    setState(() => _swipingId = messageId);
+  }
+
+  void _onMessageSwipeUpdate(
+    DragUpdateDetails details,
+    String messageId,
+    bool isMine,
+  ) {
+    if (_swipingId != messageId) return;
+    // Own messages slide right-to-left (negative dx); incoming messages
+    // slide left-to-right (positive dx). Drags the other way do nothing.
+    final delta = isMine ? -details.delta.dx : details.delta.dx;
+    if (delta <= 0) return;
+    _swipe.value =
+        (_swipe.value + delta / _swipeMax).clamp(0.0, 1.0).toDouble();
+  }
+
+  void _onMessageSwipeEnd(String messageId) {
+    final id = _swipingId;
+    if (id == null || id != messageId) return;
+
+    if (_swipe.value >= _swipeReplyThreshold) {
+      Message? target;
+      final messages =
+          ref.read(conversationProvider(widget.conversationId)).messages;
+      for (final message in messages) {
+        if (message.id == id) {
+          target = message;
+          break;
+        }
+      }
+      if (target != null) {
+        HapticFeedback.mediumImpact();
+        ref
+            .read(conversationProvider(widget.conversationId).notifier)
+            .setReplyTo(target);
+      }
+    }
+
+    if (_swipe.value == 0) {
+      setState(() => _swipingId = null);
+      return;
+    }
+    final spring = _swipe.animateTo(
+      0,
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOutCubic,
+    );
+    spring.whenCompleteOrCancel(() {
+      if (mounted && _swipingId == id) {
+        setState(() => _swipingId = null);
+      }
+    });
+  }
+
+  /// Compact "5:33 pm" label revealed beside each message while swiping.
+  String _revealTimeLabel(DateTime when) {
+    final local = when.toLocal();
+    final hour = local.hour % 12 == 0 ? 12 : local.hour % 12;
+    final minute = local.minute.toString().padLeft(2, '0');
+    return '$hour:$minute ${local.hour < 12 ? 'am' : 'pm'}';
+  }
+
+  /// Reply arrow that fades in on the edge a bubble slides away from;
+  /// brightens once the swipe has travelled far enough to arm the reply.
+  Widget _replySwipeIcon(BuildContext context, double t) {
+    final cs = Theme.of(context).colorScheme;
+    return Transform.scale(
+      scale: 0.75 + 0.25 * t,
+      child: HugeIcon(
+        icon: HugeIcons.strokeRoundedReply,
+        size: 20,
+        color: t >= _swipeReplyThreshold ? cs.onSurface : cs.onSurfaceVariant,
+      ),
+    );
   }
 
   Future<void> _initConversation() async {
@@ -86,6 +183,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
   void dispose() {
     _messageController.dispose();
     _scrollController.dispose();
+    _swipe.dispose();
     super.dispose();
   }
 
@@ -268,6 +366,15 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
         .where((m) => !m.isLocallyDeleted && !m.isExpired)
         .toList();
 
+    // Banner title for the message being replied to: matches the reference
+    // wording, e.g. "Replying to yourself" / "Replying to <username>".
+    final replyTo = conversationState.replyTo;
+    final replyToTitle = replyTo == null
+        ? null
+        : replyTo.senderId == myUserId
+            ? 'Replying to yourself'
+            : 'Replying to ${conv?.otherUsername ?? ''}';
+
     return Scaffold(
       backgroundColor: colorScheme.surface,
       appBar: _buildAppBar(context, conversationState, colorScheme),
@@ -348,50 +455,162 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                                   .selectedMessageIds
                                   .contains(message.id);
 
+                              final swipeEnabled =
+                                  !conversationState.isSelectionMode &&
+                                      !message.isUnsent;
+
                               return Column(
                                 crossAxisAlignment: CrossAxisAlignment.stretch,
                                 children: [
                                   if (showSeparator)
                                     DateSeparator(date: message.createdAt),
-                                  MessageBubble(
-                                    message: message,
-                                    isMine: isMine,
-                                    isFirst: isFirst,
-                                    isLast: isLast,
-                                    showAvatar: !isMine && isLast,
-                                    otherUsername: conv?.otherUsername ?? '',
-                                    isSelected: isSelected,
-                                    replyToMessage: replyToMsg,
-                                    onTap: conversationState.isSelectionMode
-                                        ? () => ref
-                                            .read(conversationProvider(
-                                                    widget.conversationId)
-                                                .notifier)
-                                            .toggleSelection(message.id)
-                                        : (message.status ==
-                                                    MessageStatus.failed &&
-                                                isMine
+                                  // Swipe the bubble toward the inside of the
+                                  // screen (own messages right-to-left,
+                                  // incoming left-to-right) to peek at the
+                                  // time and arm a reply; releasing past the
+                                  // threshold replies, otherwise everything
+                                  // springs back.
+                                  GestureDetector(
+                                    behavior: HitTestBehavior.opaque,
+                                    onHorizontalDragStart: swipeEnabled
+                                        ? (_) =>
+                                            _onMessageSwipeStart(message.id)
+                                        : null,
+                                    onHorizontalDragUpdate: swipeEnabled
+                                        ? (details) => _onMessageSwipeUpdate(
+                                              details,
+                                              message.id,
+                                              isMine,
+                                            )
+                                        : null,
+                                    onHorizontalDragEnd: swipeEnabled
+                                        ? (_) => _onMessageSwipeEnd(message.id)
+                                        : null,
+                                    onHorizontalDragCancel: swipeEnabled
+                                        ? () => _onMessageSwipeEnd(message.id)
+                                        : null,
+                                    child: AnimatedBuilder(
+                                      animation: _swipe,
+                                      child: MessageBubble(
+                                        message: message,
+                                        isMine: isMine,
+                                        isFirst: isFirst,
+                                        isLast: isLast,
+                                        showAvatar: !isMine && isLast,
+                                        otherUsername:
+                                            conv?.otherUsername ?? '',
+                                        isSelected: isSelected,
+                                        replyToMessage: replyToMsg,
+                                        onTap: conversationState.isSelectionMode
                                             ? () => ref
                                                 .read(conversationProvider(
                                                         widget.conversationId)
                                                     .notifier)
-                                                .retryFailedMessage(message.id)
-                                            : null),
-                                    onLongPressStart: (details) {
-                                      if (conversationState.isSelectionMode) {
-                                        ref
-                                            .read(conversationProvider(
-                                                    widget.conversationId)
-                                                .notifier)
-                                            .toggleSelection(message.id);
-                                      } else if (!message.isUnsent) {
-                                        _showContextMenu(
-                                          context,
-                                          message,
-                                          details.globalPosition,
+                                                .toggleSelection(message.id)
+                                            : (message.status ==
+                                                        MessageStatus.failed &&
+                                                    isMine
+                                                ? () => ref
+                                                    .read(conversationProvider(
+                                                            widget
+                                                                .conversationId)
+                                                        .notifier)
+                                                    .retryFailedMessage(
+                                                        message.id)
+                                                : null),
+                                        onLongPressStart: (details) {
+                                          if (conversationState
+                                              .isSelectionMode) {
+                                            ref
+                                                .read(conversationProvider(
+                                                        widget.conversationId)
+                                                    .notifier)
+                                                .toggleSelection(message.id);
+                                          } else if (!message.isUnsent) {
+                                            _showContextMenu(
+                                              context,
+                                              message,
+                                              details.globalPosition,
+                                            );
+                                          }
+                                        },
+                                      ),
+                                      builder: (context, child) {
+                                        final t = _swipingId == message.id
+                                            ? _swipe.value
+                                            : 0.0;
+                                        final timeLabel = Text(
+                                          _revealTimeLabel(message.createdAt),
+                                          style: Theme.of(context)
+                                              .textTheme
+                                              .labelSmall
+                                              ?.copyWith(
+                                                fontSize: 12,
+                                                color: Theme.of(context)
+                                                    .colorScheme
+                                                    .onSurfaceVariant,
+                                              ),
                                         );
-                                      }
-                                    },
+                                        return Stack(
+                                          clipBehavior: Clip.none,
+                                          children: [
+                                            // Time + reply affordance wait behind
+                                            // the bubble on the edge it slides
+                                            // away from, revealed as it moves.
+                                            Positioned.fill(
+                                              child: IgnorePointer(
+                                                child: Align(
+                                                  alignment: isMine
+                                                      ? Alignment.centerRight
+                                                      : Alignment.centerLeft,
+                                                  child: Opacity(
+                                                    opacity: t,
+                                                    child: Padding(
+                                                      padding: EdgeInsets.only(
+                                                        left: isMine ? 0 : 12,
+                                                        right: isMine ? 12 : 0,
+                                                      ),
+                                                      child: Row(
+                                                        mainAxisSize:
+                                                            MainAxisSize.min,
+                                                        children: [
+                                                          if (!isMine) ...[
+                                                            _replySwipeIcon(
+                                                              context,
+                                                              t,
+                                                            ),
+                                                            const SizedBox(
+                                                                width: 6),
+                                                          ],
+                                                          timeLabel,
+                                                          if (isMine) ...[
+                                                            const SizedBox(
+                                                                width: 6),
+                                                            _replySwipeIcon(
+                                                              context,
+                                                              t,
+                                                            ),
+                                                          ],
+                                                        ],
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                            Transform.translate(
+                                              offset: Offset(
+                                                (isMine ? -1 : 1) *
+                                                    t *
+                                                    _swipeMax,
+                                                0,
+                                              ),
+                                              child: child,
+                                            ),
+                                          ],
+                                        );
+                                      },
+                                    ),
                                   ),
                                 ],
                               );
@@ -502,6 +721,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                       onChanged: (_) => _onUserTyping(),
                       isSending: conversationState.isSending,
                       replyTo: conversationState.replyTo,
+                      replyToTitle: replyToTitle,
                       editDraft: conversationState.editDraft,
                       onCameraTap: _openCamera,
                       onGalleryTap: _openGallery,
@@ -627,6 +847,7 @@ class _ComposerBar extends ConsumerWidget {
     required this.onChanged,
     required this.isSending,
     required this.replyTo,
+    required this.replyToTitle,
     required this.editDraft,
     required this.onCameraTap,
     required this.onGalleryTap,
@@ -641,6 +862,7 @@ class _ComposerBar extends ConsumerWidget {
   final ValueChanged<String> onChanged;
   final bool isSending;
   final Message? replyTo;
+  final String? replyToTitle;
   final EditDraft? editDraft;
   final VoidCallback onCameraTap;
   final VoidCallback onGalleryTap;
@@ -674,6 +896,7 @@ class _ComposerBar extends ConsumerWidget {
             if (replyTo != null)
               _ReplyBanner(
                 message: replyTo!,
+                title: replyToTitle ?? 'Replying',
                 onDismiss: onCancelReply,
                 colorScheme: colorScheme,
               ),
@@ -693,8 +916,10 @@ class _ComposerBar extends ConsumerWidget {
                       value.text.contains('\n') || value.text.length > 40;
 
                   // Single capsule: text field + app bar-free icon row.
-                  // While typing, every affordance collapses into one send
-                  // action; while idle, camera / gallery / voice show through.
+                  // The camera button stays visible at all times, which also
+                  // keeps the text field anchored at a stable position so it
+                  // never loses focus (and the keyboard never closes) when
+                  // typing starts. Gallery / voice collapse into send.
                   return Row(
                     crossAxisAlignment: isMultiline
                         ? CrossAxisAlignment.end
@@ -714,14 +939,15 @@ class _ComposerBar extends ConsumerWidget {
                                 ? CrossAxisAlignment.end
                                 : CrossAxisAlignment.center,
                             children: [
-                              if (!hasText) ...[
-                                _ComposerIconButton(
-                                  icon: HugeIcons.strokeRoundedCamera01,
-                                  color: isDark ? Colors.white : Colors.black,
-                                  tooltip: 'Camera',
-                                  onTap: onCameraTap,
-                                ),
-                              ],
+                              // Always visible: keeping this at index 0
+                              // stops the text field from being recreated
+                              // (and losing focus) when typing starts.
+                              _ComposerIconButton(
+                                icon: HugeIcons.strokeRoundedCamera01,
+                                color: isDark ? Colors.white : Colors.black,
+                                tooltip: 'Camera',
+                                onTap: onCameraTap,
+                              ),
                               Expanded(
                                 child: Theme(
                                   data: Theme.of(context).copyWith(
@@ -777,8 +1003,10 @@ class _ComposerBar extends ConsumerWidget {
                                 ),
                               ),
 
-                              // Right affordances: gallery + voice note. Both
-                              // disappear the moment typing starts.
+                              // Right affordances: gallery + voice note.
+                              // The moment typing starts they swap to the
+                              // send button (matched in place by Flutter,
+                              // so the field above keeps focus).
                               if (!hasText) ...[
                                 _ComposerIconButton(
                                   icon: HugeIcons.strokeRoundedImage01,
@@ -852,10 +1080,11 @@ class _ComposerIconButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final inline = forceBackgroundColor != null;
+    // Tight gaps between composer icons, per the reference layout.
     return Padding(
       padding: EdgeInsets.only(
-        left: inline ? 5 : 2,
-        right: 4,
+        left: inline ? 5 : 0,
+        right: inline ? 4 : 0,
         top: 3,
         bottom: 3,
       ),
@@ -869,7 +1098,10 @@ class _ComposerIconButton extends StatelessWidget {
           style: IconButton.styleFrom(
             splashFactory: NoSplash.splashFactory,
           ),
-          constraints: const BoxConstraints(minWidth: 34, minHeight: 38),
+          constraints: BoxConstraints(
+            minWidth: inline ? 34 : 30,
+            minHeight: 38,
+          ),
           onPressed: onTap,
         ),
       ),
@@ -880,11 +1112,13 @@ class _ComposerIconButton extends StatelessWidget {
 class _ReplyBanner extends StatelessWidget {
   const _ReplyBanner({
     required this.message,
+    required this.title,
     required this.onDismiss,
     required this.colorScheme,
   });
 
   final Message message;
+  final String title;
   final VoidCallback onDismiss;
   final ColorScheme colorScheme;
 
@@ -894,31 +1128,37 @@ class _ReplyBanner extends StatelessWidget {
         message.decryptedText ??
         message.encryptedPayload ??
         'Message';
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    // Neutral surface: the themed container colors carry a pink tint from
+    // the app seed color, which reads badly behind "Replying to …".
+    final bannerBg = isDark ? const Color(0xFF212124) : const Color(0xFFF2F2F4);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
       decoration: BoxDecoration(
-        color: colorScheme.surfaceContainerLow,
+        color: bannerBg,
         border: Border(
-          left: BorderSide(color: colorScheme.primary, width: 3),
+          top: BorderSide(
+            color: isDark ? Colors.white12 : Colors.black12,
+            width: 0.5,
+          ),
         ),
       ),
       child: Row(
         children: [
-          Icon(Icons.reply_rounded, size: 16, color: colorScheme.primary),
-          const SizedBox(width: 8),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  'Replying',
+                  title,
                   style: TextStyle(
-                    fontSize: 11,
+                    fontSize: 13.5,
                     fontWeight: FontWeight.w600,
-                    color: colorScheme.primary,
+                    color: colorScheme.onSurface,
                   ),
                 ),
+                const SizedBox(height: 1),
                 Text(
                   text,
                   maxLines: 1,
@@ -932,10 +1172,11 @@ class _ReplyBanner extends StatelessWidget {
             ),
           ),
           IconButton(
-            icon: const Icon(Icons.close_rounded, size: 16),
+            icon: const Icon(Icons.close_rounded, size: 18),
             onPressed: onDismiss,
+            color: colorScheme.onSurfaceVariant,
             padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
           ),
         ],
       ),

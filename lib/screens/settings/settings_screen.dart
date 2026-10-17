@@ -1,6 +1,7 @@
 import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/providers/theme_provider.dart';
 import 'package:flexiyo/providers/update_provider.dart';
+import 'package:flexiyo/widgets/confirm_popup.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -78,6 +79,8 @@ class SettingsScreen extends ConsumerWidget {
               leading: const Icon(Icons.logout_rounded, color: Colors.red),
               title: const Text('Log out'),
               onTap: () async {
+                final confirmed = await _showLogoutDialog(context);
+                if (!confirmed || !context.mounted) return;
                 await ref.read(authProvider.notifier).logout();
                 if (context.mounted) {
                   context.go('/login');
@@ -134,6 +137,17 @@ class SettingsScreen extends ConsumerWidget {
           ],
         );
       },
+    );
+  }
+
+  /// Confirmation prompt shown before signing out.
+  Future<bool> _showLogoutDialog(BuildContext context) {
+    return ConfirmPopup.show(
+      context,
+      title: 'Log out?',
+      message: 'You will need to sign in again to use Flexiyo.',
+      confirmLabel: 'Log out',
+      cancelLabel: 'Cancel',
     );
   }
 }

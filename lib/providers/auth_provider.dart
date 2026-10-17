@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flexiyo/core/exceptions.dart';
 import 'package:flexiyo/models/user.dart';
 import 'package:flexiyo/providers/chat_provider.dart';
 import 'package:flexiyo/services/api_service.dart';
+import 'package:flexiyo/services/push_service.dart';
 import 'package:flexiyo/storage/local_db.dart';
 import 'package:flexiyo/storage/secure_keys.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -55,7 +58,8 @@ class AuthController extends StateNotifier<AuthState> {
 
     state = state.copyWith(token: token, isLoading: true);
     try {
-      final service = ApiService(_secureKeys, onServerRejected: invalidateSession);
+      final service =
+          ApiService(_secureKeys, onServerRejected: invalidateSession);
       final me = await service.getMe();
       state = state.copyWith(
         token: token,
@@ -63,6 +67,7 @@ class AuthController extends StateNotifier<AuthState> {
         isLoading: false,
         isInitialized: true,
       );
+      unawaited(_registerForPush());
     } on UnauthorizedException {
       await invalidateSession();
     } catch (_) {
@@ -74,7 +79,8 @@ class AuthController extends StateNotifier<AuthState> {
       {required String username, required String password}) async {
     state = state.copyWith(isLoading: true);
     try {
-      final service = ApiService(_secureKeys, onServerRejected: invalidateSession);
+      final service =
+          ApiService(_secureKeys, onServerRejected: invalidateSession);
       final result = await service.login(
         username: username,
         password: password,
@@ -96,6 +102,7 @@ class AuthController extends StateNotifier<AuthState> {
         isLoading: false,
         isInitialized: true,
       );
+      unawaited(_registerForPush());
     } catch (error) {
       state = state.copyWith(isLoading: false);
       rethrow;
@@ -109,7 +116,8 @@ class AuthController extends StateNotifier<AuthState> {
   }) async {
     state = state.copyWith(isLoading: true);
     try {
-      final service = ApiService(_secureKeys, onServerRejected: invalidateSession);
+      final service =
+          ApiService(_secureKeys, onServerRejected: invalidateSession);
       final result = await service.register(
         username: username,
         password: password,
@@ -133,6 +141,7 @@ class AuthController extends StateNotifier<AuthState> {
         isInitialized: true,
         isOnboarding: true,
       );
+      unawaited(_registerForPush());
     } catch (error) {
       state = state.copyWith(isLoading: false);
       rethrow;
@@ -147,7 +156,8 @@ class AuthController extends StateNotifier<AuthState> {
   }) async {
     state = state.copyWith(isLoading: true);
     try {
-      final service = ApiService(_secureKeys, onServerRejected: invalidateSession);
+      final service =
+          ApiService(_secureKeys, onServerRejected: invalidateSession);
       final result = await service.loginWithGoogle(
         idToken: idToken,
         email: email,
@@ -171,6 +181,7 @@ class AuthController extends StateNotifier<AuthState> {
         isLoading: false,
         isInitialized: true,
       );
+      unawaited(_registerForPush());
     } catch (error) {
       state = state.copyWith(isLoading: false);
       rethrow;
@@ -195,6 +206,13 @@ class AuthController extends StateNotifier<AuthState> {
   }
 
   Future<void> logout() async {
+    // Stop this device from receiving push for the account first — the device
+    // token call needs the JWT that is about to be revoked.
+    try {
+      await _unregisterFromPush();
+    } catch (_) {
+      // Best-effort only.
+    }
     // Tell the server first while the JWT is still attached, so the session
     // (and its revocation record) actually dies — not just the local copy.
     try {
@@ -210,6 +228,27 @@ class AuthController extends StateNotifier<AuthState> {
     await _ref?.read(chatsProvider.notifier).reset();
     await LocalDb.instance.clearAllUserData();
     state = const AuthState(isInitialized: true);
+  }
+
+  /// Registers this device for background push notifications. Best-effort and
+  /// idempotent; silently no-ops when Firebase is unavailable or on platforms
+  /// where push is not wired up yet.
+  Future<void> _registerForPush() async {
+    await PushService.init(
+      register: (token, platform) async {
+        final service =
+            ApiService(_secureKeys, onServerRejected: invalidateSession);
+        await service.registerPushToken(token, platform: platform);
+      },
+    );
+  }
+
+  Future<void> _unregisterFromPush() async {
+    await PushService.unregister(
+      unregister: (token) async {
+        await ApiService(_secureKeys).unregisterPushToken(token);
+      },
+    );
   }
 }
 

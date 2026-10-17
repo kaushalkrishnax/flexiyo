@@ -13,6 +13,7 @@ import {
   parseScope,
 } from '../services/conversationList.js';
 import { notifyInboxes } from '../services/inbox.js';
+import { sendPushToUser } from '../services/push.js';
 import type { InboxEvent } from '../services/inbox.js';
 
 export const conversationsRouter = Router({ base: '/api/conversations' });
@@ -180,6 +181,18 @@ conversationsRouter.post(
           },
         } as InboxEvent,
       ]);
+    } catch {
+      // Non-fatal.
+    }
+
+    // Best-effort FCM push so the recipient learns about the request even with
+    // the app closed. Failures never affect the request itself.
+    try {
+      await sendPushToUser(env, participantId, {
+        title: myUser?.username ?? 'New message request',
+        body: 'Sent you a message request',
+        data: { type: 'request', conversationId: convId },
+      });
     } catch {
       // Non-fatal.
     }

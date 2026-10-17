@@ -75,7 +75,8 @@ class ApiService {
     });
   }
 
-  Future<Map<String, dynamic>> checkUsernameAvailability(String username) async {
+  Future<Map<String, dynamic>> checkUsernameAvailability(
+      String username) async {
     final data = await _get(
       '/api/auth/check-username',
       params: {'username': username},
@@ -103,6 +104,17 @@ class ApiService {
 
   Future<Map<String, dynamic>> verifyEmail(String code) async {
     return _post('/api/auth/email/verify', {'code': code});
+  }
+
+  /// Registers this device's FCM token so background notifications reach it.
+  Future<void> registerPushToken(String token,
+      {required String platform}) async {
+    await _post('/api/push/register', {'token': token, 'platform': platform});
+  }
+
+  /// Removes this device's token on sign-out.
+  Future<void> unregisterPushToken(String token) async {
+    await _post('/api/push/unregister', {'token': token});
   }
 
   Future<void> registerDevice(Map<String, dynamic> keyBundle) async {
@@ -188,7 +200,8 @@ class ApiService {
   }
 
   Future<List<Conversation>> getMessageRequests() async {
-    final data = await _get('/api/conversations', params: {'scope': 'requests'});
+    final data =
+        await _get('/api/conversations', params: {'scope': 'requests'});
     final List<dynamic> rows =
         data is List ? data : data['requests'] as List<dynamic>? ?? const [];
     return rows

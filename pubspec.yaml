@@ -60,6 +60,10 @@ dependencies:
   sqflite_common_ffi_web: ^1.2.0
   sqflite_common_ffi: ^2.4.4
   google_fonts: ^8.2.1
+  # Push notifications (Android via Firebase Cloud Messaging)
+  firebase_core: ^5.0.0
+  firebase_messaging: ^17.0.0
+  image: ^4.12.0
 
 dev_dependencies:
   flutter_test:

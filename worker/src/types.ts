@@ -13,6 +13,10 @@ export interface Env {
   UPDATE_GITHUB_REPO?: string;
   /// Optional GitHub PAT used by the Worker to avoid unauthenticated API limits.
   GITHUB_TOKEN?: string;
+  /// Firebase service-account JSON (Firebase console → Project settings →
+  /// Service accounts → Generate new private key) used for FCM push
+  /// delivery. When absent, push notifications are silently skipped.
+  FCM_SERVICE_ACCOUNT?: string;
   /** R2 bucket binding for media delivery (server-side only). */
   MEDIA: R2Bucket;
   /** Media object TTL in days. Default 14. */

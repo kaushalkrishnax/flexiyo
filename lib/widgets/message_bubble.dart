@@ -3,7 +3,6 @@ import 'package:flexiyo/widgets/avatar.dart';
 import 'package:flexiyo/widgets/media_image_bubble.dart';
 import 'package:flexiyo/widgets/media_voice_bubble.dart';
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 
 class MessageBubble extends StatelessWidget {
   const MessageBubble({
@@ -80,28 +79,6 @@ class MessageBubble extends StatelessWidget {
     }
   }
 
-  Widget _statusIcon(BuildContext context) {
-    switch (message.status) {
-      case MessageStatus.read:
-        // Read is always expressed as the "Seen" label under the bubble —
-        // no blue double-tick inside it.
-        return const SizedBox.shrink();
-      case MessageStatus.sending:
-        return Icon(Icons.check,
-            size: 12, color: Colors.white.withValues(alpha: 0.6));
-      case MessageStatus.sent:
-        return Icon(Icons.check,
-            size: 12, color: Colors.white.withValues(alpha: 0.9));
-      case MessageStatus.delivered:
-        return Icon(Icons.done_all_rounded,
-            size: 13, color: Colors.white.withValues(alpha: 0.9));
-      case MessageStatus.failed:
-        return const Icon(Icons.close, size: 12, color: Colors.redAccent);
-    }
-  }
-
-  String _timestamp() => DateFormat('HH:mm').format(message.createdAt);
-
   Widget _replyQuote(BuildContext context, Message replied) {
     final cs = Theme.of(context).colorScheme;
     final quoteText = replied.isUnsent
@@ -109,31 +86,72 @@ class MessageBubble extends StatelessWidget {
         : (replied.mediaRef?.label ?? replied.decryptedText ?? '');
     final isQuoteUnsent = replied.isUnsent;
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 6),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: isMine
-            ? Colors.black.withValues(alpha: 0.25)
-            : cs.surfaceContainerHighest.withValues(alpha: 0.5),
-        borderRadius: BorderRadius.circular(12),
-        border: Border(
-          left: BorderSide(
-            color: isMine ? Colors.white54 : cs.primary,
-            width: 3,
-          ),
-        ),
-      ),
-      child: Text(
-        quoteText,
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: isMine
-                  ? Colors.white.withValues(alpha: 0.75)
-                  : cs.onSurfaceVariant,
-              fontStyle: isQuoteUnsent ? FontStyle.italic : FontStyle.normal,
+    // Was the replied-to message sent by the current user? If the quoted
+    // message shares this bubble's sender it comes from the same party.
+    final quotedIsMine =
+        replied.senderId == message.senderId ? isMine : !isMine;
+
+    final String label;
+    if (isMine) {
+      label = quotedIsMine
+          ? 'You replied to yourself'
+          : 'You replied to $otherUsername';
+    } else {
+      label = quotedIsMine
+          ? '$otherUsername replied to you'
+          : '$otherUsername replied to their own message';
+    }
+
+    final labelColor =
+        isMine ? Colors.white.withValues(alpha: 0.75) : cs.onSurfaceVariant;
+    final barColor = isMine ? Colors.white.withValues(alpha: 0.9) : cs.primary;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              color: labelColor,
             ),
+          ),
+          const SizedBox(height: 3),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: Text(
+                  quoteText,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: isMine
+                        ? Colors.white.withValues(alpha: 0.95)
+                        : cs.onSurface,
+                    fontStyle:
+                        isQuoteUnsent ? FontStyle.italic : FontStyle.normal,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                width: 3,
+                height: 24,
+                decoration: BoxDecoration(
+                  color: barColor,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -200,13 +218,19 @@ class MessageBubble extends StatelessWidget {
       );
     }
 
-    final textColor =
-        isMine ? Colors.white : (isDark ? Colors.white : const Color(0xFF000B13));
+    final textColor = isMine
+        ? Colors.white
+        : (isDark ? Colors.white : const Color(0xFF000B13));
     final metaColor = isMediaMessage
         ? Colors.grey[400]
         : isMine
             ? Colors.white.withValues(alpha: 0.7)
             : Colors.grey[500];
+
+    // Per-message times and delivery ticks are intentionally not shown in the
+    // bubble; times surface via the slide-to-reveal gesture instead.
+    final showFailed =
+        isMine && isLast && message.status == MessageStatus.failed;
 
     final bubble = GestureDetector(
       onTap: onTap,
@@ -229,7 +253,6 @@ class MessageBubble extends StatelessWidget {
               children: [
                 if (replyToMessage != null)
                   _replyQuote(context, replyToMessage!),
-
                 if (isMediaMessage)
                   Padding(
                     padding: replyToMessage != null
@@ -246,47 +269,40 @@ class MessageBubble extends StatelessWidget {
                           color: textColor,
                         ),
                   ),
-
-                const SizedBox(height: 4),
-
-                Padding(
-                  padding: EdgeInsets.only(
-                    left: isMediaMessage ? 8 : 0,
-                    right: isMediaMessage ? 6 : 0,
-                    bottom: isMediaMessage ? 2 : 0,
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (message.isEdited)
-                        Padding(
-                          padding: const EdgeInsets.only(right: 4),
-                          child: Text(
+                if (message.isEdited || showFailed) ...[
+                  const SizedBox(height: 4),
+                  Padding(
+                    padding: EdgeInsets.only(
+                      left: isMediaMessage ? 8 : 0,
+                      right: isMediaMessage ? 6 : 0,
+                      bottom: isMediaMessage ? 2 : 0,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (message.isEdited)
+                          Text(
                             'Edited',
                             style: Theme.of(context)
                                 .textTheme
                                 .labelSmall
                                 ?.copyWith(color: metaColor),
                           ),
-                        ),
-                      Text(
-                        _timestamp(),
-                        style: Theme.of(context)
-                            .textTheme
-                            .labelSmall
-                            ?.copyWith(color: metaColor),
-                      ),
-                      if (isMine && isLast) ...[
-                        const SizedBox(width: 4),
-                        _statusIcon(context),
+                        if (message.isEdited && showFailed)
+                          const SizedBox(width: 5),
+                        if (showFailed)
+                          const Icon(
+                            Icons.close,
+                            size: 12,
+                            color: Colors.redAccent,
+                          ),
                       ],
-                    ],
+                    ),
                   ),
-                ),
+                ],
               ],
             ),
           ),
-
           if (isSelected)
             Positioned.fill(
               child: Container(
@@ -296,7 +312,6 @@ class MessageBubble extends StatelessWidget {
                 ),
               ),
             ),
-
           if (message.reaction != null && message.reaction!.isNotEmpty)
             // Reaction pill hangs below-left of the bubble, aligning with the
             // start of the message content.
@@ -340,7 +355,8 @@ class MessageBubble extends StatelessWidget {
         message.reaction != null && message.reaction!.isNotEmpty;
 
     // Read receipt, rendered under my last bubble only.
-    final showSeenLabel = isMine && isLast && message.status == MessageStatus.read;
+    final showSeenLabel =
+        isMine && isLast && message.status == MessageStatus.read;
 
     final rowChild = showSeenLabel
         ? Column(

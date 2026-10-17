@@ -100,20 +100,31 @@ class _MediaViewerScreenState extends ConsumerState<MediaViewerScreen> {
             children: [
               Positioned.fill(child: _content()),
               Positioned(
-                top: MediaQuery.paddingOf(context).top + 8,
-                left: 8,
-                child: IconButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  icon: const HugeIcon(
-                    icon: HugeIcons.strokeRoundedChevronLeft,
-                    color: Colors.white,
-                    size: 24,
+                top: MediaQuery.paddingOf(context).top + 24,
+                left: 12,
+                child: Material(
+                  color: Colors.black.withValues(alpha: 0.35),
+                  shape: const CircleBorder(),
+                  child: InkWell(
+                    customBorder: const CircleBorder(),
+                    onTap: () => Navigator.of(context).pop(),
+                    child: const SizedBox(
+                      width: 44,
+                      height: 44,
+                      child: Center(
+                        child: HugeIcon(
+                          icon: HugeIcons.strokeRoundedChevronLeft,
+                          color: Colors.white,
+                          size: 26,
+                        ),
+                      ),
+                    ),
                   ),
                 ),
               ),
               if (widget.message.mediaRef?.policy == ViewPolicy.once)
                 Positioned(
-                  top: MediaQuery.paddingOf(context).top + 12,
+                  top: MediaQuery.paddingOf(context).top + 32,
                   right: 16,
                   child: Container(
                     padding:

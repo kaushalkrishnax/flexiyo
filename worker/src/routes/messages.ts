@@ -9,6 +9,7 @@ import {
   getMessageSendDenial,
 } from '../services/messagePermissions.js';
 import { notifyInboxes } from '../services/inbox.js';
+import { sendPushToUser } from '../services/push.js';
 import { getConversationForMember } from './conversations.js';
 
 export const messagesRouter = Router({ base: '/api/conversations' });
@@ -426,6 +427,23 @@ messagesRouter.post(
       lastMessageAt: now,
       isIncoming: targetUserId !== userId,
     }]);
+
+    // Best-effort FCM push so a backgrounded/offline recipient still learns
+    // about the message. Failures never affect delivery.
+    try {
+      const senderUser = await env.DB.prepare(
+        'SELECT username FROM users WHERE id = ?',
+      )
+        .bind(userId)
+        .first<{ username: string }>();
+      await sendPushToUser(env, recipientId, {
+        title: senderUser?.username ?? 'New message',
+        body: 'Sent you a message',
+        data: { type: 'message', conversationId },
+      });
+    } catch {
+      // Non-fatal.
+    }
 
     return new Response(
       JSON.stringify({

@@ -94,7 +94,7 @@ class _MediaGallerySheetState extends State<_MediaGallerySheet> {
 
   @override
   Widget build(BuildContext context) {
-    final height = MediaQuery.sizeOf(context).height * 0.74;
+    final height = MediaQuery.sizeOf(context).height * 0.5;
 
     return SizedBox(
       height: height,
@@ -229,13 +229,32 @@ class _MediaGallerySheetState extends State<_MediaGallerySheet> {
 
   Widget _buildGrid() {
     if (_denied) {
-      return const Center(
+      return Center(
         child: Padding(
-          padding: EdgeInsets.all(24),
-          child: Text(
-            'Photo access is required to pick images.\nEnable it in Settings.',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.white70, fontSize: 13.5),
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Photo access is required to pick images.\nEnable it in Settings.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white70, fontSize: 13.5),
+              ),
+              const SizedBox(height: 12),
+              // Re-checks access as soon as the user is back from Settings.
+              TextButton(
+                onPressed: () async {
+                  await PhotoManager.openSetting();
+                  if (!mounted) return;
+                  setState(() {
+                    _denied = false;
+                    _loading = true;
+                  });
+                  _load();
+                },
+                child: const Text('Open settings'),
+              ),
+            ],
           ),
         ),
       );

@@ -151,7 +151,7 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                           child: IconButton(
                             onPressed: () => context.go('/chats/new'),
                             icon: const HugeIcon(
-                              icon: HugeIcons.strokeRoundedAddToList,
+                              icon: HugeIcons.strokeRoundedMessageAdd01,
                               size: 23,
                             ),
                             tooltip: 'New chat',
@@ -162,7 +162,6 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                   ),
                 ),
               ),
-
               SliverToBoxAdapter(
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(16, 4, 16, 14),
@@ -171,7 +170,6 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                   ),
                 ),
               ),
-
               if (_searchQuery.isEmpty)
                 SliverToBoxAdapter(
                   child: Padding(
@@ -184,7 +182,6 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                     ),
                   ),
                 ),
-
               if (_searchQuery.isEmpty)
                 SliverToBoxAdapter(
                   child: Padding(
@@ -247,7 +244,6 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                     ),
                   ),
                 ),
-
               if (authState.user == null ||
                   (chatsState.isLoading && chatsState.conversations.isEmpty))
                 // Skeleton mirrors the exact tile layout — no spinners.
@@ -318,11 +314,9 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
   Future<void> _warmUpCrypto(String userId) async {
     try {
       await ref.read(signalCryptoProvider(userId).future);
-    } catch (_) {
-    }
+    } catch (_) {}
   }
 }
-
 
 class _ChatSearchBar extends StatefulWidget {
   const _ChatSearchBar({required this.onChanged});
@@ -380,7 +374,6 @@ class _ChatSearchBarState extends State<_ChatSearchBar> {
     );
   }
 }
-
 
 class _NotesRail extends StatelessWidget {
   const _NotesRail({
@@ -553,7 +546,6 @@ class _NotesRail extends StatelessWidget {
   }
 }
 
-
 class _FilterTab extends StatelessWidget {
   const _FilterTab({
     required this.label,
@@ -602,7 +594,6 @@ class _FilterTab extends StatelessWidget {
     );
   }
 }
-
 
 class _ChatTile extends StatelessWidget {
   const _ChatTile({
@@ -684,9 +675,7 @@ class _ChatTile extends StatelessWidget {
               username: conversation.otherUsername,
               radius: 28,
             ),
-
             const SizedBox(width: 14),
-
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -741,7 +730,6 @@ class _ChatTile extends StatelessWidget {
                 ],
               ),
             ),
-
             if (conversation.isMuted) ...[
               const SizedBox(width: 6),
               Icon(
@@ -750,7 +738,6 @@ class _ChatTile extends StatelessWidget {
                 color: isDark ? Colors.white54 : Colors.black45,
               ),
             ],
-
             if (hasUnread) ...[
               const SizedBox(width: 8),
               Container(
@@ -768,7 +755,6 @@ class _ChatTile extends StatelessWidget {
     );
   }
 }
-
 
 class _EmptyState extends StatelessWidget {
   const _EmptyState({required this.onNewChat});

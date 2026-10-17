@@ -6,11 +6,14 @@ import 'package:camera/camera.dart';
 import 'package:flexiyo/providers/conversation_provider.dart';
 import 'package:flexiyo/services/media_service.dart';
 import 'package:flexiyo/widgets/avatar.dart';
+import 'package:flexiyo/widgets/confirm_popup.dart';
 import 'package:flexiyo/widgets/media_gallery_sheet.dart';
 import 'package:flexiyo/widgets/media_image_bubble.dart';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hugeicons/hugeicons.dart';
+import 'package:image/image.dart' as img;
 
 /// Camera capture + review flow; pass [initialImage] to open directly in
 /// review (used by the gallery picker so library photos get the same
@@ -105,7 +108,9 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     await _controller?.dispose();
     final controller = CameraController(
       _cameras[index],
-      ResolutionPreset.high,
+      // Capture at the camera's original quality (16:9, up to 4K). The
+      // preview uses the same aspect, so what is framed matches the photo.
+      ResolutionPreset.ultraHigh,
       enableAudio: false,
     );
     await controller.initialize();
@@ -142,14 +147,20 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
       return;
     }
     setState(() => _capturing = true);
+    final wasFrontCamera = _isFrontCamera;
     try {
       final shot = await controller.takePicture();
-      final bytes = await shot.readAsBytes();
+      var bytes = await shot.readAsBytes();
       unawaited(() async {
         try {
           await File(shot.path).delete();
         } catch (_) {}
       }());
+      // Front-camera stills come out unmirrored while the live preview is
+      // mirrored; flip them so the photo matches what was framed.
+      if (wasFrontCamera && bytes.isNotEmpty) {
+        bytes = await compute(_mirrorFrontCapture, bytes);
+      }
       if (mounted) {
         setState(() {
           _captured = bytes;
@@ -174,10 +185,40 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     return _cameras[_cameraIndex].lensDirection == CameraLensDirection.back;
   }
 
-    List<List<dynamic>> get _flashIcon => switch (_flashMode) {
-      FlashMode.off => HugeIcons.strokeRoundedFlashOff,
-      FlashMode.auto => HugeIcons.strokeRoundedFlash,
-      _ => HugeIcons.strokeRoundedFlash,
+  bool get _isFrontCamera =>
+      _cameras.isNotEmpty &&
+      _cameras[_cameraIndex].lensDirection == CameraLensDirection.front;
+
+  /// Fills the preview area with the live feed in its original aspect ratio.
+  /// [StackFit.expand] forces children to fill the slot, which would stretch
+  /// the feed ("squeezed" preview); scaling to cover and clipping keeps the
+  /// sensor's original ratio instead.
+  Widget _buildLivePreview(CameraController controller) {
+    final value = controller.value;
+    // The sensor feed is landscape; display ratio swaps in portrait, exactly
+    // like the CameraPreview widget's own orientation handling.
+    final isPortrait =
+        MediaQuery.orientationOf(context) == Orientation.portrait;
+    final displayAspect =
+        isPortrait ? 1 / value.aspectRatio : value.aspectRatio;
+    return ClipRect(
+      child: SizedBox.expand(
+        child: FittedBox(
+          fit: BoxFit.cover,
+          child: SizedBox(
+            width: 1000 * displayAspect,
+            height: 1000,
+            child: CameraPreview(controller),
+          ),
+        ),
+      ),
+    );
+  }
+
+  List<List<dynamic>> get _flashIcon => switch (_flashMode) {
+        FlashMode.off => HugeIcons.strokeRoundedFlashOff,
+        FlashMode.auto => HugeIcons.strokeRoundedFlash,
+        _ => HugeIcons.strokeRoundedFlash,
       };
 
   Future<void> _cycleFlash() async {
@@ -214,78 +255,14 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
     }
   }
 
-  Future<bool> _showDiscardDialog() async {
-    final result = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => Dialog(
-        backgroundColor: const Color(0xFF2A2C31),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        clipBehavior: Clip.antiAlias,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(24, 22, 24, 18),
-              child: Column(
-                children: [
-                  Text(
-                    'Discard photo?',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 15.5,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  SizedBox(height: 8),
-                  Text(
-                    'If you go back now, you will lose your photo.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.white70, fontSize: 14),
-                  ),
-                ],
-              ),
-            ),
-            Container(height: 0.5, color: Colors.white12),
-            InkWell(
-              onTap: () => Navigator.of(ctx).pop(true),
-              child: const SizedBox(
-                width: double.infinity,
-                height: 50,
-                child: Center(
-                  child: Text(
-                    'Discard',
-                    style: TextStyle(
-                      color: Color(0xFFFF2E63),
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-            Container(height: 0.5, color: Colors.white12),
-            InkWell(
-              onTap: () => Navigator.of(ctx).pop(false),
-              child: const SizedBox(
-                width: double.infinity,
-                height: 50,
-                child: Center(
-                  child: Text(
-                    'Keep editing',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
+  Future<bool> _showDiscardDialog() {
+    return ConfirmPopup.show(
+      context,
+      title: 'Discard photo?',
+      message: 'If you go back now, you will lose your photo.',
+      confirmLabel: 'Discard',
+      cancelLabel: 'Keep editing',
     );
-    return result ?? false;
   }
 
   Future<void> _showPolicyPopup() async {
@@ -294,8 +271,17 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
       builder: (ctx) => Dialog(
         backgroundColor: const Color(0xFF2A2D34),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        insetPadding: const EdgeInsets.only(left: 28, right: 90, bottom: 130),
+        // Hug the chip that opens it (bottom-left, just above the control
+        // row) instead of floating up in the middle of the screen.
+        insetPadding: EdgeInsets.only(
+          left: 16,
+          right: 90,
+          bottom: MediaQuery.paddingOf(context).bottom + 64,
+        ),
         alignment: Alignment.bottomLeft,
+        // Fit the popup to its content instead of stretching it across the
+        // screen (the dialog default enforces a 280px minimum width).
+        constraints: const BoxConstraints(maxWidth: 240),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(20, 20, 14, 14),
           child: Column(
@@ -389,7 +375,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
         SafeArea(
           bottom: false,
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(8, 6, 8, 0),
+            padding: const EdgeInsets.fromLTRB(8, 6, 8, 10),
             child: Row(
               children: [
                 IconButton(
@@ -397,7 +383,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                   icon: const HugeIcon(
                     icon: HugeIcons.strokeRoundedCancel01,
                     color: Colors.white,
-                    size: 30,
+                    size: 32,
                   ),
                 ),
                 Expanded(
@@ -437,7 +423,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
             fit: StackFit.expand,
             children: [
               if (previewReady)
-                CameraPreview(controller)
+                _buildLivePreview(controller)
               else if (_initializing)
                 const Center(
                   child: CircularProgressIndicator(color: Colors.white54),
@@ -516,7 +502,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
                     ),
                     const Spacer(),
                     _BottomSquareButton(
-                      onTap: _cameras.length > 1 ? _flip : null,
+                      onTap: _cameras.length > 1 && !_capturing ? _flip : null,
                       child: HugeIcon(
                         icon: HugeIcons.strokeRoundedCameraRotated01,
                         color:
@@ -546,13 +532,29 @@ class _CameraScreenState extends ConsumerState<CameraScreen> {
         ),
         SafeArea(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(8, 6, 8, 0),
-            child: IconButton(
-              onPressed: _handleBack,
-              icon: const HugeIcon(
-                icon: HugeIcons.strokeRoundedChevronLeft,
-                color: Colors.white,
-                size: 26,
+            // Clear gap between the status bar and the back button so the
+            // header doesn't hug the top edge of the screen.
+            padding: const EdgeInsets.fromLTRB(12, 24, 12, 12),
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: Material(
+                color: Colors.black.withValues(alpha: 0.35),
+                shape: const CircleBorder(),
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: _handleBack,
+                  child: const SizedBox(
+                    width: 44,
+                    height: 44,
+                    child: Center(
+                      child: HugeIcon(
+                        icon: HugeIcons.strokeRoundedChevronLeft,
+                        color: Colors.white,
+                        size: 26,
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ),
           ),
@@ -739,5 +741,22 @@ class _PolicyOption extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+/// Mirrors a front-camera capture horizontally so the saved photo matches
+/// the mirrored live preview the user framed. Runs in a background isolate;
+/// returns the original bytes if the image cannot be processed.
+Uint8List _mirrorFrontCapture(Uint8List jpegBytes) {
+  try {
+    final decoded = img.decodeImage(jpegBytes);
+    if (decoded == null) return jpegBytes;
+    // Apply any EXIF rotation first so the flip matches the displayed image.
+    final upright = img.bakeOrientation(decoded);
+    return Uint8List.fromList(
+      img.encodeJpg(img.flipHorizontal(upright), quality: 90),
+    );
+  } catch (_) {
+    return jpegBytes;
   }
 }

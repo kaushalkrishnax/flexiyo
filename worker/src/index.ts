@@ -6,6 +6,7 @@ import { messagesRouter } from './routes/messages.js';
 import { mediaRouter } from './routes/media.js';
 import { usersRouter } from './routes/users.js';
 import { updateRouter } from './routes/update.js';
+import { pushRouter } from './routes/push.js';
 import { handlePreflight, withCors } from './middleware/cors.js';
 import { cleanExpiredMessages } from './services/expiry.js';
 import { purgeExpiredMedia } from './services/media_purge.js';
@@ -25,7 +26,7 @@ router.get('/api/health', () => new Response(JSON.stringify({ ok: true }), {
   headers: { 'Content-Type': 'application/json' },
 }));
 
-const routers = [authRouter, usersRouter, conversationsRouter, messagesRouter, mediaRouter, devicesRouter, updateRouter];
+const routers = [authRouter, usersRouter, conversationsRouter, messagesRouter, mediaRouter, devicesRouter, updateRouter, pushRouter];
 
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {

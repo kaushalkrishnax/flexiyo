@@ -119,12 +119,18 @@
 - **Disappearing messages:** Set an expiry timer per conversation. The server prunes expired messages and the client filters them out as well, so nothing lingers between cleanup runs.
 - **Copy:** One tap copies the decrypted text to the clipboard.
 
+### Media
+
+- **Encrypted photos and voice notes:** Snap a photo, pick one from the gallery, or record a voice note — media is encrypted on-device (AES-GCM) before it leaves your phone, and expired media is purged from the server.
+- **View limits:** Mark a photo as view-once or view-twice when sending; the server enforces the limit and refuses further opens once it is used up.
+
 ### Experience
 
-- **Familiar, modern chat UI:** Clean responsive layout, Material 3 theming, adaptive light and dark modes, and long-press context menus.
+- **Familiar, modern chat UI:** Clean responsive layout, Material 3 theming, adaptive light and dark modes, long-press context menus, swipe to reply, and hold-and-swipe to peek at message times.
+- **Android notifications:** Firebase Cloud Messaging delivers a heads-up when a message or message request arrives while the app is closed. Notifications only include who sent it — never the message content.
 - **One codebase, two platforms:** Flutter for Android and iOS, with Android as the primary test target.
 
-**Note:** Multi-device sync and media messaging are on the [Roadmap](#-roadmap).
+**Note:** Multi-device sync is on the [Roadmap](#-roadmap).
 
 ---
 
@@ -278,6 +284,7 @@ See [`.env.example`](.env.example) for the full template.
 | Variable         | Where                   | Description                  |
 | ---------------- | ----------------------- | ---------------------------- |
 | `JWT_SECRET`     | Wrangler secret         | HS256 signing key for JWTs   |
+| `FCM_SERVICE_ACCOUNT` | Wrangler secret    | Firebase service-account JSON for Android push (optional) |
 | `D1_DATABASE_ID` | `worker/wrangler.toml`  | Cloudflare D1 database ID    |
 | `CORS_ORIGIN`    | `worker/wrangler.toml` vars | Allowed CORS origin      |
 | `API_BASE_URL`   | Flutter `--dart-define` | Override API URL for dev     |
@@ -292,6 +299,10 @@ See [`.env.example`](.env.example) for the full template.
 # 1. Set the production secret (from worker/)
 cd worker
 bunx wrangler secret put JWT_SECRET
+
+# Optional — Android push notifications (Firebase Cloud Messaging):
+# paste the service-account JSON when prompted
+bunx wrangler secret put FCM_SERVICE_ACCOUNT
 
 # 2. Apply remote migrations and deploy the Worker
 bun run db:migrate:remote
@@ -319,6 +330,16 @@ flutter build apk --dart-define=API_BASE_URL=https://your-worker.workers.dev
 - Physical devices need your machine's LAN IP and the same Wi-Fi network
 - Confirm the Worker is running with `bun run dev`
 - Plain HTTP is only for local dev, use HTTPS in production
+
+</details>
+
+<details>
+<summary><b>🔔 Push notifications not arriving (Android)</b></summary>
+
+- `FCM_SERVICE_ACCOUNT` must be set as a Wrangler secret: Firebase console → Project settings → Service accounts → Generate new private key, then paste the whole JSON on one line
+- The device registers its token when the user signs in — sign in again after installing a new build
+- Android 13+ asks for notification permission on first sign-in; if denied, enable it in system settings
+- iOS push is not wired up yet (needs `GoogleService-Info.plist` + APNs keys)
 
 </details>
 
@@ -368,8 +389,11 @@ flutter run
 - [x] Edit, unsend, delete for me, and copy
 - [x] Disappearing messages with server-side pruning
 - [x] Offline delivery synchronization
+- [x] Encrypted photos and voice notes with view limits
+- [x] Android push notifications (FCM)
+- [ ] iOS and web push notifications
 - [ ] Multi-device key synchronization
-- [ ] Media messaging (images, files)
+- [ ] File attachments
 - [ ] Expanded platform specific testing
 - [ ] Independent security audit
 

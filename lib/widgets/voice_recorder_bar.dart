@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:hugeicons/hugeicons.dart';
 import 'package:path/path.dart' as p;
@@ -29,29 +30,50 @@ class VoiceRecorderBar extends StatefulWidget {
 
 enum _RecPhase { recording, paused, stopped }
 
-class _VoiceRecorderBarState extends State<VoiceRecorderBar> {
+class _VoiceRecorderBarState extends State<VoiceRecorderBar>
+    with SingleTickerProviderStateMixin {
   static const Color _indigo = Color(0xFF5E5CE6);
   static const int _maxBars = 42;
 
   final AudioRecorder _recorder = AudioRecorder();
+  final AudioPlayer _previewPlayer = AudioPlayer();
   final Stopwatch _stopwatch = Stopwatch();
   final math.Random _rng = math.Random();
   Timer? _ticker;
+  StreamSubscription<void>? _previewCompleteSub;
+
+  /// Blinks the waveform between full and low opacity while paused.
+  late final AnimationController _pulse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 650),
+    lowerBound: 0.35,
+    upperBound: 1.0,
+    value: 1.0,
+  );
 
   _RecPhase _phase = _RecPhase.recording;
   final List<double> _levels = [];
   String? _filePath;
   bool _sending = false;
 
+  /// True while the stopped take is being previewed through [_previewPlayer].
+  bool _previewing = false;
+
   @override
   void initState() {
     super.initState();
+    _previewCompleteSub = _previewPlayer.onPlayerComplete.listen((_) {
+      if (mounted) setState(() => _previewing = false);
+    });
     _start();
   }
 
   @override
   void dispose() {
     _ticker?.cancel();
+    _previewCompleteSub?.cancel();
+    _previewPlayer.dispose();
+    _pulse.dispose();
     _recorder.dispose();
     super.dispose();
   }
@@ -101,6 +123,8 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar> {
 
   Future<void> _onTick() async {
     if (!mounted || _phase == _RecPhase.stopped) return;
+    // While paused the waveform freezes (it blinks instead of moving).
+    if (_phase == _RecPhase.paused) return;
     double level = 0.25;
     try {
       final amp = await _recorder.getAmplitude();
@@ -125,15 +149,43 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar> {
       if (_phase == _RecPhase.recording) {
         await _recorder.pause();
         _stopwatch.stop();
-        if (mounted) setState(() => _phase = _RecPhase.paused);
+        if (mounted) {
+          setState(() => _phase = _RecPhase.paused);
+          _pulse.repeat(reverse: true);
+        }
       } else if (_phase == _RecPhase.paused) {
         await _recorder.resume();
         _stopwatch.start();
-        if (mounted) setState(() => _phase = _RecPhase.recording);
+        if (mounted) {
+          _pulse
+            ..stop()
+            ..value = 1.0;
+          setState(() => _phase = _RecPhase.recording);
+        }
       }
     } catch (_) {
       // Keep the current phase.
     }
+  }
+
+  /// Play / pause the stopped take so it can be checked before sending.
+  Future<void> _togglePreview() async {
+    final path = _filePath;
+    if (path == null) return;
+    try {
+      if (_previewing) {
+        await _previewPlayer.pause();
+        if (mounted) setState(() => _previewing = false);
+        return;
+      }
+      if (_previewPlayer.state == PlayerState.paused &&
+          _previewPlayer.source != null) {
+        await _previewPlayer.resume();
+      } else {
+        await _previewPlayer.play(DeviceFileSource(path));
+      }
+      if (mounted) setState(() => _previewing = true);
+    } catch (_) {}
   }
 
   /// Stop the take but keep the file for sending.
@@ -142,6 +194,9 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar> {
       final path = await _recorder.stop();
       _stopwatch.stop();
       _ticker?.cancel();
+      _pulse
+        ..stop()
+        ..value = 1.0;
       if (path != null && path.isNotEmpty) _filePath = path;
       if (mounted) setState(() => _phase = _RecPhase.stopped);
     } catch (_) {
@@ -150,6 +205,10 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar> {
   }
 
   Future<void> _rerecord() async {
+    try {
+      await _previewPlayer.stop();
+    } catch (_) {}
+    _previewing = false;
     await _deleteCurrentFile();
     _levels.clear();
     await _start();
@@ -169,6 +228,9 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar> {
     try {
       if (_phase != _RecPhase.stopped) await _recorder.cancel();
     } catch (_) {}
+    try {
+      await _previewPlayer.stop();
+    } catch (_) {}
     _ticker?.cancel();
     _stopwatch.stop();
     await _deleteCurrentFile();
@@ -178,6 +240,10 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar> {
   Future<void> _send() async {
     if (_sending) return;
     setState(() => _sending = true);
+
+    try {
+      await _previewPlayer.stop();
+    } catch (_) {}
 
     if (_phase != _RecPhase.stopped) {
       await _stopTake();
@@ -245,11 +311,14 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar> {
                 child: Row(
                   children: [
                     _CapsuleButton(
-                      onTap:
-                          _phase == _RecPhase.stopped ? _rerecord : _stopTake,
+                      onTap: _phase == _RecPhase.stopped
+                          ? _togglePreview
+                          : _stopTake,
                       child: _phase == _RecPhase.stopped
-                          ? const HugeIcon(
-                              icon: HugeIcons.strokeRoundedMic01,
+                          ? HugeIcon(
+                              icon: _previewing
+                                  ? HugeIcons.strokeRoundedPause
+                                  : HugeIcons.strokeRoundedPlay,
                               color: Colors.white,
                               size: 22,
                             )
@@ -267,6 +336,7 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar> {
                       child: _Waveform(
                         levels: _levels,
                         paused: _phase == _RecPhase.paused,
+                        pulse: _pulse,
                       ),
                     ),
                     const SizedBox(width: 10),
@@ -314,19 +384,26 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar> {
                               : 'Pause listening',
                         ),
                         const SizedBox(width: 6),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: _indigo.withValues(alpha: 0.25),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: const Text(
-                            'New',
-                            style: TextStyle(
-                              color: _indigo,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
+                        InkWell(
+                          onTap: _phase == _RecPhase.stopped ? _rerecord : null,
+                          borderRadius: BorderRadius.circular(12),
+                          child: Opacity(
+                            opacity: _phase == _RecPhase.stopped ? 1.0 : 0.45,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: _indigo.withValues(alpha: 0.25),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: const Text(
+                                'New',
+                                style: TextStyle(
+                                  color: _indigo,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
                             ),
                           ),
                         ),
@@ -352,7 +429,7 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar> {
                                     color: Colors.white,
                                   ),
                                 )
-                                : const HugeIcon(
+                              : const HugeIcon(
                                   icon: HugeIcons.strokeRoundedSend,
                                   color: Colors.white,
                                   size: 22,
@@ -391,12 +468,18 @@ class _CapsuleButton extends StatelessWidget {
   }
 }
 
-/// Metered mic amplitude; newest bars on the right.
+/// Metered mic amplitude; newest bars on the right. While paused the bars
+/// hold still and blink between full and low opacity instead.
 class _Waveform extends StatelessWidget {
-  const _Waveform({required this.levels, required this.paused});
+  const _Waveform({
+    required this.levels,
+    required this.paused,
+    required this.pulse,
+  });
 
   final List<double> levels;
   final bool paused;
+  final Animation<double> pulse;
 
   @override
   Widget build(BuildContext context) {
@@ -408,8 +491,8 @@ class _Waveform extends StatelessWidget {
 
     return SizedBox(
       height: 30,
-      child: Opacity(
-        opacity: paused ? 0.45 : 1,
+      child: FadeTransition(
+        opacity: paused ? pulse : const AlwaysStoppedAnimation<double>(1),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           crossAxisAlignment: CrossAxisAlignment.center,

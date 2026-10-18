@@ -2,7 +2,7 @@ import { IRequest, Router } from 'itty-router';
 import { z } from 'zod';
 import type { Env, AuthenticatedRequest, MessageRow } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
-import { resolveRequestDevice } from '../middleware/device.js';
+import { INSTALLATION_HEADER, pairedActiveDeviceIds, resolveRequestDevice } from '../middleware/device.js';
 import { generateId } from '../utils/crypto.js';
 import {
   getMessageEditDenial,
@@ -11,7 +11,7 @@ import {
 import { notifyInboxes } from '../services/inbox.js';
 import { deleteMessages } from '../services/message_deletion.js';
 import { sendPushToUser } from '../services/push.js';
-import { getConversationForMember } from './conversations.js';
+import { getConversationAccess, getConversationForMember } from './conversations.js';
 
 export const messagesRouter = Router({ base: '/api/conversations' });
 
@@ -197,13 +197,18 @@ messagesRouter.post(
     const userId = authReq.user.sub;
     const { id: conversationId } = request.params as { id: string };
 
-    const conv = await getConversationForMember(conversationId, userId, env.DB);
+    const conv = await getConversationAccess(conversationId, userId, env.DB);
     if (!conv) {
       return new Response(JSON.stringify({ error: 'Conversation not found' }), {
         status: 404,
         headers: { 'Content-Type': 'application/json' },
       });
     }
+
+    // Restriction is the caller's own flag; either participant may have blocked
+    // the other. Membership and block state come from the same read.
+    const expectedRecipient =
+      conv.user_a_id === userId ? conv.user_b_id : conv.user_a_id;
 
     let hasExistingMessage = false;
     if (conv.request_status === 'pending' && conv.initiated_by_id === userId) {
@@ -215,25 +220,12 @@ messagesRouter.post(
       hasExistingMessage = existingMessage != null;
     }
 
-    // Restriction is the caller's own flag; either participant may have blocked
-    // the other.
-    const expectedRecipient =
-      conv.user_a_id === userId ? conv.user_b_id : conv.user_a_id;
-    const blockRow = await env.DB.prepare(
-      `SELECT 1 FROM user_blocks
-       WHERE (blocker_id = ? AND blocked_id = ?)
-          OR (blocker_id = ? AND blocked_id = ?)
-       LIMIT 1`,
-    )
-      .bind(userId, expectedRecipient, expectedRecipient, userId)
-      .first();
-
     const sendDenial = getMessageSendDenial({
       requestStatus: conv.request_status,
       initiatedById: conv.initiated_by_id,
       userId,
       hasExistingMessage,
-      isBlocked: blockRow != null,
+      isBlocked: conv.is_blocked === 1,
     });
     if (sendDenial === 'rejected_request' ||
         sendDenial === 'recipient_has_not_accepted') {
@@ -283,25 +275,42 @@ messagesRouter.post(
       });
     }
 
-    if (mediaId != null) {
-      const media = await env.DB.prepare(
-        `SELECT id FROM media WHERE id = ? AND conversation_id = ? AND sender_id = ?`,
+    // Media ownership, idempotency and device state are independent reads —
+    // one round trip instead of three sequential ones.
+    const installationId = request.headers.get(INSTALLATION_HEADER);
+    const [media, existingMessage, deviceRows] = await Promise.all([
+      mediaId != null
+        ? env.DB.prepare(
+            `SELECT id FROM media WHERE id = ? AND conversation_id = ? AND sender_id = ?`,
+          )
+            .bind(mediaId, conversationId, userId)
+            .first<{ id: string }>()
+        : Promise.resolve(null),
+      env.DB.prepare(
+        `SELECT id, sender_id, conversation_id FROM messages WHERE id = ?`,
       )
-        .bind(mediaId, conversationId, userId)
-        .first<{ id: string }>();
-      if (!media) {
-        return new Response(JSON.stringify({ error: 'Invalid mediaId' }), {
-          status: 400,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-    }
+        .bind(msgId)
+        .first<{ id: string; sender_id: string; conversation_id: string }>(),
+      // The caller's own installation may be inactive and still send; the
+      // recipient's devices must be active.
+      installationId
+        ? env.DB.prepare(
+            `SELECT id, user_id FROM devices
+             WHERE (user_id = ? AND installation_id = ?)
+                OR (user_id = ? AND status = 'active')
+             ORDER BY id`,
+          )
+            .bind(userId, installationId, recipientId)
+            .all<{ id: number; user_id: string }>()
+        : Promise.resolve(null),
+    ]);
 
-    const existingMessage = await env.DB.prepare(
-      `SELECT id, sender_id, conversation_id FROM messages WHERE id = ?`,
-    )
-      .bind(msgId)
-      .first<{ id: string; sender_id: string; conversation_id: string }>();
+    if (mediaId != null && !media) {
+      return new Response(JSON.stringify({ error: 'Invalid mediaId' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
 
     if (existingMessage) {
       // Idempotent retry: the message was already committed. Do not duplicate
@@ -325,21 +334,17 @@ messagesRouter.post(
     // Disappearing-message timers start when a recipient reads the message.
     const expiresAt = null;
 
-    const senderDevice = await resolveRequestDevice(request, env, userId);
-    if (!senderDevice) {
+    const senderDeviceId = (deviceRows?.results ?? []).find((row) => row.user_id === userId)?.id;
+    if (!senderDeviceId) {
       return new Response(JSON.stringify({ error: 'Device registration required' }), {
         status: 403,
         headers: { 'Content-Type': 'application/json' },
       });
     }
 
-    const recipientDeviceIds = (
-      await env.DB.prepare(
-        `SELECT id FROM devices WHERE user_id = ? AND status = 'active' ORDER BY id`,
-      )
-        .bind(recipientId)
-        .all<{ id: number }>()
-    ).results.map((r) => r.id);
+    const recipientDeviceIds = (deviceRows?.results ?? [])
+      .filter((row) => row.user_id === recipientId)
+      .map((row) => row.id);
     if (recipientDeviceIds.length === 0) {
       return new Response(
         JSON.stringify({ error: "Recipient hasn't registered encryption keys yet." }),
@@ -375,54 +380,43 @@ messagesRouter.post(
       );
     }
 
-    // sender_id always from JWT — never from client body
-    await env.DB.prepare(
-      `INSERT INTO messages
-        (id, conversation_id, sender_id, sender_device_id, message_type, reply_to_id,
-         media_id, version, is_unsent, created_at, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`,
-    )
-      .bind(
+    // One transaction: the message row, the conversation timestamp and the
+    // per-device ciphertexts commit together or not at all, so a failed write
+    // cannot leave a message that a retry would treat as already delivered.
+    await env.DB.batch([
+      // sender_id always from JWT — never from client body
+      env.DB.prepare(
+        `INSERT INTO messages
+          (id, conversation_id, sender_id, sender_device_id, message_type, reply_to_id,
+           media_id, version, is_unsent, created_at, expires_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`,
+      ).bind(
         msgId,
         conversationId,
         userId,
-        senderDevice?.id ?? null,
+        senderDeviceId,
         messageType,
         replyToId ?? null,
         mediaId ?? null,
         now,
         expiresAt,
-      )
-      .run();
+      ),
 
-    // Update last_message_at on conversation
-    await env.DB.prepare(
-      'UPDATE conversations SET last_message_at = ? WHERE id = ?',
-    )
-      .bind(now, conversationId)
-      .run();
+      env.DB.prepare(
+        'UPDATE conversations SET last_message_at = ? WHERE id = ?',
+      ).bind(now, conversationId),
 
-    // Per-device delivery ledger. UNIQUE(message_id, recipient_device_id)
-    // makes fan-out retries idempotent under retries/races.
-    if (deliveryRows.length > 0) {
-      const deliveryStmts = deliveryRows.map((row) =>
+      // Per-device delivery ledger. UNIQUE(message_id, recipient_device_id)
+      // makes fan-out retries idempotent under retries/races.
+      ...deliveryRows.map((row) =>
         env.DB.prepare(
           `INSERT OR IGNORE INTO message_deliveries
              (id, message_id, recipient_device_id, sender_device_id, payload,
               message_type, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        ).bind(
-          generateId(),
-          msgId,
-          row.deviceId,
-          senderDevice?.id ?? null,
-          row.payload,
-          row.messageType,
-          now,
-        ),
-      );
-      await env.DB.batch(deliveryStmts);
-    }
+        ).bind(generateId(), msgId, row.deviceId, senderDeviceId, row.payload, row.messageType, now),
+      ),
+    ]);
 
     const doId = env.CHAT_ROOM.idFromName(conversationId);
     const stub = env.CHAT_ROOM.get(doId);
@@ -436,7 +430,7 @@ messagesRouter.post(
             messageId: msgId,
             conversationId,
             senderId: userId,
-            senderDeviceId: senderDevice?.id ?? null,
+            senderDeviceId,
             recipients: [userId, recipientId],
             payloads: deliveryRows.map((r) => ({
               deviceId: r.deviceId,
@@ -486,8 +480,8 @@ messagesRouter.post(
         id: msgId,
         conversationId,
         senderId: userId,
-        senderDeviceId: senderDevice?.id ?? null,
-        encryptedPayload: deliveryRows.find((r) => r.deviceId === senderDevice?.id)?.payload ?? null,
+        senderDeviceId,
+        encryptedPayload: deliveryRows.find((r) => r.deviceId === senderDeviceId)?.payload ?? null,
         messageType,
         replyToId: replyToId ?? null,
         version: 1,
@@ -538,12 +532,11 @@ messagesRouter.post(
     }
 
     const messageIds = [...new Set(parsed.data.messageIds)];
-    const placeholders = messageIds.map(() => '?').join(', ');
     const matching = await env.DB.prepare(
       `SELECT id FROM messages
-       WHERE conversation_id = ? AND id IN (${placeholders})`,
+       WHERE conversation_id = ? AND id IN (SELECT value FROM json_each(?))`,
     )
-      .bind(conversationId, ...messageIds)
+      .bind(conversationId, JSON.stringify(messageIds))
       .all<{ id: string }>();
     if ((matching.results ?? []).length !== messageIds.length) {
       return new Response(JSON.stringify({ error: 'One or more messages were not found' }), {
@@ -574,7 +567,7 @@ messagesRouter.post(
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
     const { id: conversationId } = request.params as { id: string };
-    const conversation = await getConversationForMember(conversationId, userId, env.DB);
+    const conversation = await getConversationAccess(conversationId, userId, env.DB);
     if (!conversation) {
       return new Response(JSON.stringify({ error: 'Conversation not found' }), {
         status: 404,
@@ -590,20 +583,7 @@ messagesRouter.post(
       });
     }
 
-    const expectedPeer =
-      conversation.user_a_id === userId
-        ? conversation.user_b_id
-        : conversation.user_a_id;
-    const blockCheck = await env.DB.prepare(
-      `SELECT 1 FROM user_blocks
-       WHERE (blocker_id = ? AND blocked_id = ?)
-          OR (blocker_id = ? AND blocked_id = ?)
-       LIMIT 1`,
-    )
-      .bind(userId, expectedPeer, expectedPeer, userId)
-      .first();
-
-    if (blockCheck) {
+    if (conversation.is_blocked === 1) {
       return new Response(JSON.stringify({ read: false, reason: 'blocked' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -611,32 +591,35 @@ messagesRouter.post(
     }
 
     const now = Math.floor(Date.now() / 1000);
-    const unreadMessages = await env.DB.prepare(
-      `SELECT DISTINCT m.id
-       FROM messages m
-       JOIN message_deliveries md ON md.message_id = m.id
-       WHERE m.conversation_id = ? AND m.sender_id != ? AND m.is_unsent = 0
-         AND md.read_at IS NULL
-         AND md.recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)`,
-    )
-      .bind(conversationId, userId, userId)
-      .all<{ id: string }>();
-    const newlyReadMessageIds = (unreadMessages.results ?? []).map((row) => row.id);
 
-    // Reading is an ACCOUNT-level action: mark read (and implied delivered)
-    // for every device of this account so sibling devices stay in sync.
-    await env.DB.prepare(
-      `UPDATE message_deliveries
-       SET delivered_at = COALESCE(delivered_at, ?), read_at = ?
-       WHERE read_at IS NULL
-         AND recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)
-         AND message_id IN (
-           SELECT id FROM messages
-           WHERE conversation_id = ? AND sender_id != ? AND is_unsent = 0
-         )`,
-    )
-      .bind(now, now, userId, conversationId, userId)
-      .run();
+    // Batched so the newly-read id set comes from the pre-update state and the
+    // flip commits in the same round trip.
+    const [unreadMessages] = await env.DB.batch<{ id: string }>([
+      env.DB.prepare(
+        `SELECT DISTINCT m.id
+         FROM messages m
+         JOIN message_deliveries md ON md.message_id = m.id
+         WHERE m.conversation_id = ? AND m.sender_id != ? AND m.is_unsent = 0
+           AND md.read_at IS NULL
+           AND md.recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)`,
+      )
+        .bind(conversationId, userId, userId),
+
+      // Reading is an ACCOUNT-level action: mark read (and implied delivered)
+      // for every device of this account so sibling devices stay in sync.
+      env.DB.prepare(
+        `UPDATE message_deliveries
+         SET delivered_at = COALESCE(delivered_at, ?), read_at = ?
+         WHERE read_at IS NULL
+           AND recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)
+           AND message_id IN (
+             SELECT id FROM messages
+             WHERE conversation_id = ? AND sender_id != ? AND is_unsent = 0
+           )`,
+      ).bind(now, now, userId, conversationId, userId),
+    ]);
+
+    const newlyReadMessageIds = (unreadMessages.results ?? []).map((row) => row.id);
 
     const stub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(conversationId));
     await stub.fetch(new Request('https://internal/broadcast', {
@@ -656,11 +639,11 @@ messagesRouter.post(
       if (conversation.disappearing_timer === -1) {
         await deleteMessages(env, conversationId, newlyReadMessageIds);
       } else if (conversation.disappearing_timer > 0) {
-        const placeholders = newlyReadMessageIds.map(() => '?').join(', ');
         await env.DB.prepare(
-          `UPDATE messages SET expires_at = ? WHERE id IN (${placeholders})`,
+          `UPDATE messages SET expires_at = ?
+           WHERE id IN (SELECT value FROM json_each(?))`,
         )
-          .bind(now + conversation.disappearing_timer, ...newlyReadMessageIds)
+          .bind(now + conversation.disappearing_timer, JSON.stringify(newlyReadMessageIds))
           .run();
       }
     }
@@ -773,13 +756,10 @@ messagesRouter.patch(
     const newVersion = version + 1;
 
     const recipientId = conv.user_a_id === userId ? conv.user_b_id : conv.user_a_id;
-    const recipientDeviceIds = (
-      await env.DB.prepare(
-        `SELECT id FROM devices WHERE user_id = ? AND status = 'active' ORDER BY id`,
-      )
-        .bind(recipientId)
-        .all<{ id: number }>()
-    ).results.map((r) => r.id);
+    // Sender and recipient device sets in one round trip: the ownership check
+    // below must not issue a query per payload.
+    const editDevices = await pairedActiveDeviceIds(env.DB, userId, recipientId);
+    const recipientDeviceIds = editDevices.peer;
 
     const editRows: Array<{ deviceId: number; payload: string; messageType: string }> =
       payloads.map((p) => ({
@@ -798,13 +778,7 @@ messagesRouter.patch(
     }
     for (const p of payloads) {
       const belongs =
-        recipientDeviceIds.includes(p.deviceId) ||
-        (await env.DB.prepare(
-          `SELECT 1 AS ok FROM devices
-            WHERE id = ? AND user_id = ? AND status = 'active'`,
-        )
-          .bind(p.deviceId, userId)
-          .first());
+        recipientDeviceIds.includes(p.deviceId) || editDevices.own.includes(p.deviceId);
       if (!belongs) {
         return new Response(
           JSON.stringify({ error: 'unknown_device', deviceId: p.deviceId }),
@@ -813,20 +787,19 @@ messagesRouter.patch(
       }
     }
 
-    await env.DB.prepare(
-      `UPDATE messages SET message_type = ?, version = ?, edited_at = ? WHERE id = ?`,
-    )
-      .bind(messageType, newVersion, now, messageId)
-      .run();
+    // Version bump and per-device ciphertext replacement commit together.
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE messages SET message_type = ?, version = ?, edited_at = ? WHERE id = ?`,
+      ).bind(messageType, newVersion, now, messageId),
 
-    await env.DB.batch(
-      editRows.map((row) =>
+      ...editRows.map((row) =>
         env.DB.prepare(
           `UPDATE message_deliveries SET payload = ?, message_type = ?
            WHERE message_id = ? AND recipient_device_id = ?`,
         ).bind(row.payload, row.messageType, messageId, row.deviceId),
       ),
-    );
+    ]);
 
     const doId = env.CHAT_ROOM.idFromName(conversationId);
     const stub = env.CHAT_ROOM.get(doId);
@@ -1055,17 +1028,16 @@ messagesRouter.post(
     }
 
     const reactionId = existing ? existing.id : generateId();
-    await env.DB.prepare(
-      `INSERT INTO message_reactions (id, message_id, conversation_id, user_id, emoji, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(message_id, user_id) DO UPDATE SET emoji = excluded.emoji, updated_at = excluded.updated_at`,
-    )
-      .bind(reactionId, messageId, conversationId, userId, emoji, now, now)
-      .run();
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO message_reactions (id, message_id, conversation_id, user_id, emoji, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(message_id, user_id) DO UPDATE SET emoji = excluded.emoji, updated_at = excluded.updated_at`,
+      ).bind(reactionId, messageId, conversationId, userId, emoji, now, now),
 
-    await env.DB.prepare(`UPDATE messages SET reaction = ? WHERE id = ?`)
-      .bind(emoji, messageId)
-      .run();
+      env.DB.prepare(`UPDATE messages SET reaction = ? WHERE id = ?`)
+        .bind(emoji, messageId),
+    ]);
 
     const doId = env.CHAT_ROOM.idFromName(conversationId);
     const stub = env.CHAT_ROOM.get(doId);

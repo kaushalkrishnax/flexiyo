@@ -9,29 +9,36 @@ export async function deleteMessages(
   const ids = [...new Set(messageIds)];
   if (ids.length === 0) return;
 
-  const placeholders = ids.map(() => '?').join(', ');
-  const media = await env.DB.prepare(
-    `SELECT id, r2_key FROM media WHERE message_id IN (${placeholders})`,
-  )
-    .bind(...ids)
-    .all<{ id: string; r2_key: string }>();
-
-  await env.DB.batch(
-    ids.map((messageId) =>
+  // Media is linked from the message (`messages.media_id`), not the other way
+  // round; the select has to run before the message rows disappear. The id set
+  // travels as JSON so the statement stays under D1's 100-parameter limit.
+  const [deletedMedia] = await env.DB.batch<{ id: string; r2_key: string }>([
+    env.DB.prepare(
+      `SELECT media.id AS id, media.r2_key AS r2_key
+       FROM messages m
+       JOIN media ON media.id = m.media_id
+       WHERE m.id IN (SELECT value FROM json_each(?))`,
+    ).bind(JSON.stringify(ids)),
+    ...ids.map((messageId) =>
       env.DB.prepare(
         'DELETE FROM messages WHERE id = ? AND conversation_id = ?',
       ).bind(messageId, conversationId),
     ),
-  );
+  ]);
 
-  for (const item of media.results ?? []) {
-    try {
-      await env.MEDIA.delete(item.r2_key);
-    } catch (_) {}
-    await env.DB.prepare('DELETE FROM media_views WHERE media_id = ?')
-      .bind(item.id)
-      .run();
-    await env.DB.prepare('DELETE FROM media WHERE id = ?').bind(item.id).run();
+  const media = deletedMedia.results ?? [];
+  if (media.length > 0) {
+    // R2 first: a row without its object is unrecoverable, an orphan object is
+    // not (it expires with the bucket lifecycle).
+    for (const item of media) {
+      try {
+        await env.MEDIA.delete(item.r2_key);
+      } catch (_) {}
+    }
+    await env.DB.batch(media.flatMap((item) => [
+      env.DB.prepare('DELETE FROM media_views WHERE media_id = ?').bind(item.id),
+      env.DB.prepare('DELETE FROM media WHERE id = ?').bind(item.id),
+    ]));
   }
 
   const latest = await env.DB.prepare(

@@ -21,6 +21,34 @@ export async function resolveRequestDevice(
   return device ?? null;
 }
 
+/**
+ * Active device ids of two accounts, keyed by owner. One round trip for both
+ * sides of a conversation: sender-device sync and recipient fan-out need them
+ * together.
+ */
+export async function pairedActiveDeviceIds(
+  db: D1Database,
+  userId: string,
+  peerId: string,
+): Promise<{ own: number[]; peer: number[] }> {
+  const rows = await db
+    .prepare(
+      `SELECT id, user_id FROM devices
+       WHERE status = 'active' AND (user_id = ? OR user_id = ?)
+       ORDER BY id`,
+    )
+    .bind(userId, peerId)
+    .all<{ id: number; user_id: string }>();
+
+  const own: number[] = [];
+  const peer: number[] = [];
+  for (const row of rows.results ?? []) {
+    if (row.user_id === userId) own.push(row.id);
+    else peer.push(row.id);
+  }
+  return { own, peer };
+}
+
 /** All device ids of an account in the given statuses. */
 export async function deviceIdsFor(
   env: Env,

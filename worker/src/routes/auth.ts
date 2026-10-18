@@ -31,11 +31,7 @@ const loginSchema = z.object({
 });
 
 const googleAuthSchema = z.object({
-  idToken: z.string().optional(),
-  email: z.string().email().optional(),
-  googleId: z.string().optional(),
-  name: z.string().optional(),
-  photoUrl: z.string().optional(),
+  idToken: z.string().min(1),
 });
 
 authRouter.post(
@@ -313,36 +309,53 @@ const handleGoogleOAuth = async (request: IRequest, env: Env): Promise<Response>
     );
   }
 
-  const { idToken, email, googleId, name } = parsed.data;
-  let verifiedEmail = email?.toLowerCase();
-  let verifiedGoogleId = googleId;
-  let displayName = name;
-
-  if (idToken) {
-    try {
-      const res = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`);
-      if (res.ok) {
-        const tokenInfo = (await res.json()) as {
-          email?: string;
-          sub?: string;
-          name?: string;
-          email_verified?: string | boolean;
-        };
-        if (tokenInfo.email) verifiedEmail = tokenInfo.email.toLowerCase();
-        if (tokenInfo.sub) verifiedGoogleId = tokenInfo.sub;
-        if (tokenInfo.name && !displayName) displayName = tokenInfo.name;
-      }
-    } catch (err) {
-      console.error('Google tokeninfo fetch error:', err);
-    }
-  }
-
-  if (!verifiedEmail && !verifiedGoogleId) {
-    return new Response(JSON.stringify({ error: 'Missing verified Google credentials' }), {
-      status: 400,
+  const { idToken } = parsed.data;
+  if (!env.GOOGLE_OAUTH_CLIENT_ID) {
+    return new Response(JSON.stringify({ error: 'Google sign-in is not configured' }), {
+      status: 503,
       headers: { 'Content-Type': 'application/json' },
     });
   }
+
+  let tokenInfo: {
+    aud?: string;
+    email?: string;
+    sub?: string;
+    name?: string;
+    iss?: string;
+    email_verified?: string | boolean;
+  };
+  try {
+    const res = await fetch(
+      `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`,
+    );
+    if (!res.ok) throw new Error(`tokeninfo ${res.status}`);
+    tokenInfo = await res.json();
+  } catch (error) {
+    console.error('Google token verification failed', error);
+    return new Response(JSON.stringify({ error: 'Invalid Google ID token' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const verifiedEmail = tokenInfo.email?.toLowerCase();
+  const verifiedGoogleId = tokenInfo.sub;
+  const emailVerified = tokenInfo.email_verified === true || tokenInfo.email_verified === 'true';
+  const validIssuer = tokenInfo.iss === 'accounts.google.com' || tokenInfo.iss === 'https://accounts.google.com';
+  if (
+    tokenInfo.aud !== env.GOOGLE_OAUTH_CLIENT_ID ||
+    !validIssuer ||
+    !emailVerified ||
+    !verifiedEmail ||
+    !verifiedGoogleId
+  ) {
+    return new Response(JSON.stringify({ error: 'Invalid Google ID token' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+  const displayName = tokenInfo.name;
 
   const db = getDb(env);
 

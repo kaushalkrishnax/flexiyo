@@ -56,6 +56,7 @@ mediaRouter.post(
     const kindRaw = (url.searchParams.get('kind') ?? 'image');
     const viewPolicyRaw = (url.searchParams.get('viewPolicy') ?? 'unlimited');
     const durationMsRaw = url.searchParams.get('durationMs');
+    const plaintextMime = url.searchParams.get('mimeType');
     const kind: 'image' | 'voice' = kindRaw === 'voice' ? 'voice' : 'image';
     const viewPolicy: ViewPolicy =
       ['once', 'twice', 'unlimited'].includes(viewPolicyRaw)
@@ -108,11 +109,13 @@ mediaRouter.post(
     const now = Math.floor(Date.now() / 1000);
     const ttlDays = envNum(env, TTL_VAR, 14);
     const expiresAt = now + ttlDays * 86400;
-    const mimeType = kind === 'voice' ? 'audio/mp4' : 'image/jpeg';
+    const mimeType = plaintextMime && plaintextMime.length <= 100
+      ? plaintextMime
+      : 'application/octet-stream';
 
     try {
       await env.MEDIA.put(r2Key, arrayBuffer, {
-        httpMetadata: { contentType: mimeType },
+        httpMetadata: { contentType: 'application/octet-stream' },
         customMetadata: {
           conversationId,
           senderId: userId,

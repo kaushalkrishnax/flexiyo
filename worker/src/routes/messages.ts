@@ -21,30 +21,20 @@ const devicePayloadSchema = z.object({
   messageType: z.enum(['signal', 'prekey']).optional(),
 });
 
-const sendMessageSchema = z
-  .object({
-    id: z.string().uuid('Message ID must be a UUID'),
-    /** Legacy single-ciphertext contract (pre-multi-device clients). */
-    encryptedPayload: z.string().min(1).optional(),
-    /** Multi-device contract: one ciphertext per target device. */
-    payloads: z.array(devicePayloadSchema).min(1).max(10).optional(),
-    messageType: z.enum(['signal', 'prekey']),
-    recipientId: z.string().uuid('recipientId must be a valid UUID'),
-    replyToId: z.string().uuid().nullable().optional(),
-  })
-  .refine((d) => d.encryptedPayload !== undefined || d.payloads !== undefined, {
-    message: 'Either payloads[] (multi-device) or encryptedPayload (legacy) is required',
-  });
+const sendMessageSchema = z.object({
+  id: z.string().uuid('Message ID must be a UUID'),
+  payloads: z.array(devicePayloadSchema).min(1).max(10),
+  messageType: z.enum(['signal', 'prekey']),
+  recipientId: z.string().uuid('recipientId must be a valid UUID'),
+  mediaId: z.string().uuid('mediaId must be a valid UUID').nullable().optional(),
+  replyToId: z.string().uuid().nullable().optional(),
+});
 
 const editMessageSchema = z
   .object({
-    encryptedPayload: z.string().min(1).optional(),
-    payloads: z.array(devicePayloadSchema).min(1).max(10).optional(),
+    payloads: z.array(devicePayloadSchema).min(1).max(10),
     version: z.number().int().positive(),
     messageType: z.enum(['signal', 'prekey']),
-  })
-  .refine((d) => d.encryptedPayload !== undefined || d.payloads !== undefined, {
-    message: 'Either payloads[] or encryptedPayload is required',
   });
 
 const deleteForMeSchema = z.object({
@@ -56,9 +46,8 @@ function rowToResponse(row: MessageRow) {
     id: row.id,
     conversationId: row.conversation_id,
     senderId: row.sender_id,
-    // Prefer the ciphertext addressed to the requesting device; fall back to
-    // the legacy account-level column for pre-multi-device messages.
-    encryptedPayload: row.device_payload ?? row.encrypted_payload,
+    senderDeviceId: row.sender_device_id ?? null,
+    encryptedPayload: row.device_payload,
     messageType: row.device_message_type ?? row.message_type,
     replyToId: row.reply_to_id,
     version: row.version,
@@ -100,10 +89,15 @@ messagesRouter.get(
 
     const now = Math.floor(Date.now() / 1000);
 
-    // Resolve the requesting device so its per-device ciphertext is returned.
-    // Legacy clients without the header fall back to messages.encrypted_payload.
+    // Resolve the requesting device so only its ciphertext is returned.
     const requestDevice = await resolveRequestDevice(request, env, userId);
-    const myDeviceId = requestDevice?.id ?? -1;
+    if (!requestDevice) {
+      return new Response(JSON.stringify({ error: 'Device registration required' }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    const myDeviceId = requestDevice.id;
 
     let rows: D1Result<MessageRow>;
 
@@ -279,8 +273,7 @@ messagesRouter.post(
       );
     }
 
-    const { id: msgId, payloads, messageType, recipientId, replyToId } = parsed.data;
-    const legacyPayload = parsed.data.encryptedPayload;
+    const { id: msgId, payloads, messageType, recipientId, replyToId, mediaId } = parsed.data;
 
     // Validate recipientId is the other conversation participant
     if (recipientId !== expectedRecipient) {
@@ -288,6 +281,20 @@ messagesRouter.post(
         status: 400,
         headers: { 'Content-Type': 'application/json' },
       });
+    }
+
+    if (mediaId != null) {
+      const media = await env.DB.prepare(
+        `SELECT id FROM media WHERE id = ? AND conversation_id = ? AND sender_id = ?`,
+      )
+        .bind(mediaId, conversationId, userId)
+        .first<{ id: string }>();
+      if (!media) {
+        return new Response(JSON.stringify({ error: 'Invalid mediaId' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
     }
 
     const existingMessage = await env.DB.prepare(
@@ -319,6 +326,13 @@ messagesRouter.post(
     const expiresAt = null;
 
     const senderDevice = await resolveRequestDevice(request, env, userId);
+    if (!senderDevice) {
+      return new Response(JSON.stringify({ error: 'Device registration required' }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
     const recipientDeviceIds = (
       await env.DB.prepare(
         `SELECT id FROM devices WHERE user_id = ? AND status = 'active' ORDER BY id`,
@@ -326,83 +340,42 @@ messagesRouter.post(
         .bind(recipientId)
         .all<{ id: number }>()
     ).results.map((r) => r.id);
-    const senderOtherDeviceIds = senderDevice
-      ? (
-          await env.DB.prepare(
-            `SELECT id FROM devices WHERE user_id = ? AND status = 'active' AND id <> ?
-             ORDER BY id`,
-          )
-            .bind(userId, senderDevice.id)
-            .all<{ id: number }>()
-        ).results.map((r) => r.id)
-      : [];
+    if (recipientDeviceIds.length === 0) {
+      return new Response(
+        JSON.stringify({ error: "Recipient hasn't registered encryption keys yet." }),
+        { status: 409, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
 
-    let deliveryRows: Array<{
-      deviceId: number;
-      payload: string | null;
-      messageType: string;
-    }> = [];
-    let storedLegacyPayload: string | null = null;
-
-    if (payloads && payloads.length > 0) {
-      const allowed = new Set([...recipientDeviceIds, ...senderOtherDeviceIds]);
-      const addressed = new Set(payloads.map((p) => p.deviceId));
-      for (const p of payloads) {
-        if (!allowed.has(p.deviceId)) {
-          return new Response(
-            JSON.stringify({ error: 'unknown_device', deviceId: p.deviceId }),
-            { status: 400, headers: { 'Content-Type': 'application/json' } },
-          );
-        }
-      }
-      // Every ACTIVE recipient device must receive a ciphertext, otherwise
-      // sibling devices could never read the message.
-      const missing = recipientDeviceIds.filter((id) => !addressed.has(id));
-      if (missing.length > 0) {
+    const deliveryRows = payloads.map((p) => ({
+      deviceId: p.deviceId,
+      payload: p.ciphertext,
+      messageType: p.messageType ?? messageType,
+    }));
+    for (const p of payloads) {
+      if (!recipientDeviceIds.includes(p.deviceId)) {
         return new Response(
-          JSON.stringify({
-            error: 'missing_device_payloads',
-            missingDeviceIds: missing,
-          }),
-          { status: 409, headers: { 'Content-Type': 'application/json' } },
+          JSON.stringify({ error: 'unknown_device', deviceId: p.deviceId }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } },
         );
       }
-      deliveryRows = payloads.map((p) => ({
-        deviceId: p.deviceId,
-        payload: p.ciphertext,
-        messageType: p.messageType ?? messageType,
-      }));
-      // Degraded path: recipient has no registered devices, so there was
-      // nothing to address — keep a ciphertext on the message row so it is
-      // not lost (matches pre-multi-device behaviour).
-      if (recipientDeviceIds.length === 0) {
-        storedLegacyPayload = legacyPayload ?? payloads[0].ciphertext;
-      }
-    } else {
-      // Legacy contract: one ciphertext replicated to every recipient device
-      // and mirrored to messages.encrypted_payload for old readers.
-      storedLegacyPayload = legacyPayload ?? null;
-      deliveryRows = recipientDeviceIds.map((id) => ({
-        deviceId: id,
-        payload: storedLegacyPayload,
-        messageType,
-      }));
     }
 
     // sender_id always from JWT — never from client body
     await env.DB.prepare(
       `INSERT INTO messages
-        (id, conversation_id, sender_id, encrypted_payload, message_type, reply_to_id,
-         version, is_unsent, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`,
+        (id, conversation_id, sender_id, sender_device_id, message_type, reply_to_id,
+         media_id, version, is_unsent, created_at, expires_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`,
     )
       .bind(
         msgId,
         conversationId,
         userId,
-        storedLegacyPayload,
+        senderDevice?.id ?? null,
         messageType,
         replyToId ?? null,
+        mediaId ?? null,
         now,
         expiresAt,
       )
@@ -456,7 +429,6 @@ messagesRouter.post(
               payload: r.payload,
               messageType: r.messageType,
             })),
-            encryptedPayload: storedLegacyPayload,
             messageType,
             replyToId: replyToId ?? null,
             createdAt: now,
@@ -498,7 +470,8 @@ messagesRouter.post(
         id: msgId,
         conversationId,
         senderId: userId,
-        encryptedPayload: storedLegacyPayload,
+        senderDeviceId: senderDevice?.id ?? null,
+        encryptedPayload: deliveryRows.find((r) => r.deviceId === senderDevice?.id)?.payload ?? null,
         messageType,
         replyToId: replyToId ?? null,
         version: 1,
@@ -764,7 +737,6 @@ messagesRouter.patch(
     }
 
     const { payloads, version, messageType } = parsed.data;
-    const legacyPayload = parsed.data.encryptedPayload;
 
     // Optimistic concurrency: reject if stored version != client's version
     if (message.version !== version) {
@@ -788,75 +760,52 @@ messagesRouter.patch(
         .all<{ id: number }>()
     ).results.map((r) => r.id);
 
-    let storedLegacyPayload: string | null = legacyPayload ?? null;
-    let editRows: Array<{ deviceId: number; payload: string | null; messageType: string }> = [];
-
-    if (payloads && payloads.length > 0) {
-      const addressed = new Set(payloads.map((p) => p.deviceId));
-      const missing = recipientDeviceIds.filter((id) => !addressed.has(id));
-      if (missing.length > 0) {
-        return new Response(
-          JSON.stringify({ error: 'missing_device_payloads', missingDeviceIds: missing }),
-          { status: 409, headers: { 'Content-Type': 'application/json' } },
-        );
-      }
-      for (const p of payloads) {
-        const belongs =
-          recipientDeviceIds.includes(p.deviceId) ||
-          (await env.DB.prepare(
-            `SELECT 1 AS ok FROM devices
-             WHERE id = ? AND user_id = ? AND status = 'active'`,
-          )
-            .bind(p.deviceId, userId)
-            .first());
-        if (!belongs) {
-          return new Response(
-            JSON.stringify({ error: 'unknown_device', deviceId: p.deviceId }),
-            { status: 400, headers: { 'Content-Type': 'application/json' } },
-          );
-        }
-      }
-      storedLegacyPayload = null; // per-device ciphertexts are now authoritative
-      editRows = payloads.map((p) => ({
+    const editRows: Array<{ deviceId: number; payload: string; messageType: string }> =
+      payloads.map((p) => ({
         deviceId: p.deviceId,
         payload: p.ciphertext,
         messageType: p.messageType ?? messageType,
       }));
-    } else {
-      // Legacy single-payload edit: refresh every delivery row.
-      editRows = recipientDeviceIds.map((id) => ({
-        deviceId: id,
-        payload: storedLegacyPayload,
-        messageType,
-      }));
+
+    const addressed = new Set(payloads.map((p) => p.deviceId));
+    const missing = recipientDeviceIds.filter((id) => !addressed.has(id));
+    if (missing.length > 0) {
+      return new Response(
+        JSON.stringify({ error: 'missing_device_payloads', missingDeviceIds: missing }),
+        { status: 409, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    for (const p of payloads) {
+      const belongs =
+        recipientDeviceIds.includes(p.deviceId) ||
+        (await env.DB.prepare(
+          `SELECT 1 AS ok FROM devices
+            WHERE id = ? AND user_id = ? AND status = 'active'`,
+        )
+          .bind(p.deviceId, userId)
+          .first());
+      if (!belongs) {
+        return new Response(
+          JSON.stringify({ error: 'unknown_device', deviceId: p.deviceId }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
     }
 
     await env.DB.prepare(
-      `UPDATE messages
-       SET encrypted_payload = ?, message_type = ?, version = ?, edited_at = ?
-       WHERE id = ?`,
+      `UPDATE messages SET message_type = ?, version = ?, edited_at = ? WHERE id = ?`,
     )
-      .bind(storedLegacyPayload, messageType, newVersion, now, messageId)
+      .bind(messageType, newVersion, now, messageId)
       .run();
 
-    if (legacyPayload !== undefined) {
-      // Legacy edit path: one ciphertext overwrites all device rows.
-      await env.DB.prepare(
-        `UPDATE message_deliveries SET payload = ?, message_type = ?
-         WHERE message_id = ?`,
-      )
-        .bind(legacyPayload, messageType, messageId)
-        .run();
-    } else if (editRows.length > 0) {
-      await env.DB.batch(
-        editRows.map((row) =>
-          env.DB.prepare(
-            `UPDATE message_deliveries SET payload = ?, message_type = ?
-             WHERE message_id = ? AND recipient_device_id = ?`,
-          ).bind(row.payload, row.messageType, messageId, row.deviceId),
-        ),
-      );
-    }
+    await env.DB.batch(
+      editRows.map((row) =>
+        env.DB.prepare(
+          `UPDATE message_deliveries SET payload = ?, message_type = ?
+           WHERE message_id = ? AND recipient_device_id = ?`,
+        ).bind(row.payload, row.messageType, messageId, row.deviceId),
+      ),
+    );
 
     const doId = env.CHAT_ROOM.idFromName(conversationId);
     const stub = env.CHAT_ROOM.get(doId);
@@ -875,7 +824,6 @@ messagesRouter.patch(
               payload: r.payload,
               messageType: r.messageType,
             })),
-            encryptedPayload: storedLegacyPayload,
             messageType,
             version: newVersion,
             editedAt: now,
@@ -888,7 +836,7 @@ messagesRouter.patch(
         id: messageId,
         conversationId,
         senderId: userId,
-        encryptedPayload: storedLegacyPayload,
+        encryptedPayload: editRows.find((r) => r.deviceId === message.sender_device_id)?.payload ?? null,
         messageType,
         version: newVersion,
         editedAt: now,
@@ -957,27 +905,6 @@ messagesRouter.delete(
         status: 403,
         headers: { 'Content-Type': 'application/json' },
       });
-    }
-
-    // Purge attached media from storage right away. The media id travels
-    // with the request from the app because it lives inside the end-to-end
-    // encrypted payload, so the server cannot derive it from the message.
-    const mediaId = url.searchParams.get('mediaId');
-    if (mediaId) {
-      const media = await env.DB.prepare(
-        `SELECT id, r2_key FROM media WHERE id = ? AND conversation_id = ? AND sender_id = ?`,
-      )
-        .bind(mediaId, conversationId, userId)
-        .first<{ id: string; r2_key: string }>();
-      if (media) {
-        try {
-          await env.MEDIA.delete(media.r2_key);
-        } catch (_) {}
-        await env.DB.prepare('DELETE FROM media_views WHERE media_id = ?')
-          .bind(media.id)
-          .run();
-        await env.DB.prepare('DELETE FROM media WHERE id = ?').bind(media.id).run();
-      }
     }
 
     await deleteMessages(env, conversationId, [messageId]);

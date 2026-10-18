@@ -234,6 +234,7 @@ class MediaService {
         'conversationId': conversationId,
         'kind': kind.value,
         'viewPolicy': policy.value,
+        'mimeType': mimeType ?? sniffMime(bytes),
         if (durationMs != null) 'durationMs': '$durationMs',
       },
     );

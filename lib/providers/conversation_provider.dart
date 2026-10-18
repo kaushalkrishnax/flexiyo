@@ -191,6 +191,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
             try {
               final plaintext = await crypto.decryptFromUser(
                 senderId: msg.senderId,
+                senderDeviceId: msg.senderDeviceId!,
                 payload: msg.encryptedPayload!,
                 messageType: msg.messageType.name,
               );
@@ -312,8 +313,13 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     if (msgId == null) return;
 
     final senderId = event['senderId'] as String? ?? '';
-    final encryptedPayload = event['encryptedPayload'] as String? ?? '';
-    final messageType = event['messageType'] as String? ?? 'signal';
+    final payloads = event['payloads'] as List<dynamic>? ?? const [];
+    final target =
+        payloads.isEmpty ? null : payloads.first as Map<String, dynamic>;
+    final senderDeviceId =
+        target?['deviceId'] as int? ?? event['senderDeviceId'] as int?;
+    final encryptedPayload = target?['payload'] as String? ?? '';
+    final messageType = target?['messageType'] as String? ?? 'signal';
     final replyToId = event['replyToId'] as String?;
     final createdAtRaw = event['createdAt'];
     final expiresAtRaw = event['expiresAt'];
@@ -342,11 +348,12 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         final local = await crypto.getLocalMessageText(msgId);
         if (local != null) plaintext = local;
       } catch (_) {}
-    } else if (encryptedPayload.isNotEmpty) {
+    } else if (encryptedPayload.isNotEmpty && senderDeviceId != null) {
       try {
         final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
         plaintext = await crypto.decryptFromUser(
           senderId: senderId,
+          senderDeviceId: senderDeviceId,
           payload: encryptedPayload,
           messageType: messageType,
         );
@@ -362,6 +369,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       id: msgId,
       conversationId: conversationId,
       senderId: senderId,
+      senderDeviceId: senderDeviceId,
       encryptedPayload: encryptedPayload,
       decryptedText: plaintext,
       messageType: MessageType.values.firstWhere(
@@ -517,6 +525,10 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       for (final message in expired) {
         unawaited(_deleteSecureMessageText(message.id));
         unawaited(LocalDb.instance.deleteMessage(message.id));
+        final mediaId = message.mediaRef?.id;
+        if (mediaId != null) {
+          unawaited(_ref.read(mediaServiceProvider).purgeLocal(mediaId));
+        }
       }
     }
     _scheduleExpiryPurge();
@@ -526,8 +538,13 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     final msgId = event['messageId'] as String?;
     if (msgId == null) return;
 
-    final encryptedPayload = event['encryptedPayload'] as String? ?? '';
-    final messageType = event['messageType'] as String? ?? 'signal';
+    final payloads = event['payloads'] as List<dynamic>? ?? const [];
+    final target =
+        payloads.isEmpty ? null : payloads.first as Map<String, dynamic>;
+    final senderDeviceId =
+        target?['deviceId'] as int? ?? event['senderDeviceId'] as int?;
+    final encryptedPayload = target?['payload'] as String? ?? '';
+    final messageType = target?['messageType'] as String? ?? 'signal';
     final version = (event['version'] as int?) ?? 1;
     final editedAtRaw = event['editedAt'];
     DateTime? editedAt;
@@ -548,6 +565,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       try {
         plaintext = await crypto.decryptFromUser(
           senderId: original.senderId,
+          senderDeviceId: senderDeviceId ?? original.senderDeviceId!,
           payload: encryptedPayload,
           messageType: messageType,
         );
@@ -595,6 +613,11 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   void _onRemoteMessageDeleted(Map<String, dynamic> event) {
     final msgId = event['messageId'] as String?;
     if (msgId == null) return;
+    final mediaId = state.messages
+        .where((message) => message.id == msgId)
+        .firstOrNull
+        ?.mediaRef
+        ?.id;
 
     state = state.copyWith(
       messages: state.messages.where((message) => message.id != msgId).toList(),
@@ -602,6 +625,9 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     );
     unawaited(_deleteSecureMessageText(msgId));
     unawaited(LocalDb.instance.deleteMessage(msgId));
+    if (mediaId != null) {
+      unawaited(_ref.read(mediaServiceProvider).purgeLocal(mediaId));
+    }
   }
 
   void _onRemoteMessageReaction(Map<String, dynamic> event) {
@@ -700,9 +726,16 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       await _api.sendMessage(
         conversationId,
         recipientId: conv.otherUserId,
-        encryptedPayload: encrypted.payload,
+        payloads: [
+          {
+            'deviceId': encrypted.recipientDeviceId,
+            'ciphertext': encrypted.payload,
+            'messageType': encrypted.messageType,
+          },
+        ],
         messageType: encrypted.messageType,
         messageId: msgId,
+        mediaId: MediaRef.parse(text)?.id,
         replyToId: replyToId,
       );
 
@@ -771,6 +804,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       original.copyWith(
         decryptedText: newText,
         encryptedPayload: encrypted.payload,
+        senderDeviceId: encrypted.recipientDeviceId,
         isEdited: true,
         editedAt: now,
         version: original.version + 1,
@@ -783,7 +817,13 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       await _api.editMessage(
         conversationId,
         messageId,
-        encryptedPayload: encrypted.payload,
+        payloads: [
+          {
+            'deviceId': encrypted.recipientDeviceId,
+            'ciphertext': encrypted.payload,
+            'messageType': encrypted.messageType,
+          },
+        ],
         version: original.version,
         messageType: encrypted.messageType,
       );
@@ -814,7 +854,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     final mediaId = msg.mediaRef?.id;
 
     try {
-      await _api.unsendMessage(conversationId, messageId, mediaId: mediaId);
+      await _api.unsendMessage(conversationId, messageId);
       state = state.copyWith(
         messages:
             state.messages.where((message) => message.id != messageId).toList(),

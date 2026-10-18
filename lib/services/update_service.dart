@@ -27,7 +27,6 @@ const Duration _checkInterval = Duration(hours: 24);
 
 bool get _isAndroid =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
-bool get _isIOS => !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
 
 class UpdateService {
   UpdateService(this._api);
@@ -35,19 +34,18 @@ class UpdateService {
   final ApiService _api;
 
   Future<AppUpdateInfo?> checkForUpdates({bool ignoreThrottle = false}) async {
-    if (!_isAndroid && !_isIOS) return null;
+    if (!_isAndroid) return null;
 
     if (!ignoreThrottle && !await _shouldCheckNow()) return null;
 
     try {
       final version = await getCurrentVersion();
-      final arch = _isAndroid ? await getDeviceArchitecture() : '';
-      final platform = _isIOS ? 'ios' : 'android';
+      final arch = await getDeviceArchitecture();
 
       final data = await _api.checkForUpdate(
         version: version,
         arch: arch,
-        platform: platform,
+        platform: 'android',
       );
       final info = AppUpdateInfo.fromJson(data);
 
@@ -194,7 +192,7 @@ class UpdateService {
   }
 
   Future<String> getCurrentVersion() async {
-    if (!_isAndroid && !_isIOS) return '0.0.0';
+    if (!_isAndroid) return '0.0.0';
     try {
       return await _appUpdateChannel.invokeMethod<String>('getVersion') ??
           '0.0.0';

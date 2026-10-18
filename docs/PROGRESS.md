@@ -8,7 +8,7 @@ Flexiyo is a working end-to-end encrypted messenger. The Flutter client and the 
 
 - `flutter analyze` reports no issues and the Flutter test suite passes (widget, Signal store, server-response, and app-update coverage).
 - The Worker type-checks with `tsc --noEmit`, passes Vitest, and validates with `wrangler deploy --dry-run`.
-- Remote deployment is exercised through D1 migrations (`worker/migrations/0001`–`0004`), `bun run db:migrate:remote`, and `bun run deploy`.
+- Remote deployment is exercised through D1 migrations, `bun run db:migrate:remote`, and `bun run deploy`.
 
 ## Implemented areas
 
@@ -39,4 +39,4 @@ None — the tree builds and passes all checks. The open items above are planned
 
 ## Evidence
 
-Flutter: `flutter analyze` clean, `flutter test` 30/30. Worker: `bun run type-check`, `bun run test` 31/31, and `wrangler deploy --dry-run` all pass locally.
+Flutter: `flutter analyze` clean and the Flutter test suite passes. Worker: `bun run type-check`, `bun run test`, and `wrangler deploy --dry-run` pass locally.

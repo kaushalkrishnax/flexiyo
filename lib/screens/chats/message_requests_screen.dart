@@ -64,6 +64,7 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
               preview = await crypto.getLocalMessageText(message.id) ??
                   await crypto.decryptFromUser(
                     senderId: message.senderId,
+                    senderDeviceId: message.senderDeviceId!,
                     payload: message.encryptedPayload!,
                     messageType: message.messageType.name,
                   );

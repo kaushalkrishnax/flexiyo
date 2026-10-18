@@ -27,6 +27,8 @@ export interface Env {
   MEDIA_DAILY_DOWNLOAD_BYTES?: string;
   /** Max bytes for a single media upload. Default 25 MB. */
   MEDIA_MAX_UPLOAD_BYTES?: string;
+  /** OAuth client ID accepted for Google ID tokens. */
+  GOOGLE_OAUTH_CLIENT_ID?: string;
 }
 
 export type ViewPolicy = 'once' | 'twice' | 'unlimited';
@@ -44,6 +46,7 @@ export interface MediaRow {
   created_at: number;
   expires_at: number;
   consumed: number;
+  message_id?: string | null;
 }
 
 export interface MediaDto {
@@ -127,8 +130,7 @@ export interface MessageRow {
   id: string;
   conversation_id: string;
   sender_id: string;
-  /** Legacy single-payload column. NULL for new multi-device sends. */
-  encrypted_payload: string | null;
+  sender_device_id?: number | null;
   message_type: string;
   reply_to_id: string | null;
   version: number;
@@ -213,28 +215,15 @@ export interface DevicePayload {
 
 export interface SendMessageBody {
   id: string;
-  /**
-   * Preferred multi-device contract: one ciphertext per target device
-   * (recipient devices MUST all be covered; sender's other devices SHOULD be
-   * covered so they can render sent history).
-   */
-  payloads?: DevicePayload[];
-  /**
-   * Legacy single-payload contract (pre-multi-device clients). Accepted and
-   * replicated to every recipient device's delivery row; the column
-   * messages.encrypted_payload is also populated for old readers.
-   */
-  encryptedPayload?: string;
+  payloads: DevicePayload[];
   messageType: 'signal' | 'prekey';
   recipientId: string;
+  mediaId?: string | null;
   replyToId?: string | null;
 }
 
 export interface EditMessageBody {
-  /** Legacy single-payload edit (old clients). */
-  encryptedPayload?: string;
-  /** Preferred per-device edit payloads. */
-  payloads?: DevicePayload[];
+  payloads: DevicePayload[];
   messageType: 'signal' | 'prekey';
   version: number;
 }
@@ -288,6 +277,7 @@ export interface MessageResponse {
   id: string;
   conversationId: string;
   senderId: string;
+  senderDeviceId: number | null;
   encryptedPayload: string | null;
   messageType: string;
   replyToId: string | null;
@@ -315,8 +305,6 @@ export type DOEvent =
        * metadata-only event (encryptedPayload: null) and must refetch.
        */
       payloads: Array<{ deviceId: number; payload: string | null; messageType: string }>;
-      /** Legacy single payload for pre-multi-device clients / unattributed sends. */
-      encryptedPayload: string | null;
       messageType: string;
       replyToId: string | null;
       createdAt: number;
@@ -328,7 +316,6 @@ export type DOEvent =
       conversationId: string;
       recipients: string[];
       payloads: Array<{ deviceId: number; payload: string | null; messageType: string }>;
-      encryptedPayload: string | null;
       messageType: string;
       version: number;
       editedAt: number;

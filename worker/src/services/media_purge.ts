@@ -6,7 +6,7 @@ export async function purgeExpiredMedia(db: D1Database, env: Env): Promise<void>
 
   const expired = await db
     .prepare(
-      'SELECT id, r2_key FROM media WHERE expires_at < ? AND consumed = 0',
+      'SELECT id, r2_key FROM media WHERE expires_at < ?',
     )
     .bind(now)
     .all<{ id: string; r2_key: string }>();

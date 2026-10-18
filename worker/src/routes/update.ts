@@ -149,12 +149,15 @@ updateRouter.post(
       return json({ error: 'Invalid JSON body' }, 400);
     }
 
-    // `platform` is accepted for forward-compatibility; APK selection is by ABI.
-    const { version, arch } = (body ?? {}) as {
+    const { version, arch, platform } = (body ?? {}) as {
       version?: unknown;
       arch?: unknown;
       platform?: unknown;
     };
+
+    if (platform !== 'android') {
+      return json({ error: 'Updates are only supported on Android' }, 400);
+    }
 
     if (typeof version !== 'string' || version.trim().length === 0) {
       return json({ error: 'Version required' }, 400);

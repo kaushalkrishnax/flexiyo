@@ -85,17 +85,9 @@ class ApiService {
   }
 
   Future<Map<String, dynamic>> loginWithGoogle({
-    String? idToken,
-    String? email,
-    String? googleId,
-    String? name,
+    required String idToken,
   }) async {
-    return _post('/api/auth/google', {
-      if (idToken != null) 'idToken': idToken,
-      if (email != null) 'email': email,
-      if (googleId != null) 'googleId': googleId,
-      if (name != null) 'name': name,
-    });
+    return _post('/api/auth/google', {'idToken': idToken});
   }
 
   Future<Map<String, dynamic>> addOrUpdateEmail(String email) async {
@@ -275,17 +267,19 @@ class ApiService {
   Future<Map<String, dynamic>> sendMessage(
     String conversationId, {
     required String recipientId,
-    required String encryptedPayload,
+    required List<Map<String, dynamic>> payloads,
     required String messageType,
     required String messageId,
+    String? mediaId,
     int? expiresIn,
     String? replyToId,
   }) async {
     final body = <String, dynamic>{
       'id': messageId,
       'recipientId': recipientId,
-      'encryptedPayload': encryptedPayload,
+      'payloads': payloads,
       'messageType': messageType,
+      if (mediaId != null) 'mediaId': mediaId,
     };
     if (expiresIn != null && expiresIn > 0) body['expires_in'] = expiresIn;
     if (replyToId != null) body['replyToId'] = replyToId;
@@ -295,29 +289,23 @@ class ApiService {
   Future<void> editMessage(
     String conversationId,
     String messageId, {
-    required String encryptedPayload,
+    required List<Map<String, dynamic>> payloads,
     required int version,
     required String messageType,
   }) async {
     await _patch('/api/conversations/$conversationId/messages/$messageId', {
-      'encrypted_payload': encryptedPayload,
+      'payloads': payloads,
       'version': version,
       'message_type': messageType,
     });
   }
 
   /// Unsend (retract for everyone). Only the original sender may call this.
-  /// Pass [mediaId] when the message carried media so the server can delete
-  /// the file from storage immediately.
   Future<void> unsendMessage(
     String conversationId,
-    String messageId, {
-    String? mediaId,
-  }) async {
-    final query = mediaId == null || mediaId.isEmpty ? '' : '?mediaId=$mediaId';
-    await _delete(
-      '/api/conversations/$conversationId/messages/$messageId$query',
-    );
+    String messageId,
+  ) async {
+    await _delete('/api/conversations/$conversationId/messages/$messageId');
   }
 
   /// React to a message with an emoji (or toggles it off if same emoji is tapped).

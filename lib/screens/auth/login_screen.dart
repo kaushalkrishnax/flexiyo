@@ -118,6 +118,11 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   }
 
   Future<void> _handleGoogleResult(GoogleAuthResult googleResult) async {
+    final idToken = googleResult.idToken;
+    if (idToken == null || idToken.isEmpty) {
+      setState(() => _error = 'Google did not return a valid ID token.');
+      return;
+    }
     setState(() {
       _googleSubmitting = true;
       _error = null;
@@ -125,10 +130,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
     try {
       await ref.read(authProvider.notifier).loginWithGoogle(
-            idToken: googleResult.idToken,
-            email: googleResult.email,
-            googleId: googleResult.googleId,
-            name: googleResult.displayName,
+            idToken: idToken,
           );
 
       if (!mounted) return;

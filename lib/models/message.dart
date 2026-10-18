@@ -14,6 +14,7 @@ class Message {
     required this.id,
     required this.conversationId,
     required this.senderId,
+    this.senderDeviceId,
     required this.messageType,
     required this.version,
     required this.createdAt,
@@ -33,6 +34,7 @@ class Message {
   final String id;
   final String conversationId;
   final String senderId;
+  final int? senderDeviceId;
 
   final String? decryptedText;
   final String? encryptedPayload;
@@ -90,6 +92,7 @@ class Message {
       id: json['id'] as String,
       conversationId: json['conversationId'] as String? ?? '',
       senderId: json['senderId'] as String? ?? '',
+      senderDeviceId: json['senderDeviceId'] as int?,
       encryptedPayload: json['encryptedPayload'] as String?,
       messageType: MessageType.values.firstWhere(
         (e) => e.name == ((json['messageType'] as String?) ?? 'signal'),
@@ -119,6 +122,7 @@ class Message {
       id: json['id'] as String,
       conversationId: json['conversation_id'] as String,
       senderId: json['sender_id'] as String,
+      senderDeviceId: json['sender_device_id'] as int?,
       decryptedText: json['decrypted_text'] as String?,
       encryptedPayload: json['encrypted_payload'] as String?,
       messageType: MessageType.values.firstWhere(
@@ -160,6 +164,7 @@ class Message {
         'id': id,
         'conversation_id': conversationId,
         'sender_id': senderId,
+        if (senderDeviceId != null) 'sender_device_id': senderDeviceId,
         if (decryptedText != null) 'decrypted_text': decryptedText,
         if (encryptedPayload != null) 'encrypted_payload': encryptedPayload,
         'message_type': messageType.name,
@@ -180,6 +185,7 @@ class Message {
     String? id,
     String? conversationId,
     String? senderId,
+    int? senderDeviceId,
     String? decryptedText,
     String? encryptedPayload,
     MessageType? messageType,
@@ -202,6 +208,7 @@ class Message {
       id: id ?? this.id,
       conversationId: conversationId ?? this.conversationId,
       senderId: senderId ?? this.senderId,
+      senderDeviceId: senderDeviceId ?? this.senderDeviceId,
       decryptedText:
           clearDecryptedText ? null : (decryptedText ?? this.decryptedText),
       encryptedPayload: encryptedPayload ?? this.encryptedPayload,

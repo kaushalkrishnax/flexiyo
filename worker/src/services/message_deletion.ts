@@ -9,6 +9,13 @@ export async function deleteMessages(
   const ids = [...new Set(messageIds)];
   if (ids.length === 0) return;
 
+  const placeholders = ids.map(() => '?').join(', ');
+  const media = await env.DB.prepare(
+    `SELECT id, r2_key FROM media WHERE message_id IN (${placeholders})`,
+  )
+    .bind(...ids)
+    .all<{ id: string; r2_key: string }>();
+
   await env.DB.batch(
     ids.map((messageId) =>
       env.DB.prepare(
@@ -16,6 +23,16 @@ export async function deleteMessages(
       ).bind(messageId, conversationId),
     ),
   );
+
+  for (const item of media.results ?? []) {
+    try {
+      await env.MEDIA.delete(item.r2_key);
+    } catch (_) {}
+    await env.DB.prepare('DELETE FROM media_views WHERE media_id = ?')
+      .bind(item.id)
+      .run();
+    await env.DB.prepare('DELETE FROM media WHERE id = ?').bind(item.id).run();
+  }
 
   const latest = await env.DB.prepare(
     `SELECT MAX(created_at) AS last_message_at

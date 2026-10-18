@@ -8,7 +8,7 @@ import { generateId } from '../utils/crypto.js';
 export const devicesRouter = Router({ base: '/api/devices' });
 
 /** Maximum number of devices in ('active','pending') per account. */
-export const MAX_ACTIVE_DEVICES = 5;
+export const MAX_ACTIVE_DEVICES = 1;
 
 const preKeySchema = z.object({
   keyId: z.number().int().positive(),

@@ -150,10 +150,7 @@ class AuthController extends StateNotifier<AuthState> {
   }
 
   Future<void> loginWithGoogle({
-    String? idToken,
-    String? email,
-    String? googleId,
-    String? name,
+    required String idToken,
   }) async {
     state = state.copyWith(isLoading: true);
     try {
@@ -161,9 +158,6 @@ class AuthController extends StateNotifier<AuthState> {
           ApiService(_secureKeys, onServerRejected: invalidateSession);
       final result = await service.loginWithGoogle(
         idToken: idToken,
-        email: email,
-        googleId: googleId,
-        name: name,
       );
       final token = result['token'] as String?;
       final userMap = (result['user'] as Map<String, dynamic>?) ?? const {};
@@ -173,7 +167,7 @@ class AuthController extends StateNotifier<AuthState> {
 
       final user = userMap.containsKey('id')
           ? User.fromJson(userMap)
-          : User(id: 'google-user', username: email ?? 'Google User');
+          : const User(id: 'google-user', username: 'Google User');
 
       await _secureKeys.saveJwt(token);
       state = state.copyWith(

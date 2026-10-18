@@ -170,6 +170,12 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
   }
 
   Future<void> _handleGoogleResult(GoogleAuthResult googleResult) async {
+    final idToken = googleResult.idToken;
+    if (idToken == null || idToken.isEmpty) {
+      setState(
+          () => _usernameError = 'Google did not return a valid ID token.');
+      return;
+    }
     setState(() {
       _googleSubmitting = true;
       _usernameError = null;
@@ -177,10 +183,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
 
     try {
       await ref.read(authProvider.notifier).loginWithGoogle(
-            idToken: googleResult.idToken,
-            email: googleResult.email,
-            googleId: googleResult.googleId,
-            name: googleResult.displayName,
+            idToken: idToken,
           );
 
       if (!mounted) return;

@@ -9,10 +9,15 @@ import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
 import 'package:uuid/uuid.dart';
 
 class EncryptedPayload {
-  const EncryptedPayload({required this.payload, required this.messageType});
+  const EncryptedPayload({
+    required this.payload,
+    required this.messageType,
+    required this.recipientDeviceId,
+  });
 
   final String payload;
   final String messageType;
+  final int recipientDeviceId;
 }
 
 class SignalCryptoService {
@@ -136,13 +141,6 @@ class SignalCryptoService {
     };
   }
 
-  Future<int> _deviceId() async {
-    final stored = await _storage.readString(_store.storageKey('device.id'));
-    final parsed = int.tryParse(stored ?? '');
-    if (parsed != null && parsed > 0) return parsed;
-    return 1; // Legacy fallback for installations registered before this change.
-  }
-
   Future<String> _installationId() async {
     const key = 'flexiyo.installation_id';
     final existing = await _storage.readString(key);
@@ -186,9 +184,9 @@ class SignalCryptoService {
     String recipientId,
     String plaintext,
   ) async {
-    final address = SignalProtocolAddress(recipientId, await _deviceId());
+    final bundle = await _api.fetchKeyBundle(recipientId);
+    final address = SignalProtocolAddress(recipientId, bundle.deviceId);
     if (!await _store.containsSession(address)) {
-      final bundle = await _api.fetchKeyBundle(recipientId);
       await SessionBuilder.fromSignalStore(_store, address)
           .processPreKeyBundle(_toPreKeyBundle(bundle));
     }
@@ -201,15 +199,17 @@ class SignalCryptoService {
       messageType: ciphertext.getType() == CiphertextMessage.prekeyType
           ? 'prekey'
           : 'signal',
+      recipientDeviceId: bundle.deviceId,
     );
   }
 
   Future<String> decryptFromUser({
     required String senderId,
+    required int senderDeviceId,
     required String payload,
     required String messageType,
   }) async {
-    final address = SignalProtocolAddress(senderId, await _deviceId());
+    final address = SignalProtocolAddress(senderId, senderDeviceId);
     final bytes = Uint8List.fromList(base64Decode(payload));
     final cipher = SessionCipher.fromStore(_store, address);
     final plaintext = messageType == 'prekey'

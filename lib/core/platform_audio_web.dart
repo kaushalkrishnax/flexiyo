@@ -5,7 +5,7 @@ import 'package:dio/dio.dart';
 /// On web the recorder produces an in-memory blob; the returned value is a
 /// synthetic name and the real location arrives from `stop()` as a blob URL.
 Future<String> newVoiceRecordingPath() async =>
-    'voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+    'voice_${DateTime.now().millisecondsSinceEpoch}.wav';
 
 /// Reads a recorded blob URL into memory.
 Future<Uint8List> readAudioBytes(String path) async {

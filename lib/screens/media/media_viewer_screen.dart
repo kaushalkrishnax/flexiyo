@@ -1,7 +1,6 @@
 import 'dart:typed_data';
 
 import 'package:flexiyo/models/message.dart';
-import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/services/media_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -45,16 +44,9 @@ class _MediaViewerScreenState extends ConsumerState<MediaViewerScreen> {
       _expired = false;
     });
     try {
-      // View-limited recipient media is never cached on disk.
-      final myId = ref.read(authProvider).user?.id;
-      final isMine = myId != null && widget.message.senderId == myId;
-      final limited = !isMine && mediaRef.policy != ViewPolicy.unlimited;
-
-      final bytes = await ref.read(mediaServiceProvider).fetchAndDecrypt(
-            mediaRef,
-            useCache: !limited,
-            storeCache: !limited,
-          );
+      // The service skips the cache for view-limited recipient media.
+      final bytes =
+          await ref.read(mediaServiceProvider).fetchAndDecrypt(mediaRef);
       if (mounted) {
         setState(() {
           _bytes = bytes;

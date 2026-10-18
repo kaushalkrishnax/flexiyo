@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -286,24 +287,29 @@ class MediaService {
     );
 
     // Pre-seed the sender cache so their own bubble renders without a fetch.
-    try {
-      final cache =
-          await getCacheFile(mediaId, kind == MediaKind.voice ? 'm4a' : 'img');
-      await cache.writeAsBytes(bytes, flush: true);
-    } catch (_) {}
+    // View-limited media is never persisted locally.
+    if (policy == ViewPolicy.unlimited) {
+      try {
+        final cache = await getCacheFile(
+            mediaId, kind == MediaKind.voice ? 'm4a' : 'img');
+        await cache.writeAsBytes(bytes, flush: true);
+      } catch (_) {}
+    }
     return ref;
   }
 
-  /// Fetches, decrypts and (optionally) caches media. Pass `storeCache: false`
-  /// for view-limited recipient media — decrypted bytes must not persist.
+  /// Fetches, decrypts and (optionally) caches media. View-limited media is
+  /// never persisted: a stored plaintext would let the recipient reopen it
+  /// beyond the allowed count.
   Future<Uint8List> fetchAndDecrypt(
     MediaRef ref, {
     bool useCache = true,
     bool storeCache = true,
   }) async {
+    final persist = ref.policy == ViewPolicy.unlimited;
     final suffix = ref.kind == MediaKind.voice ? 'm4a' : 'img';
     final cache = await getCacheFile(ref.id, suffix);
-    if (useCache && await cache.exists()) {
+    if (persist && useCache && await cache.exists()) {
       final cached = await cache.readAsBytes();
       if (cached.isNotEmpty) return cached;
     }
@@ -319,6 +325,7 @@ class MediaService {
     ));
 
     List<int> raw;
+    var viewsRemaining = '';
     try {
       final resp = await dio.get<dynamic>(
         '${AppConstants.apiBaseUrl}/api/media/${ref.id}',
@@ -333,6 +340,7 @@ class MediaService {
       } else {
         throw Exception('Unexpected response data type: ${data.runtimeType}');
       }
+      viewsRemaining = resp.headers.value('x-media-views-remaining') ?? '';
     } on DioException catch (e) {
       final status = e.response?.statusCode;
       if (status == 410) throw MediaExpiredException();
@@ -352,8 +360,14 @@ class MediaService {
       mac: ref.mac,
     );
 
+    // Last allowed view served — make the server-side purge explicit once the
+    // recipient has seen the media as many times as the policy permits.
+    if (viewsRemaining == '0') {
+      unawaited(_notifyPurge(ref.id));
+    }
+
     try {
-      if (storeCache) {
+      if (persist && storeCache) {
         await cache.writeAsBytes(plaintext, flush: true);
       } else if (await cache.exists()) {
         await cache.delete();
@@ -362,13 +376,39 @@ class MediaService {
     return plaintext;
   }
 
-  /// Cached plaintext bytes, if any; never touches the network.
+  /// Cached plaintext bytes, if any; never touches the network. Always null for
+  /// view-limited media, which must not be replayed from disk.
   Future<Uint8List?> cachedBytes(MediaRef ref) async {
+    if (ref.policy != ViewPolicy.unlimited) return null;
     final suffix = ref.kind == MediaKind.voice ? 'm4a' : 'img';
     final cache = await getCacheFile(ref.id, suffix);
     if (!await cache.exists()) return null;
     final bytes = await cache.readAsBytes();
     return bytes.isEmpty ? null : bytes;
+  }
+
+  /// Drops any local plaintext for [mediaId]; used when a message is unsent.
+  Future<void> purgeLocal(String mediaId) async {
+    for (final suffix in const ['img', 'm4a']) {
+      try {
+        final cache = await getCacheFile(mediaId, suffix);
+        if (await cache.exists()) await cache.delete();
+      } catch (_) {}
+    }
+  }
+
+  /// Asks the Worker to remove the stored object immediately.
+  Future<void> _notifyPurge(String mediaId) async {
+    try {
+      final token = await _secureKeys.getJwt();
+      if (token == null) return;
+      final dio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 15),
+        headers: {'Authorization': 'Bearer $token'},
+      ));
+      await dio
+          .delete<dynamic>('${AppConstants.apiBaseUrl}/api/media/$mediaId');
+    } catch (_) {}
   }
 
   /// Decrypted media for players that consume a path; fetches if missing.

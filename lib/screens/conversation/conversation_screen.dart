@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flexiyo/core/platform_image_picker.dart';
 import 'package:flexiyo/models/message.dart';
 import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/providers/chat_provider.dart';
@@ -15,6 +16,7 @@ import 'package:flexiyo/widgets/message_bubble.dart';
 import 'package:flexiyo/widgets/skeleton.dart';
 import 'package:flexiyo/widgets/typing_indicator.dart';
 import 'package:flexiyo/widgets/voice_recorder_bar.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -250,9 +252,25 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
     }
   }
 
-  void _openCamera() {
+  Future<void> _openCamera() async {
     final conv =
         ref.read(conversationProvider(widget.conversationId)).conversation;
+    // The in-app camera prompts repeatedly on web (once per device plus init
+    // setup), so capture through a file input and review in the same screen.
+    if (kIsWeb) {
+      final bytes = await pickImageBytes(fromCamera: true);
+      if (bytes == null || !mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => CameraScreen(
+            conversationId: widget.conversationId,
+            initialImage: bytes,
+            otherUsername: conv?.otherUsername,
+          ),
+        ),
+      );
+      return;
+    }
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => CameraScreen(

@@ -5,12 +5,14 @@ import 'dart:typed_data';
 import 'package:web/web.dart' as web;
 
 /// Opens the browser's file chooser and resolves with the chosen image bytes,
-/// or null if the user cancels or the file can't be read.
-Future<Uint8List?> pickImageBytes() {
+/// or null if the user cancels or the file can't be read. With [fromCamera] the
+/// input hints a direct capture on devices that support it.
+Future<Uint8List?> pickImageBytes({bool fromCamera = false}) {
   final completer = Completer<Uint8List?>();
   final input = web.HTMLInputElement()
     ..type = 'file'
     ..accept = 'image/*';
+  if (fromCamera) input.setAttribute('capture', 'environment');
   input.style.display = 'none';
   web.document.body?.append(input);
 

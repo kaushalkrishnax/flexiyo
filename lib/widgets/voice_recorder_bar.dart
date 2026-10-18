@@ -80,27 +80,33 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar>
 
   Future<void> _start() async {
     try {
-      final allowed = await _recorder.hasPermission();
-      if (!allowed) {
-        _fail('Microphone permission is required for voice notes');
-        return;
+      // Web asks for the mic as part of `start()`; probing first prompts twice.
+      if (!kIsWeb) {
+        final allowed = await _recorder.hasPermission();
+        if (!allowed) {
+          _fail('Microphone permission is required for voice notes');
+          return;
+        }
       }
       final path = await newVoiceRecordingPath();
-      // Browsers differ in MediaRecorder codec support; fall back to Opus when
-      // AAC isn't available. Native platforms always support AAC-LC.
-      final encoder =
-          kIsWeb && !await _recorder.isEncoderSupported(AudioEncoder.aacLc)
-              ? AudioEncoder.opus
-              : AudioEncoder.aacLc;
-      _mimeType = encoder == AudioEncoder.opus ? 'audio/webm' : 'audio/mp4';
-      await _recorder.start(
-        RecordConfig(
-          encoder: encoder,
-          bitRate: 64000,
-          sampleRate: 44100,
-        ),
-        path: path,
-      );
+      // Web records PCM/WAV so the container self-describes the sample rate;
+      // native stays on AAC-LC in MP4.
+      final config = kIsWeb
+          ? const RecordConfig(
+              encoder: AudioEncoder.wav,
+              sampleRate: 16000,
+              numChannels: 1,
+              autoGain: true,
+              echoCancel: true,
+              noiseSuppress: true,
+            )
+          : const RecordConfig(
+              encoder: AudioEncoder.aacLc,
+              bitRate: 64000,
+              sampleRate: 44100,
+            );
+      _mimeType = kIsWeb ? 'audio/wav' : 'audio/mp4';
+      await _recorder.start(config, path: path);
       _filePath = path;
       _stopwatch
         ..reset()

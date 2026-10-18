@@ -1,6 +1,7 @@
 import { IRequest, Router } from 'itty-router';
 import type { Env, AuthenticatedRequest, MediaDto, MediaRow, ViewPolicy } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { decideView } from '../services/mediaViews.js';
 import { generateId } from '../utils/crypto.js';
 import { getConversationForMember } from './conversations.js';
 
@@ -31,6 +32,16 @@ function envNum(env: Env, name: MediaEnvVar, fallback: number): number {
 function utcDayKey(): string {
   const d = new Date();
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+/** Removes the stored object and leaves a consumed tombstone behind. */
+async function consume(env: Env, mediaId: string, r2Key: string): Promise<void> {
+  try {
+    await env.MEDIA.delete(r2Key);
+  } catch (_) {}
+  await env.DB.prepare('UPDATE media SET consumed = 1 WHERE id = ?')
+    .bind(mediaId)
+    .run();
 }
 
 mediaRouter.post(
@@ -182,21 +193,16 @@ mediaRouter.get(
 
     // View-once / view-twice enforcement (non-sender).
     let isFinalView = false;
+    let viewsRemaining: number | null = null;
     if (!isSender && media.view_policy !== 'unlimited') {
-      const limit = media.view_policy === 'once' ? 1 : 2;
       const existing = await env.DB.prepare(
         'SELECT count FROM media_views WHERE media_id = ? AND user_id = ?',
       )
         .bind(mediaId, userId)
         .first<{ count: number }>();
-      const count = existing?.count ?? 0;
-      if (count >= limit) {
-        try {
-          await env.MEDIA.delete(media.r2_key);
-        } catch (_) {}
-        await env.DB.prepare('UPDATE media SET consumed = 1 WHERE id = ?')
-          .bind(mediaId)
-          .run();
+      const decision = decideView(media.view_policy, existing?.count ?? 0);
+      if (!decision.allowed) {
+        await consume(env, mediaId, media.r2_key);
         return new Response(JSON.stringify({ error: 'View limit reached' }), {
           status: 410,
           headers: { 'Content-Type': 'application/json' },
@@ -209,7 +215,8 @@ mediaRouter.get(
       )
         .bind(mediaId, userId, now)
         .run();
-      isFinalView = count + 1 >= limit;
+      isFinalView = decision.final;
+      viewsRemaining = decision.remaining;
     }
 
     const downloadCap = envNum(env, DOWNLOAD_CAP_VAR, 200 * 1024 * 1024);
@@ -240,9 +247,7 @@ mediaRouter.get(
       object = null;
     }
     if (!object) {
-      await env.DB.prepare('UPDATE media SET consumed = 1 WHERE id = ?')
-        .bind(mediaId)
-        .run();
+      await consume(env, mediaId, media.r2_key);
       return new Response(JSON.stringify({ error: 'Media object unavailable' }), {
         status: 410,
         headers: { 'Content-Type': 'application/json' },
@@ -254,20 +259,62 @@ mediaRouter.get(
     if (isFinalView) {
       // Last allowed view served — purge the object now so nothing remains
       // in storage even if the app never fetches it again.
-      try {
-        await env.MEDIA.delete(media.r2_key);
-      } catch (_) {}
-      await env.DB.prepare('UPDATE media SET consumed = 1 WHERE id = ?')
-        .bind(mediaId)
+      await consume(env, mediaId, media.r2_key);
+    }
+    const headers: Record<string, string> = {
+      'Content-Type': r2Body.httpMetadata?.contentType ?? 'application/octet-stream',
+      'Content-Length': String(r2Body.size ?? 0),
+      // Limited media must not be served from an HTTP cache: a cached body
+      // would hand out extra views without the counter moving.
+      'Cache-Control': media.view_policy === 'unlimited'
+        ? 'private, max-age=60'
+        : 'private, no-store',
+    };
+    if (viewsRemaining !== null) {
+      headers['X-Media-Views-Remaining'] = String(viewsRemaining);
+    }
+    return new Response(payload, { status: 200, headers });
+  },
+);
+
+// Explicit purge so a client that has used up every allowed view (or unsends a
+// message) can make the object disappear immediately instead of waiting for the
+// TTL sweep. Members only; idempotent.
+mediaRouter.delete(
+  '/media/:id',
+  (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
+  async (request: IRequest, env: Env): Promise<Response> => {
+    const authReq = request as unknown as AuthenticatedRequest;
+    const userId = authReq.user.sub;
+    const { id: mediaId } = request.params as { id: string };
+
+    const media = await env.DB.prepare(
+      'SELECT id, conversation_id, r2_key FROM media WHERE id = ?',
+    )
+      .bind(mediaId)
+      .first<{ id: string; conversation_id: string; r2_key: string }>();
+
+    if (media) {
+      const conv = await getConversationForMember(
+        media.conversation_id,
+        userId,
+        env.DB,
+      );
+      if (!conv) {
+        return new Response(JSON.stringify({ error: 'Not a conversation participant' }), {
+          status: 403,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      await consume(env, media.id, media.r2_key);
+      await env.DB.prepare('DELETE FROM media_views WHERE media_id = ?')
+        .bind(media.id)
         .run();
     }
-    return new Response(payload, {
+
+    return new Response(JSON.stringify({ purged: true }), {
       status: 200,
-      headers: {
-        'Content-Type': r2Body.httpMetadata?.contentType ?? 'application/octet-stream',
-        'Content-Length': String(r2Body.size ?? 0),
-        'Cache-Control': 'private, max-age=60',
-      },
+      headers: { 'Content-Type': 'application/json' },
     });
   },
 );

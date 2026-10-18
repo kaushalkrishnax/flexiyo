@@ -822,6 +822,9 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       );
       await _deleteSecureMessageText(messageId);
       await LocalDb.instance.deleteMessage(messageId);
+      if (mediaId != null) {
+        await _ref.read(mediaServiceProvider).purgeLocal(mediaId);
+      }
     } catch (e) {
       if (mounted) state = state.copyWith(error: 'Unsend failed: $e');
     }

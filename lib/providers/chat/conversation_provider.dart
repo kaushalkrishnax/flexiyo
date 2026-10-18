@@ -8,6 +8,7 @@ import 'package:flexiyo/providers/chat/chat_provider.dart';
 import 'package:flexiyo/providers/signal_crypto_provider.dart';
 import 'package:flexiyo/services/api_service.dart';
 import 'package:flexiyo/services/media/media_service.dart';
+import 'package:flexiyo/services/signal/signal_crypto_service.dart';
 import 'package:flexiyo/services/ws_service.dart';
 import 'package:flexiyo/storage/local_db.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -183,30 +184,11 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
       for (final msg in messages) {
         Message hydrated;
-        if (msg.isUnsent || msg.encryptedPayload == null) {
+        try {
+          hydrated = await _hydrateFromServer(msg, crypto, cachedById);
+        } catch (_) {
+          // One bad row must never discard the rest of the batch.
           hydrated = msg;
-        } else {
-          final localText = cachedById[msg.id]?.decryptedText ??
-              await crypto.getLocalMessageText(msg.id);
-          if (localText != null) {
-            hydrated = msg.copyWith(decryptedText: localText);
-          } else if (msg.senderId == _myUserId) {
-            final ownText = await crypto.getLocalMessageText(msg.id);
-            hydrated = msg.copyWith(decryptedText: ownText);
-          } else {
-            try {
-              final plaintext = await crypto.decryptFromUser(
-                senderId: msg.senderId,
-                senderDeviceId: msg.senderDeviceId!,
-                payload: msg.encryptedPayload!,
-                messageType: msg.messageType.name,
-              );
-              await crypto.saveLocalMessageText(msg.id, plaintext);
-              hydrated = msg.copyWith(decryptedText: plaintext);
-            } catch (_) {
-              hydrated = msg;
-            }
-          }
         }
 
         final existingIndex =
@@ -216,7 +198,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         } else {
           hydratedMessages[existingIndex] = hydrated;
         }
-        await LocalDb.instance.upsertMessage(hydrated.toJson());
+        await _cacheMessage(hydrated);
       }
 
       hydratedMessages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
@@ -249,6 +231,50 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     final states = await LocalDb.instance.getChatStates();
     final row = states[conversationId];
     return row != null && (row['is_restricted'] as int? ?? 0) == 1;
+  }
+
+  /// Best-effort local write; a failed cache row must never block rendering,
+  /// delivery acks, or read receipts.
+  Future<void> _cacheMessage(Message message) async {
+    try {
+      await LocalDb.instance.upsertMessage(message.toJson());
+    } catch (_) {}
+  }
+
+  /// Resolves the renderable copy of a server row: locally stored plaintext
+  /// when available, otherwise a fresh decrypt.
+  Future<Message> _hydrateFromServer(
+    Message msg,
+    SignalCryptoService crypto,
+    Map<String, Message> cachedById,
+  ) async {
+    if (msg.isUnsent) return msg;
+
+    // The server keeps no ciphertext for messages I sent, so fall back to the
+    // locally stored text instead of clobbering it.
+    if (msg.encryptedPayload == null) {
+      final localText = cachedById[msg.id]?.decryptedText ??
+          await crypto.getLocalMessageText(msg.id);
+      return localText == null ? msg : msg.copyWith(decryptedText: localText);
+    }
+
+    final localText = cachedById[msg.id]?.decryptedText ??
+        await crypto.getLocalMessageText(msg.id);
+    if (localText != null) return msg.copyWith(decryptedText: localText);
+    if (msg.senderId == _myUserId) return msg;
+
+    try {
+      final plaintext = await crypto.decryptFromUser(
+        senderId: msg.senderId,
+        senderDeviceId: msg.senderDeviceId!,
+        payload: msg.encryptedPayload!,
+        messageType: msg.messageType.name,
+      );
+      await crypto.saveLocalMessageText(msg.id, plaintext);
+      return msg.copyWith(decryptedText: plaintext);
+    } catch (_) {
+      return msg;
+    }
   }
 
   Future<void> _connectWs() async {
@@ -405,7 +431,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     );
 
     _upsertMessage(msg);
-    await LocalDb.instance.upsertMessage(msg.toJson());
+    await _cacheMessage(msg);
     _scheduleExpiryPurge();
 
     // Only acknowledge delivery once the payload is durably stored and, for
@@ -483,7 +509,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       if (message.senderId == _myUserId &&
           message.readAt == readAt &&
           expiresAt != null) {
-        unawaited(LocalDb.instance.upsertMessage(message.toJson()));
+        unawaited(_cacheMessage(message));
       }
     }
     _purgeExpiredMessages();
@@ -515,7 +541,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       state = state.copyWith(messages: updated);
       for (final message in updated) {
         if (message.senderId != _myUserId && message.expiresAt == expiresAt) {
-          unawaited(LocalDb.instance.upsertMessage(message.toJson()));
+          unawaited(_cacheMessage(message));
         }
       }
       _purgeExpiredMessages();
@@ -746,7 +772,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     );
 
     _upsertMessage(optimistic);
-    await LocalDb.instance.upsertMessage(optimistic.toJson());
+    await _cacheMessage(optimistic);
     state = state.copyWith(clearReplyTo: true);
 
     // Update chats list preview.

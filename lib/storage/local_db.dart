@@ -12,12 +12,27 @@ class LocalDb {
 
   Database? _db;
 
+  /// Overrides the on-disk path so tests can run against a temp database.
+  @visibleForTesting
+  String? debugDatabasePath;
+
+  /// Closes the cached handle so tests can reopen a different database.
+  @visibleForTesting
+  Future<void> resetForTesting() async {
+    final database = _db;
+    _db = null;
+    if (database != null) await database.close();
+  }
+
   Future<Database> get db async {
     final current = _db;
     if (current != null) return current;
 
     final String path;
-    if (kIsWeb) {
+    final overridePath = debugDatabasePath;
+    if (overridePath != null) {
+      path = overridePath;
+    } else if (kIsWeb) {
       databaseFactory = databaseFactoryFfiWeb;
       path = 'flexiyo.db';
     } else {
@@ -27,7 +42,7 @@ class LocalDb {
 
     final database = await openDatabase(
       path,
-      version: 7,
+      version: 8,
       onCreate: _createSchema,
       onUpgrade: _onUpgrade,
     );
@@ -46,6 +61,7 @@ class LocalDb {
         id TEXT PRIMARY KEY,
         conversation_id TEXT NOT NULL,
         sender_id TEXT NOT NULL,
+        sender_device_id INTEGER,
         encrypted_payload TEXT,
         decrypted_text TEXT,
         message_type TEXT NOT NULL DEFAULT 'signal',
@@ -200,6 +216,13 @@ class LocalDb {
         where: 'last_message_preview = ?',
         whereArgs: ['Message unsent'],
       );
+    }
+    if (oldVersion < 8) {
+      try {
+        await database.execute(
+          'ALTER TABLE messages ADD COLUMN sender_device_id INTEGER;',
+        );
+      } catch (_) {}
     }
   }
 

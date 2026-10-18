@@ -52,6 +52,39 @@ async function getConversationForMember(
   return conv ?? null;
 }
 
+export interface ConversationAccessRow extends ConversationRow {
+  /** Two-way block state, resolved in the same read as membership. */
+  is_blocked: number;
+}
+
+/**
+ * Membership and block state from one conversation read. Saves the follow-up
+ * `user_blocks` round trip on the send and read paths.
+ */
+export async function getConversationAccess(
+  conversationId: string,
+  userId: string,
+  db: D1Database,
+): Promise<ConversationAccessRow | null> {
+  const conv = await db
+    .prepare(
+      `SELECT c.*,
+         EXISTS (
+           SELECT 1 FROM user_blocks ub
+           WHERE (ub.blocker_id = ? AND ub.blocked_id =
+                   CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END)
+              OR (ub.blocker_id =
+                   CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END
+                  AND ub.blocked_id = ?)
+         ) AS is_blocked
+       FROM conversations c
+       WHERE c.id = ? AND (c.user_a_id = ? OR c.user_b_id = ?)`,
+    )
+    .bind(userId, userId, userId, userId, conversationId, userId, userId)
+    .first<ConversationAccessRow>();
+  return conv ?? null;
+}
+
 conversationsRouter.post(
   '/',
   (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),

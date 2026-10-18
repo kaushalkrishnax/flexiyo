@@ -1,31 +1,87 @@
 import type { Env, DOEvent } from '../types.js';
 import { verifyJWT } from '../utils/jwt.js';
 import { notifyInboxes } from '../services/inbox.js';
+import { pairedActiveDeviceIds } from '../middleware/device.js';
 import type { JWTPayload } from '../types.js';
 
-interface Session {
-  id: string;
+/**
+ * Per-socket state. Kept serialized on the WebSocket itself so identity,
+ * device routing and typing throttling survive hibernation and the in-memory
+ * object being thrown away.
+ */
+interface SessionState {
+  sessionId: string;
   userId: string;
   deviceId: number | null;
-  ws: WebSocket;
+  connectedAt: number;
   typingCount: number;
   typingWindowStart: number;
+}
+
+interface Session extends SessionState {
+  ws: WebSocket;
+}
+
+interface ConversationGateRow {
+  user_a_id: string;
+  user_b_id: string;
+  request_status: string;
+  initiated_by_id: string | null;
+  is_blocked: number;
+  message_exists: number;
+  message_owned: number;
 }
 
 const MAX_FRAME_BYTES = 64 * 1024;
 const MAX_TYPING_PER_WINDOW = 20;
 const TYPING_WINDOW_MS = 10_000;
 const MAX_SESSIONS_PER_USER = 8;
+const SOCKET_OPEN = 1;
+
+/**
+ * Exact heartbeat frame the Flutter client sends. Matched by the runtime's
+ * auto-response so a hibernating object is not woken just to echo a pong.
+ */
+const PING_FRAME = '{"type":"ping"}';
+const PONG_FRAME = '{"type":"pong"}';
+
+/**
+ * Membership, request state, block state and the idempotency probe in a single
+ * round trip. Binds: userId ×4 (block + recipient CASE), messageId, messageId,
+ * userId, conversationId, conversationId, userId ×2 (membership).
+ */
+const CONVERSATION_GATE_SQL = `
+  SELECT
+    c.user_a_id,
+    c.user_b_id,
+    c.request_status,
+    c.initiated_by_id,
+    EXISTS (
+      SELECT 1 FROM user_blocks ub
+      WHERE (ub.blocker_id = ? AND ub.blocked_id =
+              CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END)
+         OR (ub.blocker_id =
+              CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END
+             AND ub.blocked_id = ?)
+    ) AS is_blocked,
+    EXISTS (SELECT 1 FROM messages m WHERE m.id = ?) AS message_exists,
+    EXISTS (
+      SELECT 1 FROM messages m
+      WHERE m.id = ? AND m.sender_id = ? AND m.conversation_id = ?
+    ) AS message_owned
+  FROM conversations c
+  WHERE c.id = ? AND (c.user_a_id = ? OR c.user_b_id = ?)`;
 
 export class ChatRoom {
-  private sessions: Map<string, Session> = new Map();
-  private userSessions: Map<string, Set<string>> = new Map();
-
+  private state: DurableObjectState;
   private env: Env;
 
-  constructor(_state: DurableObjectState, env: Env) {
-    void _state;
+  constructor(state: DurableObjectState, env: Env) {
+    this.state = state;
     this.env = env;
+    state.setWebSocketAutoResponse(
+      new WebSocketRequestResponsePair(PING_FRAME, PONG_FRAME),
+    );
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -108,80 +164,138 @@ export class ChatRoom {
       deviceId = row.id;
     }
 
-    // Cap concurrent sessions per user to prevent connection leaks.
-    const existing = this.userSessions.get(userId);
-    if (existing && existing.size >= MAX_SESSIONS_PER_USER) {
-      // Drop the oldest session for this user.
-      const oldestId = existing.values().next().value;
-      if (oldestId) {
-        const old = this.sessions.get(oldestId);
-        if (old) {
-          try {
-            old.ws.close(1000, 'Session limit reached');
-          } catch {
-            // ignore
-          }
-          this.removeSession(oldestId);
-        }
-      }
+    // Cap concurrent sessions per user to prevent connection leaks. Counting
+    // attached sockets (not in-memory bookkeeping) keeps the cap effective
+    // across hibernation.
+    const existing = this.state.getWebSockets(userId);
+    if (existing.length >= MAX_SESSIONS_PER_USER) {
+      this.closeOldest(existing);
     }
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
 
-    server.accept();
-
-    const sessionId = crypto.randomUUID();
-    const session: Session = {
-      id: sessionId,
+    const now = Date.now();
+    const session: SessionState = {
+      sessionId: crypto.randomUUID(),
       userId,
       deviceId,
-      ws: server,
+      connectedAt: now,
       typingCount: 0,
-      typingWindowStart: Date.now(),
+      typingWindowStart: now,
     };
 
-    this.sessions.set(sessionId, session);
-    if (!this.userSessions.has(userId)) {
-      this.userSessions.set(userId, new Set());
-    }
-    this.userSessions.get(userId)!.add(sessionId);
-
-    server.addEventListener('message', (event: MessageEvent) => {
-      const data = event.data;
-      if (typeof data === 'string' && data.length > MAX_FRAME_BYTES) {
-        try {
-          server.close(1009, 'Frame too large');
-        } catch {
-          // ignore
-        }
-        this.removeSession(sessionId);
-        return;
-      }
-      this.handleClientMessage(sessionId, data as string);
-    });
-
-    // Only remove THIS session on close/error, never a newer one.
-    server.addEventListener('close', () => {
-      this.removeSession(sessionId);
-    });
-    server.addEventListener('error', () => {
-      this.removeSession(sessionId);
-    });
-
+    this.state.acceptWebSocket(server, [userId]);
+    server.serializeAttachment(session);
     server.send(JSON.stringify({ type: 'connected', userId }));
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  private removeSession(sessionId: string): void {
-    const session = this.sessions.get(sessionId);
+  /** Hibernation-safe: identity and routing come from the socket attachment. */
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (typeof message !== 'string') {
+      this.sendFrame(ws, JSON.stringify({ type: 'error', code: 'invalid_json' }));
+      return;
+    }
+    if (message.length > MAX_FRAME_BYTES) {
+      this.closeSocket(ws, 1009, 'Frame too large');
+      return;
+    }
+
+    const session = this.sessionFrom(ws);
     if (!session) return;
-    this.sessions.delete(sessionId);
-    const set = this.userSessions.get(session.userId);
-    if (set) {
-      set.delete(sessionId);
-      if (set.size === 0) this.userSessions.delete(session.userId);
+
+    await this.handleClientMessage(session, message);
+  }
+
+  async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
+    // Sessions live on the socket itself, so cleanup is idempotent and can
+    // never tear down a newer connection for the same user.
+    try {
+      ws.close(code, reason);
+    } catch {
+      // ignore
+    }
+  }
+
+  async webSocketError(ws: WebSocket): Promise<void> {
+    try {
+      ws.close(1011, 'Socket error');
+    } catch {
+      // ignore
+    }
+  }
+
+  private readMeta(ws: WebSocket): SessionState | null {
+    const meta = ws.deserializeAttachment() as Partial<SessionState> | null;
+    if (!meta || typeof meta.userId !== 'string' || typeof meta.sessionId !== 'string') {
+      return null;
+    }
+    return {
+      sessionId: meta.sessionId,
+      userId: meta.userId,
+      deviceId: typeof meta.deviceId === 'number' ? meta.deviceId : null,
+      connectedAt: typeof meta.connectedAt === 'number' ? meta.connectedAt : 0,
+      typingCount: typeof meta.typingCount === 'number' ? meta.typingCount : 0,
+      typingWindowStart: typeof meta.typingWindowStart === 'number' ? meta.typingWindowStart : 0,
+    };
+  }
+
+  private sessionFrom(ws: WebSocket): Session | null {
+    const meta = this.readMeta(ws);
+    if (!meta) {
+      // Accepted by an earlier build (pre-hibernation) or a corrupt
+      // attachment — make the client reconnect and re-authenticate.
+      this.closeSocket(ws, 1008, 'Session state unavailable');
+      return null;
+    }
+    return { ...meta, ws };
+  }
+
+  private persistSession(session: Session): void {
+    try {
+      session.ws.serializeAttachment({
+        sessionId: session.sessionId,
+        userId: session.userId,
+        deviceId: session.deviceId,
+        connectedAt: session.connectedAt,
+        typingCount: session.typingCount,
+        typingWindowStart: session.typingWindowStart,
+      } satisfies SessionState);
+    } catch {
+      // ignore
+    }
+  }
+
+  private closeOldest(sockets: WebSocket[]): void {
+    let oldest: WebSocket | null = null;
+    let oldestAt = Number.POSITIVE_INFINITY;
+    for (const ws of sockets) {
+      const at = this.readMeta(ws)?.connectedAt ?? 0;
+      if (at < oldestAt) {
+        oldestAt = at;
+        oldest = ws;
+      }
+    }
+    if (oldest) this.closeSocket(oldest, 1000, 'Session limit reached');
+  }
+
+  private sendFrame(ws: WebSocket, frame: string): boolean {
+    if (ws.readyState > SOCKET_OPEN) return false;
+    try {
+      ws.send(frame);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private closeSocket(ws: WebSocket, code: number, reason: string): void {
+    try {
+      ws.close(code, reason);
+    } catch {
+      // ignore
     }
   }
 
@@ -209,49 +323,58 @@ export class ChatRoom {
     });
   }
 
-  /** Returns the number of sessions that received the event. */
+  /**
+   * Returns the number of sessions that received the event. Each session gets
+   * only the ciphertext addressed to its own device, so a socket can never
+   * observe payloads intended for another device.
+   */
   broadcast(event: DOEvent): number {
-    const message = JSON.stringify(event);
-    const dead: string[] = [];
+    const payloads = (event as {
+      payloads?: Array<{ deviceId: number; payload: string | null; messageType: string }>;
+    }).payloads;
+    const legacyFrame = payloads ? null : JSON.stringify(event);
+    const frames = new Map<string, string>();
+
     let count = 0;
+    for (const ws of this.state.getWebSockets()) {
+      const meta = this.readMeta(ws);
+      if (!meta) continue;
 
-    for (const session of this.sessions.values()) {
-      try {
-        session.ws.send(message);
-        count++;
-      } catch {
-        dead.push(session.id);
+      let frame = legacyFrame;
+      if (frame === null) {
+        const key = meta.deviceId === null ? 'none' : String(meta.deviceId);
+        const cached = frames.get(key);
+        if (cached === undefined) {
+          frame = JSON.stringify({
+            ...event,
+            payloads: payloads!.filter((p) => p.deviceId === meta.deviceId),
+          });
+          frames.set(key, frame);
+        } else {
+          frame = cached;
+        }
       }
-    }
 
-    for (const id of dead) {
-      this.removeSession(id);
+      if (this.sendFrame(ws, frame)) count++;
     }
 
     return count;
   }
 
-  private handleClientMessage(sessionId: string, data: string): void {
-    const session = this.sessions.get(sessionId);
-    if (!session) return;
-
+  private async handleClientMessage(session: Session, data: string): Promise<void> {
     let msg: { type?: string; messageId?: string; requestId?: string } | null = null;
     try {
       msg = JSON.parse(data) as { type?: string; messageId?: string; requestId?: string };
     } catch {
-      try {
-        session.ws.send(JSON.stringify({ type: 'error', code: 'invalid_json' }));
-      } catch {
-        // ignore
-      }
+      this.sendFrame(session.ws, JSON.stringify({ type: 'error', code: 'invalid_json' }));
       return;
     }
     if (!msg || typeof msg.type !== 'string') {
-      try {
-        session.ws.send(JSON.stringify({ type: 'error', code: 'invalid_event', requestId: msg?.requestId }));
-      } catch {
-        // ignore
-      }
+      this.sendFrame(session.ws, JSON.stringify({
+        type: 'error',
+        code: 'invalid_event',
+        requestId: msg?.requestId,
+      }));
       return;
     }
 
@@ -259,86 +382,77 @@ export class ChatRoom {
 
     // Bound frame already enforced; validate event type.
     if (msg.type === 'delivery_ack' && typeof msg.messageId === 'string' && msg.messageId.length <= 128) {
-      void this.handleDeliveryAck(session.userId, msg.messageId);
+      await this.handleDeliveryAck(session.userId, msg.messageId);
       if (requestId) {
-        try {
-          session.ws.send(JSON.stringify({ type: 'ack', requestId, ok: true }));
-        } catch {
-          // ignore
-        }
+        this.sendFrame(session.ws, JSON.stringify({ type: 'ack', requestId, ok: true }));
       }
       return;
     }
 
     if (msg.type === 'typing_start' || msg.type === 'typing_stop') {
-      // Per-connection typing flood protection.
+      // Per-connection typing flood protection; counters persist with the
+      // socket so a wake-up cannot reset the window.
       const now = Date.now();
       if (now - session.typingWindowStart > TYPING_WINDOW_MS) {
         session.typingCount = 0;
         session.typingWindowStart = now;
       }
       session.typingCount++;
+      this.persistSession(session);
       if (session.typingCount > MAX_TYPING_PER_WINDOW) return;
 
       const typingEvent = JSON.stringify({ type: msg.type, userId: session.userId });
-      for (const peer of this.sessions.values()) {
-        if (peer.userId !== session.userId) {
-          try {
-            peer.ws.send(typingEvent);
-          } catch {
-            // ignore
-          }
-        }
+      for (const peer of this.state.getWebSockets()) {
+        const meta = this.readMeta(peer);
+        if (!meta || meta.userId === session.userId) continue;
+        this.sendFrame(peer, typingEvent);
       }
       return;
     }
 
     if (msg.type === 'ping') {
-      try {
-        session.ws.send(JSON.stringify({ type: 'pong', requestId }));
-      } catch {
-        // ignore
-      }
+      // Fallback for heartbeats the runtime's auto-response did not match
+      // (for example a frame carrying a requestId).
+      this.sendFrame(session.ws, JSON.stringify({ type: 'pong', requestId }));
       return;
     }
 
     if (msg.type === 'send_message') {
-      void this.handleSendMessage(session, msg as Record<string, unknown>, requestId);
+      await this.handleSendMessage(session, msg as Record<string, unknown>, requestId);
       return;
     }
 
     // Explicit error for unsupported/unknown events rather than silent drop.
-    try {
-      session.ws.send(JSON.stringify({
-        type: 'error',
-        requestId,
-        code: 'unsupported_event',
-        eventType: msg.type,
-      }));
-    } catch {
-      // ignore
-    }
+    this.sendFrame(session.ws, JSON.stringify({
+      type: 'error',
+      requestId,
+      code: 'unsupported_event',
+      eventType: msg.type,
+    }));
   }
 
   private async handleDeliveryAck(recipientId: string, messageId: string): Promise<void> {
     const now = Math.floor(Date.now() / 1000);
     try {
-      const message = await this.env.DB.prepare(
-        'SELECT sender_id FROM messages WHERE id = ?',
-      )
-        .bind(messageId)
-        .first<{ sender_id: string }>();
-      if (!message || message.sender_id === recipientId) return;
+      // Batched so the guard read and the write share one round trip.
+      const [messageResult, updateResult] = await this.env.DB.batch<{ sender_id: string }>([
+        this.env.DB.prepare('SELECT sender_id FROM messages WHERE id = ?').bind(messageId),
+        this.env.DB.prepare(
+          `UPDATE message_deliveries
+           SET delivered_at = COALESCE(delivered_at, ?)
+           WHERE message_id = ?
+             AND delivered_at IS NULL
+             AND recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)
+             AND EXISTS (
+               SELECT 1 FROM messages
+               WHERE id = ? AND sender_id <> ?
+             )`,
+        ).bind(now, messageId, recipientId, messageId, recipientId),
+      ]);
 
-      await this.env.DB.prepare(
-        `UPDATE message_deliveries
-         SET delivered_at = COALESCE(delivered_at, ?)
-         WHERE message_id = ?
-           AND recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)
-           AND delivered_at IS NULL`,
-      )
-        .bind(now, messageId, recipientId)
-        .run();
+      const message = messageResult.results?.[0];
+      if (!message || message.sender_id === recipientId) return;
+      if ((updateResult.meta?.changes ?? 0) === 0) return;
 
       this.sendToUser(message.sender_id, {
         type: 'message_delivered',
@@ -357,12 +471,8 @@ export class ChatRoom {
     requestId?: string,
   ): Promise<void> {
     const sendAck = (payload: Record<string, unknown>) => {
-      try {
-        session.ws.send(JSON.stringify({ ...payload, requestId }));
-      } catch {
-        // ignore
-      }
-      if (payload.type === 'error') {
+      const sent = this.sendFrame(session.ws, JSON.stringify({ ...payload, requestId }));
+      if (sent && payload.type === 'error') {
         console.warn(
           `send_message rejected user=${session.userId} device=${session.deviceId}: ${JSON.stringify(payload)}`,
         );
@@ -409,65 +519,56 @@ export class ChatRoom {
     const replyToId = typeof msg.replyToId === 'string' ? msg.replyToId : null;
     const mediaId = typeof msg.mediaId === 'string' ? msg.mediaId : null;
 
-    // Validate conversation membership.
-    const conv = await this.env.DB.prepare(
-      `SELECT id, user_a_id, user_b_id FROM conversations WHERE id = ? AND (user_a_id = ? OR user_b_id = ?)`,
-    )
-      .bind(targetConversationId, userId, userId)
-      .first<{ id: string; user_a_id: string; user_b_id: string }>();
+    const conv = await this.env.DB.prepare(CONVERSATION_GATE_SQL)
+      .bind(
+        userId,
+        userId,
+        userId,
+        userId,
+        msgId,
+        msgId,
+        userId,
+        targetConversationId,
+        targetConversationId,
+        userId,
+        userId,
+      )
+      .first<ConversationGateRow>();
     if (!conv) {
       sendAck({ type: 'error', code: 'forbidden', message: 'Conversation not found' });
       return;
     }
+
     const expectedRecipient = conv.user_a_id === userId ? conv.user_b_id : conv.user_a_id;
     if (recipientId !== expectedRecipient) {
       sendAck({ type: 'error', code: 'invalid_recipient', message: 'Invalid recipientId' });
       return;
     }
 
-    const conversationState = await this.env.DB.prepare(
-      'SELECT request_status, initiated_by_id FROM conversations WHERE id = ?',
-    )
-      .bind(targetConversationId)
-      .first<{ request_status: string; initiated_by_id: string }>();
-    if (conversationState) {
-      const blockRow = await this.env.DB.prepare(
-        `SELECT 1 FROM user_blocks
-         WHERE (blocker_id = ? AND blocked_id = ?)
-            OR (blocker_id = ? AND blocked_id = ?)
-         LIMIT 1`,
+    if (conv.is_blocked === 1) {
+      sendAck({ type: 'error', code: 'blocked', message: 'Messaging is blocked for this conversation' });
+      return;
+    }
+    if (conv.request_status === 'pending' && conv.initiated_by_id !== userId) {
+      sendAck({ type: 'error', code: 'request_pending', message: 'Accept the conversation before sending' });
+      return;
+    }
+    // Only reachable for the request initiator: one unanswered request message.
+    if (conv.request_status === 'pending') {
+      const prior = await this.env.DB.prepare(
+        `SELECT id FROM messages WHERE conversation_id = ? AND sender_id = ? AND is_unsent = 0 LIMIT 1`,
       )
-        .bind(userId, expectedRecipient, expectedRecipient, userId)
-        .first();
-      if (blockRow) {
-        sendAck({ type: 'error', code: 'blocked', message: 'Messaging is blocked for this conversation' });
+        .bind(targetConversationId, userId)
+        .first<{ id: string }>();
+      if (prior) {
+        sendAck({ type: 'error', code: 'request_pending', message: 'Only one message may be sent with a pending request' });
         return;
-      }
-      if (conversationState.request_status === 'pending' && conversationState.initiated_by_id !== userId) {
-        sendAck({ type: 'error', code: 'request_pending', message: 'Accept the conversation before sending' });
-        return;
-      }
-      if (conversationState.request_status === 'pending') {
-        const prior = await this.env.DB.prepare(
-          `SELECT id FROM messages WHERE conversation_id = ? AND sender_id = ? AND is_unsent = 0 LIMIT 1`,
-        )
-          .bind(targetConversationId, userId)
-          .first<{ id: string }>();
-        if (prior) {
-          sendAck({ type: 'error', code: 'request_pending', message: 'Only one message may be sent with a pending request' });
-          return;
-        }
       }
     }
 
-    // Idempotent retry.
-    const existing = await this.env.DB.prepare(
-      `SELECT id, sender_id, conversation_id FROM messages WHERE id = ?`,
-    )
-      .bind(msgId)
-      .first<{ id: string; sender_id: string; conversation_id: string }>();
-    if (existing) {
-      if (existing.sender_id !== userId || existing.conversation_id !== targetConversationId) {
+    // Idempotent retry: already committed by this sender in this conversation.
+    if (conv.message_exists === 1) {
+      if (conv.message_owned !== 1) {
         sendAck({ type: 'error', code: 'conflict', message: 'Message id conflict' });
         return;
       }
@@ -475,37 +576,21 @@ export class ChatRoom {
       return;
     }
 
-    const senderDevice = await this.env.DB.prepare(
-      `SELECT id FROM devices WHERE id = ? AND user_id = ? AND status = 'active'`,
-    )
-      .bind(deviceId, userId)
-      .first<{ id: number }>();
-    if (!senderDevice) {
+    // Sender's own active devices (sender-device sync: each of the sender's
+    // sibling installations gets a ciphertext it can decrypt) and the
+    // recipient's active devices, in one round trip.
+    const { own: senderDevices, peer: recipientDevices } =
+      await pairedActiveDeviceIds(this.env.DB, userId, expectedRecipient);
+
+    if (!senderDevices.includes(deviceId)) {
       sendAck({ type: 'error', code: 'device_required', message: 'Device registration required' });
       return;
     }
-
-    const recipientDevices = (
-      await this.env.DB.prepare(
-        `SELECT id FROM devices WHERE user_id = ? AND status = 'active' ORDER BY id`,
-      )
-        .bind(recipientId)
-        .all<{ id: number }>()
-    ).results.map((r) => r.id);
     if (recipientDevices.length === 0) {
       sendAck({ type: 'error', code: 'no_recipient_device', message: "Recipient hasn't registered encryption keys yet." });
       return;
     }
 
-    // Sender's own active devices (sender-device sync: each of the sender's
-    // sibling installations gets a ciphertext it can decrypt).
-    const senderDevices = (
-      await this.env.DB.prepare(
-        `SELECT id FROM devices WHERE user_id = ? AND status = 'active' ORDER BY id`,
-      )
-        .bind(userId)
-        .all<{ id: number }>()
-    ).results.map((r) => r.id);
     const allowedDevices = new Set([...recipientDevices, ...senderDevices]);
 
     // Validate payloads.
@@ -550,45 +635,37 @@ export class ChatRoom {
 
     const now = Math.floor(Date.now() / 1000);
 
-    await this.env.DB.prepare(
-      `INSERT INTO messages
-        (id, conversation_id, sender_id, sender_device_id, message_type, reply_to_id,
-         media_id, version, is_unsent, created_at, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`,
-    )
-      .bind(msgId, targetConversationId, userId, deviceId, messageType, replyToId, mediaId, now, null)
-      .run();
-
-    await this.env.DB.prepare(
-      'UPDATE conversations SET last_message_at = ? WHERE id = ?',
-    )
-      .bind(now, targetConversationId)
-      .run();
-
-    const deliveryStmts = payloads.map((p) => {
-      const dp = p as Record<string, unknown>;
-      const did = dp.deviceId as number;
-      const ct = dp.ciphertext as string;
-      const mt = typeof dp.messageType === 'string' ? dp.messageType : messageType;
-      return this.env.DB.prepare(
-        `INSERT OR IGNORE INTO message_deliveries
-           (id, message_id, recipient_device_id, sender_device_id, payload,
-            message_type, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      ).bind(crypto.randomUUID(), msgId, did, deviceId, ct, mt, now);
-    });
-    if (deliveryStmts.length > 0) {
-      await this.env.DB.batch(deliveryStmts);
-    }
-
     const deliveryRows = payloads.map((p) => {
       const dp = p as Record<string, unknown>;
       return {
         deviceId: dp.deviceId as number,
         payload: dp.ciphertext as string,
-        messageType: (typeof dp.messageType === 'string' ? dp.messageType : messageType),
+        messageType: typeof dp.messageType === 'string' ? dp.messageType : messageType,
       };
     });
+
+    // Message row, conversation timestamp and per-device ciphertexts commit
+    // together: a failure rolls all three back instead of leaving a message
+    // that a retry would see as already committed.
+    await this.env.DB.batch([
+      this.env.DB.prepare(
+        `INSERT INTO messages
+          (id, conversation_id, sender_id, sender_device_id, message_type, reply_to_id,
+           media_id, version, is_unsent, created_at, expires_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`,
+      ).bind(msgId, targetConversationId, userId, deviceId, messageType, replyToId, mediaId, now, null),
+      this.env.DB.prepare(
+        'UPDATE conversations SET last_message_at = ? WHERE id = ?',
+      ).bind(now, targetConversationId),
+      ...deliveryRows.map((row) =>
+        this.env.DB.prepare(
+          `INSERT OR IGNORE INTO message_deliveries
+             (id, message_id, recipient_device_id, sender_device_id, payload,
+              message_type, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(crypto.randomUUID(), msgId, row.deviceId, deviceId, row.payload, row.messageType, now),
+      ),
+    ]);
 
     const event: DOEvent = {
       type: 'new_message',
@@ -596,7 +673,7 @@ export class ChatRoom {
       conversationId: targetConversationId,
       senderId: userId,
       senderDeviceId: deviceId,
-      recipients: [userId, recipientId as string],
+      recipients: [userId, expectedRecipient],
       payloads: deliveryRows.map((r) => ({
         deviceId: r.deviceId,
         payload: r.payload,
@@ -611,7 +688,7 @@ export class ChatRoom {
     this.broadcast(event);
 
     try {
-      await notifyInboxes(this.env, [userId, recipientId as string], (targetUserId) => [{
+      await notifyInboxes(this.env, [userId, expectedRecipient], (targetUserId) => [{
         type: 'inbox_message',
         conversationId: targetConversationId,
         senderId: userId,
@@ -627,21 +704,9 @@ export class ChatRoom {
   }
 
   private sendToUser(userId: string, event: Record<string, unknown>): void {
-    const message = JSON.stringify(event);
-    const set = this.userSessions.get(userId);
-    if (!set) return;
-    const dead: string[] = [];
-    for (const id of set) {
-      const session = this.sessions.get(id);
-      if (!session) continue;
-      try {
-        session.ws.send(message);
-      } catch {
-        dead.push(id);
-      }
-    }
-    for (const id of dead) {
-      this.removeSession(id);
+    const frame = JSON.stringify(event);
+    for (const ws of this.state.getWebSockets(userId)) {
+      this.sendFrame(ws, frame);
     }
   }
 }

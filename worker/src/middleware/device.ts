@@ -4,8 +4,7 @@ export const INSTALLATION_HEADER = 'X-Installation-Id';
 
 /**
  * Resolves the calling device from the X-Installation-Id header.
- * Returns null for legacy clients (no header) or unknown installations —
- * callers decide whether device context is mandatory.
+ * Returns null when the installation header is missing or unknown.
  */
 export async function resolveRequestDevice(
   request: Request,

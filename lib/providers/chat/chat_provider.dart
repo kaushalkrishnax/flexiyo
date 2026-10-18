@@ -142,7 +142,12 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     final blocked = <Conversation>[];
     final blockedIds = {for (final conv in blockedServer) conv.id};
     for (final conv in deduped) {
-      if (conv.isRestricted) {
+      final isIncomingRequest = conv.requestStatus == 'pending' &&
+          conv.initiatedById != null &&
+          conv.initiatedById == conv.otherUserId;
+      if (isIncomingRequest) {
+        continue;
+      } else if (conv.isRestricted) {
         restricted.add(conv);
       } else if (blockedIds.contains(conv.id)) {
         blocked.add(conv);

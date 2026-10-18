@@ -451,7 +451,7 @@ messagesRouter.post(
         }),
       }),
     );
-    await notifyInboxes(env, [userId, recipientId], (targetUserId) => [{
+    const activeUsers = await notifyInboxes(env, [userId, recipientId], (targetUserId) => [{
       type: 'inbox_message',
       conversationId,
       senderId: userId,
@@ -470,11 +470,13 @@ messagesRouter.post(
       )
         .bind(userId)
         .first<{ username: string }>();
-      await sendPushToUser(env, recipientId, {
-        title: senderUser?.username ?? 'New message',
-        body: 'Sent you a message',
-        data: { type: 'message', conversationId },
-      });
+      if (!activeUsers.has(recipientId)) {
+        await sendPushToUser(env, recipientId, {
+          title: senderUser?.username ?? 'New message',
+          body: 'Sent you a message',
+          data: { type: 'message', conversationId },
+        });
+      }
     } catch {
       // Non-fatal.
     }
@@ -662,6 +664,11 @@ messagesRouter.post(
           .run();
       }
     }
+
+    await notifyInboxes(env, [userId], () => [{
+      type: 'unread_reset',
+      conversationId,
+    }]);
 
     return new Response(JSON.stringify({ read: true, readAt: now }), {
       status: 200,

@@ -322,6 +322,7 @@ function bundleToJson(
   preKey: { key_id: number; public_key: string } | null,
 ) {
   return {
+    userId: device.user_id,
     deviceId: device.id,
     installationId: device.installation_id,
     registrationId: device.registration_id,
@@ -403,27 +404,14 @@ devicesRouter.get(
     const userId = (request as unknown as AuthenticatedRequest).user.sub;
     const installationId = request.headers.get('X-Installation-Id');
 
-    if (installationId) {
-      const device = await env.DB.prepare(
-        `SELECT id FROM devices WHERE user_id = ? AND installation_id = ?`,
-      )
-        .bind(userId, installationId)
-        .first<{ id: number }>();
-      const result = await env.DB.prepare(
-        `SELECT COUNT(*) as count FROM pre_keys WHERE device_id = ? AND consumed_at IS NULL`,
-      )
-        .bind(device?.id ?? -1)
-        .first<{ count: number }>();
-      return json({ remaining: result?.count ?? 0 });
-    }
-
-    // Legacy / device-less callers: inventory across all serving devices.
+    if (!installationId) return json({ error: 'X-Installation-Id header required' }, 400);
     const result = await env.DB.prepare(
       `SELECT COUNT(*) as count FROM pre_keys pk
        JOIN devices d ON d.id = pk.device_id
-       WHERE d.user_id = ? AND d.status = 'active' AND pk.consumed_at IS NULL`,
+       WHERE d.user_id = ? AND d.installation_id = ? AND d.status = 'active'
+       AND pk.consumed_at IS NULL`,
     )
-      .bind(userId)
+      .bind(userId, installationId)
       .first<{ count: number }>();
     return json({ remaining: result?.count ?? 0 });
   },
@@ -450,28 +438,17 @@ devicesRouter.post(
     const { preKeys } = parsed.data;
     const now = Math.floor(Date.now() / 1000);
 
-    // Replenishment is always scoped to ONE device — either the caller's
-    // installation (header) or, for legacy clients, the oldest active device.
-    let device: { id: number } | null;
     const installationId = request.headers.get('X-Installation-Id');
-    if (installationId) {
-      device = await env.DB.prepare(
-        `SELECT id FROM devices WHERE user_id = ? AND installation_id = ? AND status = 'active'`,
-      )
-        .bind(userId, installationId)
-        .first<{ id: number }>();
-      if (!device) {
-        return json({ error: 'Unknown or inactive installation for this account' }, 404);
-      }
-    } else {
-      device = await env.DB.prepare(
-        `SELECT id FROM devices WHERE user_id = ? AND status = 'active' ORDER BY id ASC LIMIT 1`,
-      )
-        .bind(userId)
-        .first<{ id: number }>();
-      if (!device) {
-        return json({ error: 'No active device to replenish' }, 404);
-      }
+    if (!installationId) return json({ error: 'X-Installation-Id header required' }, 400);
+
+    let device: { id: number } | null;
+    device = await env.DB.prepare(
+      `SELECT id FROM devices WHERE user_id = ? AND installation_id = ? AND status = 'active'`,
+    )
+      .bind(userId, installationId)
+      .first<{ id: number }>();
+    if (!device) {
+      return json({ error: 'Unknown or inactive installation for this account' }, 404);
     }
 
     const stmts = preKeys.map((pk) =>

@@ -92,8 +92,8 @@ describe('findMatchingApkAsset', () => {
       size: 16000000,
     },
     {
-      name: 'app-armeabi-v7a-release.apk',
-      browser_download_url: 'https://github.com/kaushalkrishnax/flexiyo/releases/download/v1.0.0/app-armeabi-v7a-release.apk',
+      name: 'Flexiyo-1.0.0-armeabi-v7a-RELEASE.apk',
+      browser_download_url: 'https://github.com/kaushalkrishnax/flexiyo/releases/download/v1.0.0/Flexiyo-1.0.0-armeabi-v7a-RELEASE.apk',
       size: 14000000,
     },
   ];
@@ -109,9 +109,9 @@ describe('findMatchingApkAsset', () => {
     expect(match?.name).toBe('Flexiyo-1.0.0-x86_64-RELEASE.apk');
   });
 
-  it('falls back to legacy app-<arch>-release.apk if named release apk not present', () => {
+  it('matches the named release APK for another architecture', () => {
     const match = findMatchingApkAsset(assets, 'armeabi-v7a', '1.0.0');
-    expect(match?.name).toBe('app-armeabi-v7a-release.apk');
+    expect(match?.name).toBe('Flexiyo-1.0.0-armeabi-v7a-RELEASE.apk');
   });
 
   it('defaults to arm64-v8a if arch is empty', () => {

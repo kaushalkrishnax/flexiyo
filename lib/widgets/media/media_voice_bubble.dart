@@ -3,7 +3,7 @@ import 'dart:math' as math;
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flexiyo/models/message.dart';
-import 'package:flexiyo/services/media_service.dart';
+import 'package:flexiyo/services/media/media_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';

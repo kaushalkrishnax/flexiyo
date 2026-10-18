@@ -28,7 +28,7 @@ Flexiyo is a working end-to-end encrypted messenger. The Flutter client and the 
 
 ## Current blockers
 
-None — the tree builds and passes all checks. The open items above are planned work rather than blockers.
+None — the tree builds and passes all checks. Recent fixes: WebSocket send/ack path (request IDs, correlated acks, idempotent retries, D1 persistence before broadcast), edit contract field name (`messageType`), multi-device receiving-device selection, and sender-device identity.
 
 ## Recommended next steps
 

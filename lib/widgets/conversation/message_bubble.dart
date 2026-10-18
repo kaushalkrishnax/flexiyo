@@ -1,8 +1,8 @@
 import 'package:flexiyo/core/seen_status.dart';
 import 'package:flexiyo/models/message.dart';
-import 'package:flexiyo/widgets/avatar.dart';
-import 'package:flexiyo/widgets/media_image_bubble.dart';
-import 'package:flexiyo/widgets/media_voice_bubble.dart';
+import 'package:flexiyo/widgets/conversation/avatar.dart';
+import 'package:flexiyo/widgets/media/media_image_bubble.dart';
+import 'package:flexiyo/widgets/media/media_voice_bubble.dart';
 import 'package:flutter/material.dart';
 import 'package:hugeicons/hugeicons.dart';
 

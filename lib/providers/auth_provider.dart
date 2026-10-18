@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flexiyo/core/exceptions.dart';
 import 'package:flexiyo/models/user.dart';
-import 'package:flexiyo/providers/chat_provider.dart';
+import 'package:flexiyo/providers/chat/chat_provider.dart';
 import 'package:flexiyo/services/api_service.dart';
 import 'package:flexiyo/services/push_service.dart';
 import 'package:flexiyo/storage/local_db.dart';

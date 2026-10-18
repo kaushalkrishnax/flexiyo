@@ -43,11 +43,11 @@ export async function notifyInboxes(
   userIds: string[],
   /** Called per recipient so events can be personalised (e.g. isIncoming). */
   buildEvents: (userId: string) => InboxEvent[],
-): Promise<void> {
+): Promise<Set<string>> {
   const userEvents: Array<{ userId: string; events: InboxEvent[] }> = userIds
     .map((userId) => ({ userId, events: buildEvents(userId) }));
 
-  await Promise.allSettled(
+  const results = await Promise.allSettled(
     userEvents.flatMap(({ userId, events }) => {
       if (events.length === 0) return [];
       // One request per user carrying all events, rather than one per event.
@@ -57,8 +57,20 @@ export async function notifyInboxes(
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ events }),
+        })).then(async (response) => ({
+          userId,
+          delivered: response.ok
+              ? Number(((await response.json()) as { delivered?: number }).delivered ?? 0)
+              : 0,
         })),
       ];
     }),
+  );
+
+  return new Set(
+    results
+      .filter((result): result is PromiseFulfilledResult<{ userId: string; delivered: number }> =>
+        result.status === 'fulfilled' && result.value.delivered > 0)
+      .map((result) => result.value.userId),
   );
 }

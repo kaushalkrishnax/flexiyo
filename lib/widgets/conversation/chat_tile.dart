@@ -1,5 +1,5 @@
 import 'package:flexiyo/models/conversation.dart';
-import 'package:flexiyo/widgets/avatar.dart';
+import 'package:flexiyo/widgets/conversation/avatar.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 

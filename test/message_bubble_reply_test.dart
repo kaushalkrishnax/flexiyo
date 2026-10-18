@@ -1,5 +1,5 @@
 import 'package:flexiyo/models/message.dart';
-import 'package:flexiyo/widgets/message_bubble.dart';
+import 'package:flexiyo/widgets/conversation/message_bubble.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 

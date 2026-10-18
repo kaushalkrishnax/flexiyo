@@ -86,31 +86,39 @@ flexiyo/
 ## Data Flow: Sending a Message
 
 ```
-Sender device                   Worker                    Recipient device
+Sender device                   Worker (ChatRoom DO)          Recipient device
      │                             │                              │
      │ 1. Compose plaintext        │                              │
      │    Encrypt with Signal      │                              │
-     │    (SessionCipher.encrypt)  │                              │
+     │    (one ciphertext per      │                              │
+     │     active recipient device │                              │
+     │     + sender's own devices) │                              │
      │                             │                              │
-     │ 2. POST /messages           │                              │
-     │    {encryptedPayload: ...}  │                              │
+     │ 2. WSS send_message         │                              │
+     │    {requestId, id,          │                              │
+     │     payloads, ...}          │                              │
      │────────────────────────────►│                              │
-     │                             │ 3. Validate auth             │
-     │                             │    Validate membership       │
-     │                             │    Store ciphertext in D1    │
+     │                             │ 3. Validate auth/session     │
+     │                             │    Validate membership,      │
+     │                             │    device, payloads, rate    │
+     │                             │    Idempotent retry check    │
+     │                             │ 4. Persist message +         │
+     │                             │    per-device deliveries to  │
+     │                             │    D1                        │
+     │                             │ 5. Durable Object broadcast  │
+     │                             │    new_message (per-device   │
+     │                             │    ciphertexts)              │
+     │◄──────── 6. ack {ok,id}     │─────────────────────────────►│
+     │    (only after D1 persist)  │    {type: new_message,       │
+     │                             │     payloads}                │
      │                             │                              │
-     │                             │ 4. Durable Object broadcast  │
-     │◄────────────────────────────│─────────────────────────────►│
-     │ 5. 201 Created              │    {type: new_message,       │
-     │                             │     encryptedPayload: ...}   │
-     │                             │                              │
-     │                             │              5. Receive event│
-     │                             │                 Decrypt with │
+     │ 7. Mark optimistic message  │              8. Receive event│
+     │    sent                     │                 Decrypt with │
      │                             │                 SessionCipher│
      │                             │                 Display      │
 ```
 
-The Worker never sees plaintext. It stores and forwards the encrypted payload verbatim.
+The Worker never sees plaintext. It stores and forwards the encrypted payload verbatim. A message is marked sent only after the server `ack`; retries reuse the same message `id` and are idempotent.
 
 ---
 

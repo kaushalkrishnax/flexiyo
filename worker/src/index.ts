@@ -90,8 +90,12 @@ export default {
       const doId = env.CHAT_ROOM.idFromName(conversationId);
       const stub = env.CHAT_ROOM.get(doId);
 
+      const deviceIdParam = url.searchParams.get('deviceId');
+      const doUrl = new URL('https://internal/ws');
+      doUrl.searchParams.set('token', token);
+      if (deviceIdParam) doUrl.searchParams.set('deviceId', deviceIdParam);
       const doRequest = new Request(
-        `https://internal/ws?token=${encodeURIComponent(token)}`,
+        doUrl.toString(),
         {
           headers: request.headers,
           method: request.method,

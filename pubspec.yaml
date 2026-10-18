@@ -77,6 +77,7 @@ dev_dependencies:
   flutter_lints: ^6.0.0
   build_runner: ^2.4.11
   riverpod_generator: ^4.0.9
+  stream_channel: ^2.1.4
 
 flutter:
   uses-material-design: true

@@ -1,7 +1,7 @@
 import 'package:flexiyo/core/constants.dart';
 import 'package:flexiyo/models/conversation.dart';
 import 'package:flexiyo/models/message.dart';
-import 'package:flexiyo/widgets/avatar.dart';
+import 'package:flexiyo/widgets/conversation/avatar.dart';
 import 'package:flutter/material.dart';
 import 'package:hugeicons/hugeicons.dart';
 import 'package:intl/intl.dart';
@@ -146,7 +146,7 @@ class AppPopupMenu {
 
   static String _timerLabel(int seconds) {
     return switch (seconds) {
-      -1 => 'Disappear immediately',
+      0 => 'None',
       3600 => 'After 1 hour',
       21600 => 'After 6 hours',
       86400 => 'After 24 hours',

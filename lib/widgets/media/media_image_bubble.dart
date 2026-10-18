@@ -3,7 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flexiyo/models/message.dart';
 import 'package:flexiyo/screens/media/media_viewer_screen.dart';
-import 'package:flexiyo/services/media_service.dart';
+import 'package:flexiyo/services/media/media_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hugeicons/hugeicons.dart';

@@ -179,6 +179,24 @@ Note: iOS requires the local server to use HTTPS or be listed in `NSAppTransport
 
 ### Android
 
+Create a release keystore once and keep it backed up securely. The keystore
+certificate must remain the same for every future APK or Android will reject
+updates over an existing installation.
+
+```bash
+keytool -genkeypair -v \
+  -keystore android/upload-keystore.jks \
+  -alias upload \
+  -keyalg RSA \
+  -keysize 2048 \
+  -validity 10000
+cp android/key.properties.example android/key.properties
+```
+
+Replace every placeholder in `android/key.properties` with the values used for
+the keystore. `key.properties` and `*.jks` are ignored by Git. Do not commit
+either file or its passwords.
+
 ```bash
 flutter build apk --release
 # APK at: build/app/outputs/flutter-apk/app-release.apk

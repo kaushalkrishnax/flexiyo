@@ -3,7 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flexiyo/models/key_bundle.dart';
 import 'package:flexiyo/services/api_service.dart';
-import 'package:flexiyo/services/persistent_signal_store.dart';
+import 'package:flexiyo/services/signal/persistent_signal_store.dart';
 import 'package:flexiyo/storage/secure_keys.dart';
 import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
 import 'package:uuid/uuid.dart';
@@ -33,9 +33,11 @@ class SignalCryptoService {
     required SecureKeyValueStore storage,
     required ApiService api,
     required PersistentSignalStore store,
+    required String userId,
   })  : _storage = storage,
         _api = api,
-        _store = store;
+        _store = store,
+        _userId = userId;
 
   static const int _preKeyCount = 100;
   static const int _preKeyReplenishThreshold = 20;
@@ -43,6 +45,7 @@ class SignalCryptoService {
   final SecureKeyValueStore _storage;
   final ApiService _api;
   final PersistentSignalStore _store;
+  final String _userId;
 
   static Future<SignalCryptoService> open({
     required SecureKeyValueStore storage,
@@ -57,6 +60,7 @@ class SignalCryptoService {
       storage: storage,
       api: api,
       store: store,
+      userId: userId,
     );
     await service.ensureDeviceRegistered();
     return service;
@@ -100,6 +104,27 @@ class SignalCryptoService {
     await _storage.saveString(registeredKey, 'true');
     await _storage.deleteString(pendingKey);
     await _replenishPreKeysIfNeeded();
+    // Establish inbound sessions from the local user's sibling devices so this
+    // installation can decrypt messages they send (sender-device sync).
+    try {
+      await _ensureOwnDeviceSessions();
+    } catch (_) {
+      // Non-fatal: sibling messages decrypt once sessions are established.
+    }
+  }
+
+  Future<void> _ensureOwnDeviceSessions() async {
+    final myDeviceId = await getDeviceId();
+    final bundles = await _api.fetchKeyBundles(_userId);
+    for (int i = 0; i < bundles.length; i++) {
+      final bundle = bundles[i];
+      if (myDeviceId != null && bundle.deviceId == myDeviceId) continue;
+      final address = SignalProtocolAddress(_userId, bundle.deviceId);
+      if (!await _store.containsSession(address)) {
+        await SessionBuilder.fromSignalStore(_store, address)
+            .processPreKeyBundle(_toPreKeyBundle(bundle));
+      }
+    }
   }
 
   Future<void> saveLocalMessageText(String messageId, String plaintext) =>
@@ -108,6 +133,11 @@ class SignalCryptoService {
 
   Future<String?> getLocalMessageText(String messageId) =>
       _storage.readString(_store.storageKey('message.$messageId.text'));
+
+  Future<int?> getDeviceId() async {
+    final raw = await _storage.readString(_store.storageKey('device.id'));
+    return int.tryParse(raw ?? '');
+  }
 
   Future<void> deleteLocalMessageText(String messageId) =>
       _storage.deleteString(_store.storageKey('message.$messageId.text'));
@@ -190,33 +220,47 @@ class SignalCryptoService {
 
   Future<EncryptedMessage> encryptForUser(
     String recipientId,
-    String plaintext,
-  ) async {
-    final bundles = await _api.fetchKeyBundles(recipientId);
-    if (bundles.isEmpty) {
-      throw Exception('Recipient has no registered devices');
-    }
-
+    String plaintext, {
+    /// Also encrypt to the local installation's own active devices so the
+    /// sender's sibling installations can decrypt their own message copies.
+    bool includeSenderDevices = true,
+  }) async {
     final bytes = Uint8List.fromList(utf8.encode(plaintext));
     final payloads = <EncryptedPayload>[];
-    for (final bundle in bundles) {
-      final address = SignalProtocolAddress(recipientId, bundle.deviceId);
-      if (!await _store.containsSession(address)) {
-        await SessionBuilder.fromSignalStore(_store, address)
-            .processPreKeyBundle(_toPreKeyBundle(bundle));
-      }
+    final seen = <int>{};
 
-      final ciphertext = await SessionCipher.fromStore(_store, address).encrypt(
-        bytes,
-      );
-      payloads.add(EncryptedPayload(
-        payload: base64Encode(ciphertext.serialize()),
-        messageType: ciphertext.getType() == CiphertextMessage.prekeyType
-            ? 'prekey'
-            : 'signal',
-        recipientDeviceId: bundle.deviceId,
-      ));
+    Future<void> addBundle(List<KeyBundle> bundles) async {
+      for (final bundle in bundles) {
+        if (seen.contains(bundle.deviceId)) continue;
+        seen.add(bundle.deviceId);
+        final address = SignalProtocolAddress(bundle.userId, bundle.deviceId);
+        if (!await _store.containsSession(address)) {
+          await SessionBuilder.fromSignalStore(_store, address)
+              .processPreKeyBundle(_toPreKeyBundle(bundle));
+        }
+        final ciphertext = await SessionCipher.fromStore(_store, address)
+            .encrypt(bytes);
+        payloads.add(EncryptedPayload(
+          payload: base64Encode(ciphertext.serialize()),
+          messageType: ciphertext.getType() == CiphertextMessage.prekeyType
+              ? 'prekey'
+              : 'signal',
+          recipientDeviceId: bundle.deviceId,
+        ));
+      }
     }
+
+    final recipientBundles = await _api.fetchKeyBundles(recipientId);
+    if (recipientBundles.isEmpty) {
+      throw Exception('Recipient has no registered devices');
+    }
+    await addBundle(recipientBundles);
+
+    if (includeSenderDevices) {
+      final ownBundles = await _api.fetchKeyBundles(_userId);
+      if (ownBundles.isNotEmpty) await addBundle(ownBundles);
+    }
+
     return EncryptedMessage(
       payloads: payloads,
       messageType: payloads.first.messageType,

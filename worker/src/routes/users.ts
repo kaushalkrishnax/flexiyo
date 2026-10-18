@@ -3,6 +3,7 @@ import { and, like, ne } from 'drizzle-orm';
 import type { Env, AuthenticatedRequest } from '../types.js';
 import { getDb } from '../database/db.js';
 import { users } from '../database/schema.js';
+import { authMiddleware } from '../middleware/auth.js';
 import { rateLimitMiddleware } from '../middleware/rateLimit.js';
 
 export const usersRouter = Router({ base: '/api/users' });

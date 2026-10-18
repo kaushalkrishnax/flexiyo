@@ -3,7 +3,7 @@ import 'dart:typed_data';
 
 import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
 
-import '../storage/secure_keys.dart';
+import '../../storage/secure_keys.dart';
 
 class PersistentSignalStore implements SignalProtocolStore {
   PersistentSignalStore._(

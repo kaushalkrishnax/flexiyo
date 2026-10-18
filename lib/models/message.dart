@@ -1,4 +1,4 @@
-import 'package:flexiyo/services/media_service.dart';
+import 'package:flexiyo/services/media/media_service.dart';
 import 'package:flutter/foundation.dart';
 
 /// Status of a message in the send pipeline.
@@ -202,6 +202,7 @@ class Message {
     bool clearReplyToId = false,
     String? reaction,
     bool clearReaction = false,
+    bool clearExpiresAt = false,
     DateTime? readAt,
   }) {
     return Message(
@@ -218,7 +219,7 @@ class Message {
       isLocallyDeleted: isLocallyDeleted ?? this.isLocallyDeleted,
       isEdited: isEdited ?? this.isEdited,
       createdAt: createdAt ?? this.createdAt,
-      expiresAt: expiresAt ?? this.expiresAt,
+      expiresAt: clearExpiresAt ? null : (expiresAt ?? this.expiresAt),
       editedAt: editedAt ?? this.editedAt,
       status: status ?? this.status,
       replyToId: clearReplyToId ? null : (replyToId ?? this.replyToId),

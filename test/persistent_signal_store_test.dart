@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:flexiyo/services/persistent_signal_store.dart';
+import 'package:flexiyo/services/signal/persistent_signal_store.dart';
 import 'package:flexiyo/storage/secure_keys.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';

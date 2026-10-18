@@ -42,7 +42,7 @@ class KeyBundle {
     final preKey = json['preKey'] as Map? ?? const {};
     final deviceIdValue = json['deviceId'] ?? json['device_id'];
     return KeyBundle(
-      userId: (json['userId'] ?? json['user_id']) as String,
+        userId: (json['userId'] ?? json['user_id']) as String,
       deviceId: deviceIdValue is int
           ? deviceIdValue
           : int.tryParse(deviceIdValue?.toString() ?? '') ?? 1,

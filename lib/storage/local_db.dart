@@ -269,6 +269,16 @@ class LocalDb {
     );
   }
 
+  Future<void> clearMessageExpiries(String conversationId) async {
+    final database = await db;
+    await database.update(
+      'messages',
+      {'expires_at': null},
+      where: 'conversation_id = ?',
+      whereArgs: [conversationId],
+    );
+  }
+
   Future<void> updateMessageEdited(
     String messageId, {
     required String encryptedPayload,

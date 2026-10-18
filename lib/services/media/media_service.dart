@@ -4,7 +4,7 @@ import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 import 'package:dio/dio.dart';
 import 'package:flexiyo/core/constants.dart';
-import 'package:flexiyo/services/media_cache.dart';
+import 'package:flexiyo/services/media/media_cache.dart';
 import 'package:flexiyo/storage/secure_keys.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 

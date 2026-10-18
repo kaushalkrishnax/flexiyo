@@ -1,11 +1,11 @@
 import 'package:flexiyo/models/conversation.dart';
 import 'package:flexiyo/providers/auth_provider.dart';
-import 'package:flexiyo/providers/chat_provider.dart';
+import 'package:flexiyo/providers/chat/chat_provider.dart';
 import 'package:flexiyo/providers/signal_crypto_provider.dart';
 import 'package:flexiyo/services/api_service.dart';
-import 'package:flexiyo/widgets/app_popup_menu.dart';
-import 'package:flexiyo/widgets/avatar.dart';
-import 'package:flexiyo/widgets/skeleton.dart';
+import 'package:flexiyo/widgets/conversation/app_popup_menu.dart';
+import 'package:flexiyo/widgets/conversation/avatar.dart';
+import 'package:flexiyo/widgets/conversation/skeleton.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';

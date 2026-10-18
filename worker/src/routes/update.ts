@@ -7,14 +7,6 @@ export const updateRouter = Router({ base: '/api/update' });
 // GitHub repository that publishes Flexiyo release APKs (override via UPDATE_GITHUB_REPO).
 const DEFAULT_UPDATE_REPO = 'kaushalkrishnax/flexiyo';
 
-// Maps an Android ABI to its legacy release APK asset name; maintained for backward compatibility.
-export const ARCH_APK_MAP: Record<string, string> = {
-  'arm64-v8a': 'app-arm64-v8a-release.apk',
-  'armeabi-v7a': 'app-armeabi-v7a-release.apk',
-  x86: 'app-x86-release.apk',
-  x86_64: 'app-x86_64-release.apk',
-};
-
 export interface ReleaseAsset {
   name: string;
   browser_download_url: string;
@@ -39,8 +31,6 @@ export function findMatchingApkAsset(
   const expectedShortName = version
     ? `Flexiyo-${version}-${targetArch}.apk`
     : `Flexiyo-${targetArch}.apk`;
-  const legacyName = ARCH_APK_MAP[targetArch] ?? `app-${targetArch}-release.apk`;
-
   return (
     assets.find(
       (a) =>
@@ -48,12 +38,8 @@ export function findMatchingApkAsset(
         a.name === expectedLowerName ||
         a.name.toLowerCase() === expectedUpperName.toLowerCase() ||
         a.name === expectedShortName ||
-        a.name === legacyName ||
         (a.name.endsWith('.apk') && a.name.includes(targetArch) && a.name.startsWith('Flexiyo-')),
-    ) ??
-    assets.find((a) => a.name.endsWith('.apk') && a.name.includes(targetArch)) ??
-    assets.find((a) => a.name === legacyName) ??
-    assets.find((a) => a.name.endsWith('.apk'))
+    )
   );
 }
 

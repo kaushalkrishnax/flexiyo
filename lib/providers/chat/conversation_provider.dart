@@ -2,11 +2,12 @@ import 'dart:async';
 
 import 'package:flexiyo/models/conversation.dart';
 import 'package:flexiyo/models/message.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flexiyo/providers/auth_provider.dart';
-import 'package:flexiyo/providers/chat_provider.dart';
+import 'package:flexiyo/providers/chat/chat_provider.dart';
 import 'package:flexiyo/providers/signal_crypto_provider.dart';
 import 'package:flexiyo/services/api_service.dart';
-import 'package:flexiyo/services/media_service.dart';
+import 'package:flexiyo/services/media/media_service.dart';
 import 'package:flexiyo/services/ws_service.dart';
 import 'package:flexiyo/storage/local_db.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -116,12 +117,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     // without waiting for the server round-trip below.
     _ref.read(chatsProvider.notifier).setActiveConversation(conversationId);
 
-    // Drop stale local rows before they are rendered; the server has either
-    // deleted them or marked them expired.
-    try {
-      await LocalDb.instance.purgeExpiredMessages(conversationId);
-    } catch (_) {}
-
     final cachedConversation = _ref
         .read(chatsProvider)
         .conversations
@@ -129,7 +124,18 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         .firstOrNull;
     if (cachedConversation != null) {
       state = state.copyWith(conversation: cachedConversation);
+      if (cachedConversation.disappearingTimer == 0) {
+        try {
+          await LocalDb.instance.clearMessageExpiries(conversationId);
+        } catch (_) {}
+      }
     }
+
+    // Drop stale local rows before they are rendered; the server has either
+    // deleted them or marked them expired.
+    try {
+      await LocalDb.instance.purgeExpiredMessages(conversationId);
+    } catch (_) {}
 
     // Load from local cache first for instant display
     try {
@@ -248,12 +254,19 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   Future<void> _connectWs() async {
     try {
       final wsUrl = await _api.buildWsUrl(conversationId);
-      _ws = WsService(conversationId: conversationId, wsUrl: wsUrl);
-      await _ws!.connect();
-
+      String finalUrl = wsUrl;
+      try {
+        final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
+        final deviceId = await crypto.getDeviceId();
+        if (deviceId != null) {
+          finalUrl = '$wsUrl&deviceId=$deviceId';
+        }
+      } catch (_) {}
+      _ws = WsService(conversationId: conversationId, wsUrl: finalUrl);
       _wsSub = _ws!.events.listen((event) => _handleWsEvent(event));
+      await _ws!.connect();
     } catch (_) {
-      // WS connection failure is non-fatal; the next screen open retries it.
+      debugPrint('[WS] conversation connection setup failed');
     }
   }
 
@@ -314,10 +327,18 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
     final senderId = event['senderId'] as String? ?? '';
     final payloads = event['payloads'] as List<dynamic>? ?? const [];
-    final target =
-        payloads.isEmpty ? null : payloads.first as Map<String, dynamic>;
-    final senderDeviceId =
-        target?['deviceId'] as int? ?? event['senderDeviceId'] as int?;
+    final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
+    final myDeviceId = await crypto.getDeviceId();
+    Map<String, dynamic>? target;
+    if (myDeviceId != null) {
+      for (final p in payloads) {
+        if (p is Map<String, dynamic> && p['deviceId'] == myDeviceId) {
+          target = p;
+          break;
+        }
+      }
+    }
+    final senderDeviceId = event['senderDeviceId'] as int?;
     final encryptedPayload = target?['payload'] as String? ?? '';
     final messageType = target?['messageType'] as String? ?? 'signal';
     final replyToId = event['replyToId'] as String?;
@@ -417,6 +438,18 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     final timer = event['timer'];
     final current = state.conversation;
     if (timer is! int || current == null) return;
+    if (timer == 0) {
+      final cleared = state.messages
+          .map((message) => message.copyWith(clearExpiresAt: true))
+          .toList();
+      state = state.copyWith(
+        conversation: current.copyWith(disappearingTimer: timer),
+        messages: cleared,
+      );
+      unawaited(LocalDb.instance.clearMessageExpiries(conversationId));
+      _scheduleExpiryPurge();
+      return;
+    }
     state = state.copyWith(
       conversation: current.copyWith(disappearingTimer: timer),
     );
@@ -539,10 +572,18 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     if (msgId == null) return;
 
     final payloads = event['payloads'] as List<dynamic>? ?? const [];
-    final target =
-        payloads.isEmpty ? null : payloads.first as Map<String, dynamic>;
-    final senderDeviceId =
-        target?['deviceId'] as int? ?? event['senderDeviceId'] as int?;
+    final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
+    final myDeviceId = await crypto.getDeviceId();
+    Map<String, dynamic>? target;
+    if (myDeviceId != null) {
+      for (final p in payloads) {
+        if (p is Map<String, dynamic> && p['deviceId'] == myDeviceId) {
+          target = p;
+          break;
+        }
+      }
+    }
+    final senderDeviceId = event['senderDeviceId'] as int?;
     final encryptedPayload = target?['payload'] as String? ?? '';
     final messageType = target?['messageType'] as String? ?? 'signal';
     final version = (event['version'] as int?) ?? 1;
@@ -556,7 +597,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     final original = state.messages.where((m) => m.id == msgId).firstOrNull;
     if (original == null) return;
 
-    final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
     String? plaintext;
     if (original.senderId == _myUserId) {
       plaintext =
@@ -664,7 +704,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
   // User actions
 
-  Future<void> sendMessage(String text) async {
+  Future<void> sendMessage(String text, {String? messageId}) async {
     var conv = state.conversation;
     if (conv == null) {
       try {
@@ -688,7 +728,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       return;
     }
 
-    final msgId = _uuid.v4();
+    final msgId = messageId ?? _uuid.v4();
     final now = DateTime.now();
     final replyToId = state.replyTo?.id;
 
@@ -723,27 +763,37 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
       final encrypted = await crypto.encryptForUser(conv.otherUserId, text);
       await crypto.saveLocalMessageText(msgId, text);
-      await _api.sendMessage(
-        conversationId,
-        recipientId: conv.otherUserId,
-        payloads: encrypted.payloads
+      final myDeviceId = await crypto.getDeviceId();
+      if (_ws == null) await _connectWs();
+      final ws = _ws;
+      if (ws == null) throw StateError('WebSocket unavailable');
+      await ws.ensureConnected();
+      final ack = await ws.request({
+        'type': 'send_message',
+        'conversationId': conversationId,
+        'id': msgId,
+        'recipientId': conv.otherUserId,
+        'payloads': encrypted.payloads
             .map((p) => {
                   'deviceId': p.recipientDeviceId,
                   'ciphertext': p.payload,
                   'messageType': p.messageType,
                 })
             .toList(),
-        messageType: encrypted.messageType,
-        messageId: msgId,
-        mediaId: MediaRef.parse(text)?.id,
-        replyToId: replyToId,
-      );
+        'messageType': encrypted.messageType,
+        'mediaId': MediaRef.parse(text)?.id,
+        'replyToId': replyToId,
+      });
+
+      if (ack['ok'] != true && ack['type'] != 'ack') {
+        throw StateError(ack['message']?.toString() ?? 'Send rejected');
+      }
 
       // Confirm as sent
       _updateMessageStatus(msgId, MessageStatus.sent);
       final sent = optimistic.copyWith(
-        encryptedPayload: encrypted.payloads.first.payload,
-        senderDeviceId: encrypted.payloads.first.recipientDeviceId,
+        encryptedPayload: null,
+        senderDeviceId: myDeviceId,
         messageType: encrypted.messageType == 'prekey'
             ? MessageType.prekey
             : MessageType.signal,
@@ -754,7 +804,8 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         final row = sent.toJson();
         await LocalDb.instance.upsertMessage(row);
       } catch (_) {}
-    } catch (e) {
+    } catch (e, st) {
+      debugPrint('[SEND] failed: $e\n$st');
       _updateMessageStatus(msgId, MessageStatus.failed);
       final errorStr = e.toString();
       final userFriendlyError = errorStr.contains('No device registered')
@@ -780,7 +831,9 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       messages: state.messages.where((m) => m.id != messageId).toList(),
       clearError: true,
     );
-    await sendMessage(text);
+    // Retry with the same message UUID so the server treats it as an
+    // idempotent retry rather than a new message.
+    await sendMessage(text, messageId: messageId);
   }
 
   Future<void> editMessage(String messageId, String newText) async {
@@ -801,11 +854,11 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     final encrypted =
         await crypto.encryptForUser(conversation.otherUserId, newText);
     await crypto.saveLocalMessageText(messageId, newText);
+    final myDeviceId = await crypto.getDeviceId();
     _upsertMessage(
       original.copyWith(
         decryptedText: newText,
-        encryptedPayload: encrypted.payloads.first.payload,
-        senderDeviceId: encrypted.payloads.first.recipientDeviceId,
+        senderDeviceId: myDeviceId ?? original.senderDeviceId,
         isEdited: true,
         editedAt: now,
         version: original.version + 1,

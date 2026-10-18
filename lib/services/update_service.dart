@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io' if (dart.library.html) 'package:flexiyo/core/io_stub.dart'
     show Directory;
 
@@ -17,8 +16,6 @@ const MethodChannel _appUpdateChannel = MethodChannel(
   'com.flexiyo.flexiyo/app_update',
 );
 
-const String _updateCheckCacheKey = 'flexiyo.update_check_cache';
-const String _updateApkPathKey = 'flexiyo.update_apk_path';
 const String _lastCheckedKey = 'flexiyo.update_last_checked';
 const String _seenVersionKey = 'flexiyo.update_seen_version';
 
@@ -50,7 +47,6 @@ class UpdateService {
       final info = AppUpdateInfo.fromJson(data);
 
       await _markCheckedNow();
-      await _cacheResponse(info);
       return info;
     } catch (_) {
       return null;
@@ -83,17 +79,6 @@ class UpdateService {
     await prefs.setString(_seenVersionKey, version);
   }
 
-  Future<void> _cacheResponse(AppUpdateInfo info) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      _updateCheckCacheKey,
-      jsonEncode({
-        'checkedAt': DateTime.now().millisecondsSinceEpoch,
-        'response': info.toJson(),
-      }),
-    );
-  }
-
   /// Downloads the APK, reports progress in `[0, 1]`, then opens the installer.
   Future<String> downloadAndInstall({
     required String apkUrl,
@@ -109,9 +94,6 @@ class UpdateService {
     }
 
     final apkPath = await _downloadApk(apkUrl, onProgress);
-
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_updateApkPathKey, apkPath);
 
     await installApk(apkPath);
     return apkPath;

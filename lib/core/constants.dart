@@ -17,7 +17,7 @@ class AppConstants {
 
   /// Disappearing timer options in seconds. -1 means immediately after read.
   static const List<int> disappearingTimerOptions = [
-    -1,
+    0,
     3600,
     21600,
     86400,

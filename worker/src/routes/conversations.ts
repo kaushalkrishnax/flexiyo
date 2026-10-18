@@ -157,9 +157,10 @@ conversationsRouter.post(
 
     // Both chat lists get a "Request sent"/"Message request" tile instantly —
     // no client-side refresh required. List is repairable via REST seed.
+    let activeUsers = new Set<string>();
     try {
       const requesterName = myUser?.username ?? 'unknown';
-      await notifyInboxes(env, [userId, participantId], (targetUserId) => [
+      activeUsers = await notifyInboxes(env, [userId, participantId], (targetUserId) => [
         {
           type: 'conversation_upsert',
           conversation: {
@@ -187,11 +188,13 @@ conversationsRouter.post(
     // Best-effort FCM push so the recipient learns about the request even with
     // the app closed. Failures never affect the request itself.
     try {
-      await sendPushToUser(env, participantId, {
-        title: myUser?.username ?? 'New message request',
-        body: 'Sent you a message request',
-        data: { type: 'request', conversationId: convId },
-      });
+      if (!activeUsers.has(participantId)) {
+        await sendPushToUser(env, participantId, {
+          title: myUser?.username ?? 'New message request',
+          body: 'Sent you a message request',
+          data: { type: 'request', conversationId: convId },
+        });
+      }
     } catch {
       // Non-fatal.
     }
@@ -460,6 +463,14 @@ conversationsRouter.patch(
     )
       .bind(timer, id)
       .run();
+
+    if (timer === 0) {
+      await env.DB.prepare(
+        'UPDATE messages SET expires_at = NULL WHERE conversation_id = ?',
+      )
+        .bind(id)
+        .run();
+    }
 
     // Notify via Durable Object
     const doId = env.CHAT_ROOM.idFromName(id);

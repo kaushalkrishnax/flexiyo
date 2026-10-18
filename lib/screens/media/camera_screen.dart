@@ -3,12 +3,12 @@ import 'dart:io' if (dart.library.html) 'package:flexiyo/core/io_stub.dart';
 import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
-import 'package:flexiyo/providers/conversation_provider.dart';
-import 'package:flexiyo/services/media_service.dart';
-import 'package:flexiyo/widgets/avatar.dart';
+import 'package:flexiyo/providers/chat/conversation_provider.dart';
+import 'package:flexiyo/services/media/media_service.dart';
+import 'package:flexiyo/widgets/conversation/avatar.dart';
 import 'package:flexiyo/widgets/confirm_popup.dart';
-import 'package:flexiyo/widgets/media_gallery_sheet.dart';
-import 'package:flexiyo/widgets/media_image_bubble.dart';
+import 'package:flexiyo/widgets/media/media_gallery_sheet.dart';
+import 'package:flexiyo/widgets/media/media_image_bubble.dart';
 import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';

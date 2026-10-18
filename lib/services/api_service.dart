@@ -132,7 +132,9 @@ class ApiService {
         await _get('/api/devices/key-bundles/$userId') as Map<String, dynamic>;
     final rawList = (data['bundles'] as List<dynamic>?) ?? const [];
     return rawList
-        .map((b) => KeyBundle.fromJson(b as Map<String, dynamic>))
+        .map(
+          (b) => KeyBundle.fromJson(b as Map<String, dynamic>),
+        )
         .toList();
   }
 
@@ -268,28 +270,6 @@ class ApiService {
         .toList();
   }
 
-  Future<Map<String, dynamic>> sendMessage(
-    String conversationId, {
-    required String recipientId,
-    required List<Map<String, dynamic>> payloads,
-    required String messageType,
-    required String messageId,
-    String? mediaId,
-    int? expiresIn,
-    String? replyToId,
-  }) async {
-    final body = <String, dynamic>{
-      'id': messageId,
-      'recipientId': recipientId,
-      'payloads': payloads,
-      'messageType': messageType,
-      if (mediaId != null) 'mediaId': mediaId,
-    };
-    if (expiresIn != null && expiresIn > 0) body['expires_in'] = expiresIn;
-    if (replyToId != null) body['replyToId'] = replyToId;
-    return _post('/api/conversations/$conversationId/messages', body);
-  }
-
   Future<void> editMessage(
     String conversationId,
     String messageId, {
@@ -300,7 +280,7 @@ class ApiService {
     await _patch('/api/conversations/$conversationId/messages/$messageId', {
       'payloads': payloads,
       'version': version,
-      'message_type': messageType,
+      'messageType': messageType,
     });
   }
 
@@ -322,14 +302,6 @@ class ApiService {
       '/api/conversations/$conversationId/messages/$messageId/reaction',
       {'emoji': emoji},
     );
-  }
-
-  /// Delete for the current user only (local tombstone on server).
-  Future<void> deleteMessageForMe(
-    String conversationId,
-    String messageId,
-  ) async {
-    await deleteMessagesForMe(conversationId, [messageId]);
   }
 
   Future<void> deleteMessagesForMe(

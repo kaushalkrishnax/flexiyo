@@ -1,21 +1,21 @@
 import 'dart:async';
 
-import 'package:flexiyo/core/platform_image_picker.dart';
+import 'package:flexiyo/core/image_picker/platform_image_picker.dart';
 import 'package:flexiyo/models/message.dart';
 import 'package:flexiyo/providers/auth_provider.dart';
-import 'package:flexiyo/providers/chat_provider.dart';
-import 'package:flexiyo/providers/conversation_provider.dart';
+import 'package:flexiyo/providers/chat/chat_provider.dart';
+import 'package:flexiyo/providers/chat/conversation_provider.dart';
 import 'package:flexiyo/screens/media/camera_screen.dart';
 import 'package:flexiyo/services/api_service.dart';
-import 'package:flexiyo/services/media_service.dart';
-import 'package:flexiyo/widgets/avatar.dart';
-import 'package:flexiyo/widgets/app_popup_menu.dart';
-import 'package:flexiyo/widgets/date_separator.dart';
-import 'package:flexiyo/widgets/media_gallery_sheet.dart';
-import 'package:flexiyo/widgets/message_bubble.dart';
-import 'package:flexiyo/widgets/skeleton.dart';
-import 'package:flexiyo/widgets/typing_indicator.dart';
-import 'package:flexiyo/widgets/voice_recorder_bar.dart';
+import 'package:flexiyo/services/media/media_service.dart';
+import 'package:flexiyo/widgets/conversation/avatar.dart';
+import 'package:flexiyo/widgets/conversation/app_popup_menu.dart';
+import 'package:flexiyo/widgets/conversation/date_separator.dart';
+import 'package:flexiyo/widgets/media/media_gallery_sheet.dart';
+import 'package:flexiyo/widgets/conversation/message_bubble.dart';
+import 'package:flexiyo/widgets/conversation/skeleton.dart';
+import 'package:flexiyo/widgets/conversation/typing_indicator.dart';
+import 'package:flexiyo/widgets/media/voice_recorder_bar.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -46,6 +46,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
   final _scrollController = ScrollController();
   bool _atBottom = true;
   bool _recordingVoice = false;
+  late final ChatsNotifier _chatsNotifier;
 
   /// Distance (logical px) a bubble slides at full swipe travel.
   static const double _swipeMax = kMessageSwipeMaxOffset;
@@ -81,6 +82,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
   @override
   void initState() {
     super.initState();
+    _chatsNotifier = ref.read(chatsProvider.notifier);
     _scrollController.addListener(_onScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initConversation();
@@ -222,9 +224,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
 
   @override
   void dispose() {
-    ref
-        .read(chatsProvider.notifier)
-        .clearActiveConversation(widget.conversationId);
+    _chatsNotifier.clearActiveConversation(widget.conversationId);
     _messageController.dispose();
     _composerFocus.dispose();
     _scrollController.dispose();

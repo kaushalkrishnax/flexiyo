@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flexiyo/models/message.dart';
 import 'package:flexiyo/services/media_service.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hugeicons/hugeicons.dart';
@@ -92,8 +93,18 @@ class _MediaVoiceBubbleState extends ConsumerState<MediaVoiceBubble> {
       if (mounted) setState(() => _preparing = true);
 
       final service = ref.read(mediaServiceProvider);
-      final file = await service.ensureCachedFile(_ref);
-      await _player.play(DeviceFileSource(file.path));
+      if (kIsWeb) {
+        // Web plays from decrypted bytes; there are no device file paths.
+        final bytes = await service.fetchAndDecrypt(_ref);
+        await _player.play(BytesSource(bytes, mimeType: _ref.mimeType));
+      } else {
+        // Native plays the cached file; pass the recorded container hint so a
+        // WebM/Opus note isn't misread as MP4 from the cache file extension.
+        final file = await service.ensureCachedFile(_ref);
+        await _player.play(
+          DeviceFileSource(file.path, mimeType: _ref.mimeType),
+        );
+      }
       if (mounted) {
         setState(() {
           _playing = true;

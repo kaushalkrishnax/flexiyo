@@ -172,13 +172,10 @@ export class ChatRoom {
       return new Response('Invalid JSON', { status: 400 });
     }
 
-    // Support both a single event and a bounded batch of events.
-    let events: DOEvent[] = [];
-    if (Array.isArray((body as { events?: unknown })?.events)) {
-      events = ((body as { events: DOEvent[] }).events ?? []).slice(0, 100);
-    } else if (body && typeof body === 'object' && (body as { type?: unknown }).type) {
-      events = [body as DOEvent];
-    }
+    // Bounded batch of events.
+    const events: DOEvent[] = Array.isArray((body as { events?: unknown })?.events)
+      ? ((body as { events: DOEvent[] }).events ?? []).slice(0, 100)
+      : [];
 
     let delivered = 0;
     for (const event of events) {

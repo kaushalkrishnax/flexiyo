@@ -292,6 +292,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
     MediaKind kind, {
     ViewPolicy policy = ViewPolicy.unlimited,
     int? durationMs,
+    String? mimeType,
   }) async {
     try {
       final service = ref.read(mediaServiceProvider);
@@ -301,6 +302,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
         kind: kind,
         policy: policy,
         durationMs: durationMs,
+        mimeType: mimeType,
       );
       await ref
           .read(conversationProvider(widget.conversationId).notifier)
@@ -755,7 +757,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
             else if (_recordingVoice)
               VoiceRecorderBar(
                 onCancel: () => setState(() => _recordingVoice = false),
-                onSend: (bytes, durationMs) async {
+                onSend: (bytes, durationMs, mimeType) async {
                   if (mounted) {
                     setState(() => _recordingVoice = false);
                   }
@@ -763,6 +765,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                     bytes,
                     MediaKind.voice,
                     durationMs: durationMs,
+                    mimeType: mimeType,
                   );
                 },
               )

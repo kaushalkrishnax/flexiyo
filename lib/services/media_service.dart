@@ -1,14 +1,12 @@
 import 'dart:convert';
-import 'dart:io' if (dart.library.html) 'package:flexiyo/core/io_stub.dart';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:dio/dio.dart';
 import 'package:flexiyo/core/constants.dart';
+import 'package:flexiyo/services/media_cache.dart';
 import 'package:flexiyo/storage/secure_keys.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
 
 enum ViewPolicy { once, twice, unlimited }
 
@@ -57,6 +55,7 @@ class MediaRef {
     required this.key,
     required this.nonce,
     required this.mac,
+    required this.mimeType,
     this.durationMs,
     this.size,
   });
@@ -73,6 +72,10 @@ class MediaRef {
   final int? durationMs;
   final int? size;
 
+  /// Container mime of the plaintext (e.g. `audio/webm` for web recordings),
+  /// so the player always gets the right hint regardless of platform.
+  final String mimeType;
+
   String get label => kind == MediaKind.voice ? '🎤 Voice note' : '📷 Photo';
 
   Map<String, dynamic> toJson() => {
@@ -85,6 +88,7 @@ class MediaRef {
         'p': policy.value,
         if (durationMs != null) 'd': durationMs,
         if (size != null) 's': size,
+        'm': mimeType,
       };
 
   String toEnvelopeString() => '$mediaPrefix${jsonEncode(toJson())}';
@@ -109,6 +113,7 @@ class MediaRef {
         mac: Uint8List.fromList(mac),
         durationMs: json['d'] as int?,
         size: json['s'] as int?,
+        mimeType: json['m'] as String,
       );
     } catch (_) {
       return null;
@@ -126,14 +131,51 @@ class MediaService {
 
   final SecureKeys _secureKeys;
 
-  dynamic _cacheDir;
-
-  Future<dynamic> get _cacheDirFuture async =>
-      _cacheDir ??= await getTemporaryDirectory();
-
-  Future<File> _cacheFile(String mediaId, String suffix) async {
-    final dir = await _cacheDirFuture;
-    return File(p.join(dir.path, 'media_$mediaId.$suffix'));
+  /// Detects the plaintext container from magic bytes. Voice notes pass an
+  /// explicit mime from the recorder; images fall back to this.
+  static String sniffMime(Uint8List b) {
+    if (b.length >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) {
+      return 'image/jpeg';
+    }
+    if (b.length >= 8 &&
+        b[0] == 0x89 &&
+        b[1] == 0x50 &&
+        b[2] == 0x4E &&
+        b[3] == 0x47) {
+      return 'image/png';
+    }
+    if (b.length >= 12 &&
+        b[8] == 0x57 &&
+        b[9] == 0x45 &&
+        b[10] == 0x42 &&
+        b[11] == 0x50) {
+      return 'image/webp';
+    }
+    if (b.length >= 3 && b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46) {
+      return 'image/gif';
+    }
+    if (b.length >= 12 &&
+        b[4] == 0x66 &&
+        b[5] == 0x74 &&
+        b[6] == 0x79 &&
+        b[7] == 0x70) {
+      return 'audio/mp4';
+    }
+    if (b.length >= 4 &&
+        b[0] == 0x1A &&
+        b[1] == 0x45 &&
+        b[2] == 0xDF &&
+        b[3] == 0xA3) {
+      return 'audio/webm';
+    }
+    if (b.length >= 4 &&
+        b[0] == 0x4F &&
+        b[1] == 0x67 &&
+        b[2] == 0x67 &&
+        b[3] == 0x53) {
+      return 'audio/ogg';
+    }
+    return 'application/octet-stream';
   }
 
   /// Encrypts [plaintext] with a fresh random AES-256 key; returns the key,
@@ -175,6 +217,7 @@ class MediaService {
     required MediaKind kind,
     required ViewPolicy policy,
     int? durationMs,
+    String? mimeType,
   }) async {
     if (bytes.isEmpty) throw Exception('Nothing to send');
     if (bytes.length > maxUploadBytes) {
@@ -239,12 +282,13 @@ class MediaService {
       mac: enc.ctMac.sublist(enc.ctMac.length - 16),
       durationMs: durationMs,
       size: bytes.length,
+      mimeType: mimeType ?? sniffMime(bytes),
     );
 
     // Pre-seed the sender cache so their own bubble renders without a fetch.
     try {
       final cache =
-          await _cacheFile(mediaId, kind == MediaKind.voice ? 'm4a' : 'img');
+          await getCacheFile(mediaId, kind == MediaKind.voice ? 'm4a' : 'img');
       await cache.writeAsBytes(bytes, flush: true);
     } catch (_) {}
     return ref;
@@ -258,7 +302,7 @@ class MediaService {
     bool storeCache = true,
   }) async {
     final suffix = ref.kind == MediaKind.voice ? 'm4a' : 'img';
-    final cache = await _cacheFile(ref.id, suffix);
+    final cache = await getCacheFile(ref.id, suffix);
     if (useCache && await cache.exists()) {
       final cached = await cache.readAsBytes();
       if (cached.isNotEmpty) return cached;
@@ -280,11 +324,24 @@ class MediaService {
         '${AppConstants.apiBaseUrl}/api/media/${ref.id}',
       );
       final data = resp.data;
-      raw = data is Uint8List ? data : Uint8List.fromList(data as List<int>);
+      if (data is Uint8List) {
+        raw = data;
+      } else if (data is ByteBuffer) {
+        raw = Uint8List.view(data);
+      } else if (data is List<int>) {
+        raw = Uint8List.fromList(data);
+      } else {
+        throw Exception('Unexpected response data type: ${data.runtimeType}');
+      }
     } on DioException catch (e) {
       final status = e.response?.statusCode;
       if (status == 410) throw MediaExpiredException();
       if (status == 429) throw Exception('Daily download limit reached');
+      rethrow;
+    } catch (e) {
+      // Surface the real cause in the console for web debugging.
+      // ignore: avoid_print
+      print('media fetch failed: $e');
       rethrow;
     }
 
@@ -308,16 +365,16 @@ class MediaService {
   /// Cached plaintext bytes, if any; never touches the network.
   Future<Uint8List?> cachedBytes(MediaRef ref) async {
     final suffix = ref.kind == MediaKind.voice ? 'm4a' : 'img';
-    final cache = await _cacheFile(ref.id, suffix);
+    final cache = await getCacheFile(ref.id, suffix);
     if (!await cache.exists()) return null;
     final bytes = await cache.readAsBytes();
     return bytes.isEmpty ? null : bytes;
   }
 
-  /// Decrypted file on disk for players that need a path; fetches if missing.
-  Future<File> ensureCachedFile(MediaRef ref) async {
+  /// Decrypted media for players that consume a path; fetches if missing.
+  Future<MediaCacheFile> ensureCachedFile(MediaRef ref) async {
     final suffix = ref.kind == MediaKind.voice ? 'm4a' : 'img';
-    final cache = await _cacheFile(ref.id, suffix);
+    final cache = await getCacheFile(ref.id, suffix);
     if (await cache.exists() && await cache.length() > 0) return cache;
     await fetchAndDecrypt(ref, useCache: false);
     return cache;

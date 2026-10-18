@@ -1,13 +1,11 @@
 import 'dart:async';
-import 'dart:io' if (dart.library.html) 'package:flexiyo/core/io_stub.dart';
 import 'dart:math' as math;
-import 'dart:typed_data';
 
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flexiyo/core/platform_audio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:hugeicons/hugeicons.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 
 /// Composer replacement for recording a voice note: live waveform, timer,
@@ -22,7 +20,8 @@ class VoiceRecorderBar extends StatefulWidget {
   final VoidCallback onCancel;
 
   /// Hands the finished recording to the parent for upload and sending.
-  final Future<void> Function(Uint8List bytes, int durationMs) onSend;
+  final Future<void> Function(Uint8List bytes, int durationMs, String mimeType)
+      onSend;
 
   @override
   State<VoiceRecorderBar> createState() => _VoiceRecorderBarState();
@@ -54,6 +53,7 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar>
   _RecPhase _phase = _RecPhase.recording;
   final List<double> _levels = [];
   String? _filePath;
+  String _mimeType = 'audio/mp4';
   bool _sending = false;
 
   /// True while the stopped take is being previewed through [_previewPlayer].
@@ -85,14 +85,17 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar>
         _fail('Microphone permission is required for voice notes');
         return;
       }
-      final dir = await getTemporaryDirectory();
-      final path = p.join(
-        dir.path,
-        'voice_${DateTime.now().millisecondsSinceEpoch}.m4a',
-      );
+      final path = await newVoiceRecordingPath();
+      // Browsers differ in MediaRecorder codec support; fall back to Opus when
+      // AAC isn't available. Native platforms always support AAC-LC.
+      final encoder =
+          kIsWeb && !await _recorder.isEncoderSupported(AudioEncoder.aacLc)
+              ? AudioEncoder.opus
+              : AudioEncoder.aacLc;
+      _mimeType = encoder == AudioEncoder.opus ? 'audio/webm' : 'audio/mp4';
       await _recorder.start(
-        const RecordConfig(
-          encoder: AudioEncoder.aacLc,
+        RecordConfig(
+          encoder: encoder,
           bitRate: 64000,
           sampleRate: 44100,
         ),
@@ -182,7 +185,10 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar>
           _previewPlayer.source != null) {
         await _previewPlayer.resume();
       } else {
-        await _previewPlayer.play(DeviceFileSource(path));
+        // On web the stopped take is a blob URL, not a device file.
+        await _previewPlayer.play(
+          kIsWeb ? UrlSource(path) : DeviceFileSource(path),
+        );
       }
       if (mounted) setState(() => _previewing = true);
     } catch (_) {}
@@ -217,10 +223,7 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar>
   Future<void> _deleteCurrentFile() async {
     final path = _filePath;
     if (path == null) return;
-    try {
-      final file = File(path);
-      if (await file.exists()) await file.delete();
-    } catch (_) {}
+    await deleteAudioFile(path);
     _filePath = null;
   }
 
@@ -254,12 +257,12 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar>
       return;
     }
     try {
-      final bytes = await File(path).readAsBytes();
+      final bytes = await readAudioBytes(path);
       if (bytes.isEmpty) {
         await _discard();
         return;
       }
-      await widget.onSend(bytes, _stopwatch.elapsed.inMilliseconds);
+      await widget.onSend(bytes, _stopwatch.elapsed.inMilliseconds, _mimeType);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -267,9 +270,7 @@ class _VoiceRecorderBarState extends State<VoiceRecorderBar>
         );
       }
     } finally {
-      try {
-        await File(path).delete();
-      } catch (_) {}
+      await deleteAudioFile(path);
       if (mounted) setState(() => _sending = false);
     }
   }

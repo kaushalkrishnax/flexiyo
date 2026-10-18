@@ -279,9 +279,11 @@ conversationsRouter.patch(
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          type: nextStatus === 'accepted' ? 'request_accepted' : 'request_rejected',
-          conversationId: id,
-          changedBy: userId,
+          events: [{
+            type: nextStatus === 'accepted' ? 'request_accepted' : 'request_rejected',
+            conversationId: id,
+            changedBy: userId,
+          }],
         }),
       }));
     } catch {
@@ -467,10 +469,12 @@ conversationsRouter.patch(
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          type: 'disappearing_timer_changed',
-          conversationId: id,
-          timer,
-          changedBy: userId,
+          events: [{
+            type: 'disappearing_timer_changed',
+            conversationId: id,
+            timer,
+            changedBy: userId,
+          }],
         }),
       }),
     );

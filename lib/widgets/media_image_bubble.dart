@@ -66,7 +66,9 @@ class _MediaImageBubbleState extends ConsumerState<MediaImageBubble> {
       }
     } on MediaExpiredException {
       if (mounted) setState(() => _expired = true);
-    } catch (_) {
+    } catch (e) {
+      // ignore: avoid_print
+      print('media image load failed: $e');
       // Fall through to the retry tile.
     } finally {
       if (mounted) setState(() => _loading = false);

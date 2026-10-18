@@ -1,5 +1,5 @@
-import 'dart:typed_data';
-
+import 'package:flexiyo/core/platform_image_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:hugeicons/hugeicons.dart';
 import 'package:photo_manager/photo_manager.dart';
@@ -9,6 +9,21 @@ import 'package:photo_manager/photo_manager.dart';
 Future<({Uint8List bytes, bool edit})?> showMediaGallerySheet(
   BuildContext context,
 ) {
+  // Web has no device photo library; show upload instructions and hand the
+  // chosen file to the preview/crop screen.
+  if (kIsWeb) {
+    return showModalBottomSheet<({Uint8List bytes, bool edit})>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1B1B1D),
+      barrierColor: Colors.black54,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (_) => const _WebUploadSheet(),
+    );
+  }
+
   return showModalBottomSheet<({Uint8List bytes, bool edit})>(
     context: context,
     isScrollControlled: true,
@@ -19,6 +34,93 @@ Future<({Uint8List bytes, bool edit})?> showMediaGallerySheet(
     ),
     builder: (_) => const _MediaGallerySheet(),
   );
+}
+
+/// Web-only picker: the browser has no photo library to browse, so explain the
+/// flow and open the file chooser from a single action.
+class _WebUploadSheet extends StatefulWidget {
+  const _WebUploadSheet();
+
+  @override
+  State<_WebUploadSheet> createState() => _WebUploadSheetState();
+}
+
+class _WebUploadSheetState extends State<_WebUploadSheet> {
+  bool _picking = false;
+
+  Future<void> _upload() async {
+    if (_picking) return;
+    setState(() => _picking = true);
+    final bytes = await pickImageBytes();
+    if (!mounted) return;
+    setState(() => _picking = false);
+    if (bytes == null || bytes.isEmpty) return;
+    Navigator.of(context)
+        .pop<({Uint8List bytes, bool edit})>((bytes: bytes, edit: true));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 26, 24, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const HugeIcon(
+              icon: HugeIcons.strokeRoundedImageUpload,
+              color: Colors.white,
+              size: 40,
+            ),
+            const SizedBox(height: 14),
+            const Text(
+              'Photo library access is not available on the web.\n'
+              'Pick an image from your device, then preview and crop it '
+              'before sending.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white70,
+                fontSize: 13.5,
+                height: 1.45,
+              ),
+            ),
+            const SizedBox(height: 22),
+            SizedBox(
+              width: double.infinity,
+              height: 48,
+              child: FilledButton(
+                onPressed: _picking ? null : _upload,
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF5E5CE6),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                child: _picking
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2.2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Text(
+                        'Upload Image',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 enum _GalleryView { recents, albums, album }

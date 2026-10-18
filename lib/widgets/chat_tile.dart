@@ -70,22 +70,21 @@ class ChatTile extends StatelessWidget {
                     // Last message preview / message count
                     Text(
                       hasUnread
-                              ? (conversation.unreadCount >= 4
-                                  ? '4+ new messages'
-                                  : conversation.unreadCount == 3
-                                      ? '3 new messages'
-                                      : conversation.unreadCount == 2
-                                          ? '2 new messages'
-                                          : (preview != null &&
-                                                  preview != 'Encrypted message'
-                                              ? preview
-                                              : 'Sent a message'))
-                              : (preview != null &&
-                                      preview != 'Encrypted message'
-                                  ? preview
-                                  : conversation.lastMessageAt != null
-                                      ? 'Sent a message'
-                                      : 'New conversation'),
+                          ? (conversation.unreadCount >= 4
+                              ? '4+ new messages'
+                              : conversation.unreadCount == 3
+                                  ? '3 new messages'
+                                  : conversation.unreadCount == 2
+                                      ? '2 new messages'
+                                      : (preview != null &&
+                                              preview != 'Encrypted message'
+                                          ? preview
+                                          : 'Sent a message'))
+                          : (preview != null && preview != 'Encrypted message'
+                              ? preview
+                              : conversation.lastMessageAt != null
+                                  ? 'Sent a message'
+                                  : 'New conversation'),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: tt.bodySmall?.copyWith(

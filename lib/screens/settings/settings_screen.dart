@@ -57,7 +57,8 @@ class SettingsScreen extends ConsumerWidget {
             ),
             const Divider(),
             ListTile(
-              leading: const HugeIcon(icon: HugeIcons.strokeRoundedSystemUpdate01),
+              leading:
+                  const HugeIcon(icon: HugeIcons.strokeRoundedSystemUpdate01),
               title: const Text('Check for updates'),
               subtitle: const Text('Download and install the latest release'),
               onTap: () async {
@@ -77,7 +78,8 @@ class SettingsScreen extends ConsumerWidget {
             ),
             const Divider(),
             ListTile(
-              leading: const HugeIcon(icon: HugeIcons.strokeRoundedLogOut, color: Colors.red),
+              leading: const HugeIcon(
+                  icon: HugeIcons.strokeRoundedLogOut, color: Colors.red),
               title: const Text('Log out'),
               onTap: () async {
                 final confirmed = await _showLogoutDialog(context);

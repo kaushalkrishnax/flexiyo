@@ -106,4 +106,3 @@ void main() {
     expect(unpinned.isMuted, isTrue);
   });
 }
-

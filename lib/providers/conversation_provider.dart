@@ -83,7 +83,6 @@ class ConversationState {
   }
 }
 
-
 class ConversationNotifier extends StateNotifier<ConversationState> {
   ConversationNotifier({
     required this.conversationId,
@@ -336,7 +335,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     // Deduplicate
     if (state.messages.any((m) => m.id == msgId)) return;
 
-    String plaintext = encryptedPayload;
+    String? plaintext;
     if (senderId == _myUserId) {
       try {
         final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
@@ -353,7 +352,9 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         );
         await crypto.saveLocalMessageText(msgId, plaintext);
       } catch (_) {
-        plaintext = encryptedPayload;
+        // Never surface ciphertext as message text. Leave plaintext null so the
+        // bubble renders a neutral decryption-failed state.
+        plaintext = null;
       }
     }
 
@@ -378,19 +379,25 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     await LocalDb.instance.upsertMessage(msg.toJson());
     _scheduleExpiryPurge();
 
-    // Send delivery acknowledgement
-    _ws?.sendDeliveryAck(msgId);
+    // Only acknowledge delivery once the payload is durably stored and, for
+    // incoming messages, successfully decrypted.
+    final decryptionOk = senderId == _myUserId || plaintext != null;
+    if (decryptionOk) {
+      _ws?.sendDeliveryAck(msgId);
+    }
 
     final isIncoming = senderId != _myUserId;
-    if (isIncoming && state.conversation?.requestStatus == 'accepted' && !(await _isRestricted())) {
+    if (isIncoming &&
+        state.conversation?.requestStatus == 'accepted' &&
+        !(await _isRestricted())) {
       unawaited(_markConversationRead());
     }
 
     // Media envelopes render as a friendly label in the chat list.
-    final mediaPreview = MediaRef.parse(plaintext);
+    final mediaPreview = plaintext != null ? MediaRef.parse(plaintext) : null;
     _ref.read(chatsProvider.notifier).onNewMessage(
           conversationId: conversationId,
-          preview: mediaPreview?.label ?? plaintext,
+          preview: mediaPreview?.label ?? (plaintext ?? 'Message'),
           lastMessageAt: createdAt,
           isIncoming: isIncoming,
         );
@@ -453,12 +460,12 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
       final readAtSeconds = readAtRaw > 1e12 ? readAtRaw ~/ 1000 : readAtRaw;
       final readAt = DateTime.fromMillisecondsSinceEpoch(readAtSeconds * 1000);
-      final expiresAt = timer == -1
-          ? readAt
-          : readAt.add(Duration(seconds: timer));
+      final expiresAt =
+          timer == -1 ? readAt : readAt.add(Duration(seconds: timer));
       final updated = state.messages.map((message) {
         if (message.senderId != _myUserId &&
-            message.createdAt.millisecondsSinceEpoch <= readAt.millisecondsSinceEpoch &&
+            message.createdAt.millisecondsSinceEpoch <=
+                readAt.millisecondsSinceEpoch &&
             message.expiresAt == null) {
           return message.copyWith(expiresAt: expiresAt);
         }
@@ -533,13 +540,26 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     if (original == null) return;
 
     final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
-    final plaintext = original.senderId == _myUserId
-        ? await crypto.getLocalMessageText(msgId) ?? original.decryptedText
-        : await crypto.decryptFromUser(
-            senderId: original.senderId,
-            payload: encryptedPayload,
-            messageType: messageType,
-          );
+    String? plaintext;
+    if (original.senderId == _myUserId) {
+      plaintext =
+          await crypto.getLocalMessageText(msgId) ?? original.decryptedText;
+    } else {
+      try {
+        plaintext = await crypto.decryptFromUser(
+          senderId: original.senderId,
+          payload: encryptedPayload,
+          messageType: messageType,
+        );
+      } catch (_) {
+        plaintext = null;
+      }
+    }
+    if (plaintext != null && original.senderId != _myUserId) {
+      try {
+        await crypto.saveLocalMessageText(msgId, plaintext);
+      } catch (_) {}
+    }
 
     final updated = state.messages.map((m) {
       if (m.id == msgId) {
@@ -628,7 +648,9 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     }
     if (text.isEmpty || conv == null || state.isSending) return;
     if (await _isRestricted()) {
-      if (mounted) state = state.copyWith(error: 'Unrestrict this chat to send messages');
+      if (mounted) {
+        state = state.copyWith(error: 'Unrestrict this chat to send messages');
+      }
       return;
     }
     if (conv.requestStatus == 'pending' && conv.initiatedById != _myUserId) {
@@ -914,7 +936,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     }
   }
 
-
   void setReplyTo(Message message) {
     state = state.copyWith(replyTo: message, clearEditDraft: true);
   }
@@ -964,7 +985,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     );
   }
 
-
   void _upsertMessage(Message msg) {
     final list = [...state.messages];
     final idx = list.indexWhere((m) => m.id == msg.id);
@@ -1004,7 +1024,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     super.dispose();
   }
 }
-
 
 final conversationProvider = StateNotifierProvider.autoDispose
     .family<ConversationNotifier, ConversationState, String>(

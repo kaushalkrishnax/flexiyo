@@ -70,7 +70,8 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('an incoming reply quotes the message it answers', (tester) async {
+  testWidgets('an incoming reply quotes the message it answers',
+      (tester) async {
     final parent = _message(id: 'p1', senderId: 'me', text: 'Sent earlier');
     final reply = _message(
       id: 'm2',
@@ -87,7 +88,8 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('the quote pipe sits on the right for my replies', (tester) async {
+  testWidgets('the quote pipe sits on the right for my replies',
+      (tester) async {
     final parent = _message(id: 'p1', senderId: 'them', text: 'What is it?');
     final reply = _message(
       id: 'm1',

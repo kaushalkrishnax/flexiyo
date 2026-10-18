@@ -445,8 +445,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                     onTap: () {
                       if (conversationState.isSelectionMode) {
                         ref
-                            .read(conversationProvider(
-                                    widget.conversationId)
+                            .read(conversationProvider(widget.conversationId)
                                 .notifier)
                             .exitSelectionMode();
                       }
@@ -477,31 +476,27 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                         final message = messages[index];
                         final isMine = message.senderId == myUserId;
 
-                        final prev =
-                            index > 0 ? messages[index - 1] : null;
+                        final prev = index > 0 ? messages[index - 1] : null;
                         final next = index < messages.length - 1
                             ? messages[index + 1]
                             : null;
 
-                        final sameAsPrev =
-                            prev?.senderId == message.senderId &&
-                                message.createdAt
-                                        .difference(prev!.createdAt)
-                                        .inMinutes <
-                                    3;
-                        final sameAsNext =
-                            next?.senderId == message.senderId &&
-                                next!.createdAt
-                                        .difference(message.createdAt)
-                                        .inMinutes <
-                                    3;
+                        final sameAsPrev = prev?.senderId == message.senderId &&
+                            message.createdAt
+                                    .difference(prev!.createdAt)
+                                    .inMinutes <
+                                3;
+                        final sameAsNext = next?.senderId == message.senderId &&
+                            next!.createdAt
+                                    .difference(message.createdAt)
+                                    .inMinutes <
+                                3;
 
                         final isFirst = !sameAsPrev;
                         final isLast = !sameAsNext;
 
                         final showSeparator = prev == null ||
-                            !_isSameDay(
-                                prev.createdAt, message.createdAt);
+                            !_isSameDay(prev.createdAt, message.createdAt);
 
                         Message? replyToMsg;
                         if (message.replyToId != null) {
@@ -512,12 +507,10 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                           } catch (_) {}
                         }
 
-                        final isSelected = conversationState
-                            .selectedMessageIds
+                        final isSelected = conversationState.selectedMessageIds
                             .contains(message.id);
 
-                        final swipeEnabled =
-                            !conversationState.isSelectionMode;
+                        final swipeEnabled = !conversationState.isSelectionMode;
 
                         return Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -537,11 +530,10 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                                   ? HitTestBehavior.opaque
                                   : HitTestBehavior.deferToChild,
                               onHorizontalDragStart: swipeEnabled
-                                  ? (_) =>
-                                      _onMessageSwipeStart(message.id)
+                                  ? (_) => _onMessageSwipeStart(message.id)
                                   : null,
                               onHorizontalDragUpdate: swipeEnabled
-                                      ? (details) => _onMessageSwipeUpdate(
+                                  ? (details) => _onMessageSwipeUpdate(
                                         details,
                                         message.id,
                                         isMine,
@@ -558,7 +550,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                                   ref
                                       .read(conversationProvider(
                                               widget.conversationId)
-                                      .notifier)
+                                          .notifier)
                                       .toggleSelection(message.id);
                                 } else {
                                   _showContextMenu(
@@ -576,12 +568,10 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                                   isFirst: isFirst,
                                   isLast: isLast,
                                   showAvatar: !isMine && isLast,
-                                  otherUsername:
-                                      conv?.otherUsername ?? '',
+                                  otherUsername: conv?.otherUsername ?? '',
                                   isSelected: isSelected,
                                   replyToMessage: replyToMsg,
-                                  swipeAnimation:
-                                      swipeEnabled ? _swipe : null,
+                                  swipeAnimation: swipeEnabled ? _swipe : null,
                                   swiping: _swipingId == message.id,
                                   timesReveal: _timesReveal,
                                   onTap: conversationState.isSelectionMode
@@ -595,11 +585,9 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                                               isMine
                                           ? () => ref
                                               .read(conversationProvider(
-                                                      widget
-                                                          .conversationId)
+                                                      widget.conversationId)
                                                   .notifier)
-                                              .retryFailedMessage(
-                                                  message.id)
+                                              .retryFailedMessage(message.id)
                                           : null),
                                 ),
                                 builder: (context, child) {
@@ -686,8 +674,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                     Expanded(
                       child: FilledButton(
                         onPressed: () async {
-                          final notifier = ref.read(
-                              chatsProvider.notifier);
+                          final notifier = ref.read(chatsProvider.notifier);
                           if (widget.browseMode == 'restricted') {
                             await notifier.unrestrict(widget.conversationId);
                           } else {
@@ -711,7 +698,8 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                     Expanded(
                       child: OutlinedButton.icon(
                         onPressed: () => _respondToRequest(accept: false),
-                        icon: const HugeIcon(icon: HugeIcons.strokeRoundedDelete02),
+                        icon: const HugeIcon(
+                            icon: HugeIcons.strokeRoundedDelete02),
                         label: const Text('Delete request'),
                       ),
                     ),
@@ -719,7 +707,8 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                     Expanded(
                       child: FilledButton.icon(
                         onPressed: () => _respondToRequest(accept: true),
-                        icon: const HugeIcon(icon: HugeIcons.strokeRoundedCheck),
+                        icon:
+                            const HugeIcon(icon: HugeIcons.strokeRoundedCheck),
                         label: const Text('Accept'),
                       ),
                     ),
@@ -728,10 +717,9 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
               )
             else if (conversationState.conversation?.requestStatus ==
                     'pending' &&
-                conversationState.conversation?.initiatedById ==
-                    myUserId &&
-                messages.any((m) =>
-                    !m.isUnsent && m.status != MessageStatus.failed))
+                conversationState.conversation?.initiatedById == myUserId &&
+                messages.any(
+                    (m) => !m.isUnsent && m.status != MessageStatus.failed))
               Padding(
                 padding: const EdgeInsets.all(16),
                 child: Text(
@@ -756,15 +744,12 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
               )
             else if (conversationState.isSelectionMode)
               _SelectionBar(
-                selectedCount:
-                    conversationState.selectedMessageIds.length,
+                selectedCount: conversationState.selectedMessageIds.length,
                 onCancel: () => ref
-                    .read(conversationProvider(widget.conversationId)
-                        .notifier)
+                    .read(conversationProvider(widget.conversationId).notifier)
                     .exitSelectionMode(),
                 onDeleteForMe: () => ref
-                    .read(conversationProvider(widget.conversationId)
-                        .notifier)
+                    .read(conversationProvider(widget.conversationId).notifier)
                     .deleteSelectedForMe(),
               )
             else if (_recordingVoice)
@@ -798,13 +783,12 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                   setState(() => _recordingVoice = true);
                 },
                 onCancelReply: () => ref
-                    .read(conversationProvider(widget.conversationId)
-                        .notifier)
+                    .read(conversationProvider(widget.conversationId).notifier)
                     .clearReplyTo(),
                 onCancelEdit: () {
                   ref
-                      .read(conversationProvider(widget.conversationId)
-                          .notifier)
+                      .read(
+                          conversationProvider(widget.conversationId).notifier)
                       .clearEditDraft();
                   _messageController.clear();
                 },
@@ -828,7 +812,8 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
       surfaceTintColor: Colors.transparent,
       leadingWidth: 40,
       leading: IconButton(
-        icon: const HugeIcon(icon: HugeIcons.strokeRoundedArrowLeft01, size: 20),
+        icon:
+            const HugeIcon(icon: HugeIcons.strokeRoundedArrowLeft01, size: 20),
         onPressed: () => context.pop(),
         tooltip: 'Back',
       ),
@@ -1007,18 +992,18 @@ class _ComposerBar extends ConsumerWidget {
                     children: [
                       Expanded(
                         child: Container(
-                           constraints: const BoxConstraints(minHeight: 52),
+                          constraints: const BoxConstraints(minHeight: 52),
                           decoration: BoxDecoration(
                             color: capsuleBg,
                             borderRadius: BorderRadius.circular(
                               isMultiline ? 12 : 24,
                             ),
                           ),
-                           child: Row(
-                              crossAxisAlignment: isMultiline
-                                  ? CrossAxisAlignment.end
-                                  : CrossAxisAlignment.center,
-                              children: [
+                          child: Row(
+                            crossAxisAlignment: isMultiline
+                                ? CrossAxisAlignment.end
+                                : CrossAxisAlignment.center,
+                            children: [
                               // Always visible: keeping this at index 0
                               // stops the text field from being recreated
                               // (and losing focus) when typing starts.
@@ -1078,9 +1063,9 @@ class _ComposerBar extends ConsumerWidget {
                                       errorBorder: InputBorder.none,
                                       focusedErrorBorder: InputBorder.none,
                                       isDense: true,
-                                       contentPadding:
-                                           const EdgeInsets.symmetric(
-                                               vertical: 14),
+                                      contentPadding:
+                                          const EdgeInsets.symmetric(
+                                              vertical: 14),
                                     ),
                                   ),
                                 ),
@@ -1131,9 +1116,9 @@ class _ComposerBar extends ConsumerWidget {
                                   onTap: onSend,
                                 ),
                               ],
-                              ],
-                            ),
+                            ],
                           ),
+                        ),
                       ),
                     ],
                   );
@@ -1262,7 +1247,8 @@ class _ReplyBanner extends StatelessWidget {
             ),
           ),
           IconButton(
-            icon: const HugeIcon(icon: HugeIcons.strokeRoundedCancel01, size: 18),
+            icon:
+                const HugeIcon(icon: HugeIcons.strokeRoundedCancel01, size: 18),
             onPressed: onDismiss,
             color: colorScheme.onSurfaceVariant,
             padding: EdgeInsets.zero,
@@ -1297,7 +1283,10 @@ class _EditBanner extends StatelessWidget {
       ),
       child: Row(
         children: [
-          HugeIcon(icon: HugeIcons.strokeRoundedPencilEdit02, size: 16, color: colorScheme.tertiary),
+          HugeIcon(
+              icon: HugeIcons.strokeRoundedPencilEdit02,
+              size: 16,
+              color: colorScheme.tertiary),
           const SizedBox(width: 8),
           Expanded(
             child: Column(
@@ -1323,7 +1312,8 @@ class _EditBanner extends StatelessWidget {
             ),
           ),
           IconButton(
-            icon: const HugeIcon(icon: HugeIcons.strokeRoundedCancel01, size: 16),
+            icon:
+                const HugeIcon(icon: HugeIcons.strokeRoundedCancel01, size: 16),
             onPressed: onDismiss,
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(minWidth: 28, minHeight: 28),

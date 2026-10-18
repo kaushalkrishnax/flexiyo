@@ -1,5 +1,5 @@
 import 'dart:convert';
-import 'dart:io';
+import 'dart:io' if (dart.library.html) 'package:flexiyo/core/io_stub.dart';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
@@ -126,9 +126,9 @@ class MediaService {
 
   final SecureKeys _secureKeys;
 
-  Directory? _cacheDir;
+  dynamic _cacheDir;
 
-  Future<Directory> get _cacheDirFuture async =>
+  Future<dynamic> get _cacheDirFuture async =>
       _cacheDir ??= await getTemporaryDirectory();
 
   Future<File> _cacheFile(String mediaId, String suffix) async {

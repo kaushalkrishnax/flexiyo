@@ -88,32 +88,28 @@ class Message {
 
     return Message(
       id: json['id'] as String,
-        conversationId: json['conversationId'] as String? ?? '',
-        senderId: json['senderId'] as String? ?? '',
-        encryptedPayload: json['encryptedPayload'] as String?,
+      conversationId: json['conversationId'] as String? ?? '',
+      senderId: json['senderId'] as String? ?? '',
+      encryptedPayload: json['encryptedPayload'] as String?,
       messageType: MessageType.values.firstWhere(
         (e) => e.name == ((json['messageType'] as String?) ?? 'signal'),
         orElse: () => MessageType.signal,
       ),
       version: (json['version'] as int?) ?? 1,
-        isUnsent: json['isUnsent'] == true,
-        isEdited: json['isEdited'] == true,
-        createdAt: _parseTimestamp(json['createdAt']),
-        expiresAt: json['expiresAt'] != null
-          ? _parseTimestamp(json['expiresAt'])
-          : null,
-        editedAt: json['editedAt'] != null
-          ? _parseTimestamp(json['editedAt'])
-          : null,
+      isUnsent: json['isUnsent'] == true,
+      isEdited: json['isEdited'] == true,
+      createdAt: _parseTimestamp(json['createdAt']),
+      expiresAt:
+          json['expiresAt'] != null ? _parseTimestamp(json['expiresAt']) : null,
+      editedAt:
+          json['editedAt'] != null ? _parseTimestamp(json['editedAt']) : null,
       status: MessageStatus.values.firstWhere(
         (e) => e.name == (status as String? ?? 'sent'),
         orElse: () => MessageStatus.sent,
       ),
       replyToId: json['replyToId'] as String?,
       reaction: json['reaction'] as String?,
-      readAt: json['readAt'] != null
-          ? _parseTimestamp(json['readAt'])
-          : null,
+      readAt: json['readAt'] != null ? _parseTimestamp(json['readAt']) : null,
     );
   }
 
@@ -137,18 +133,15 @@ class Message {
       expiresAt: json['expires_at'] != null
           ? _parseTimestamp(json['expires_at'])
           : null,
-      editedAt: json['edited_at'] != null
-          ? _parseTimestamp(json['edited_at'])
-          : null,
+      editedAt:
+          json['edited_at'] != null ? _parseTimestamp(json['edited_at']) : null,
       status: MessageStatus.values.firstWhere(
         (e) => e.name == status,
         orElse: () => MessageStatus.sent,
       ),
       replyToId: json['reply_to_id'] as String?,
       reaction: json['reaction'] as String?,
-      readAt: json['read_at'] != null
-          ? _parseTimestamp(json['read_at'])
-          : null,
+      readAt: json['read_at'] != null ? _parseTimestamp(json['read_at']) : null,
     );
   }
 

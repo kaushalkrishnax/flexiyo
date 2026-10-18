@@ -45,9 +45,9 @@ class Conversation {
     final otherUser =
         json['conversant'] is Map ? json['conversant'] as Map : const {};
     final otherUserId =
-      (json['otherUserId'] ?? otherUser['id'] ?? '') as String;
+        (json['otherUserId'] ?? otherUser['id'] ?? '') as String;
     final otherUsername =
-      (json['otherUsername'] ?? otherUser['username'] ?? 'Unknown') as String;
+        (json['otherUsername'] ?? otherUser['username'] ?? 'Unknown') as String;
 
     final lastMessageAtValue = json['lastMessageAt'];
     DateTime? parsedLastMessageAt;
@@ -62,19 +62,19 @@ class Conversation {
       id: json['id'] as String,
       otherUserId: otherUserId,
       otherUsername: otherUsername,
-        disappearingTimer: (json['disappearingTimer'] as int?) ?? 0,
+      disappearingTimer: (json['disappearingTimer'] as int?) ?? 0,
       lastMessageAt: parsedLastMessageAt,
-        lastMessagePreview: json['lastMessagePreview'] as String?,
-        unreadCount: (json['unreadCount'] as int?) ?? 0,
-        requestStatus: json['requestStatus'] as String? ?? 'accepted',
-        initiatedById: json['initiatedById'] as String?,
-        isPinned: json['isPinned'] == true,
-        isMuted: json['isMuted'] == true,
-        isRestricted: json['isRestricted'] == true,
-        peerSeenAt: json['peerSeenAt'] != null
-            ? _parseTimestamp(json['peerSeenAt'])
-            : null,
-        lastMessageIsMine: json['lastMessageIsMine'] == true,
+      lastMessagePreview: json['lastMessagePreview'] as String?,
+      unreadCount: (json['unreadCount'] as int?) ?? 0,
+      requestStatus: json['requestStatus'] as String? ?? 'accepted',
+      initiatedById: json['initiatedById'] as String?,
+      isPinned: json['isPinned'] == true,
+      isMuted: json['isMuted'] == true,
+      isRestricted: json['isRestricted'] == true,
+      peerSeenAt: json['peerSeenAt'] != null
+          ? _parseTimestamp(json['peerSeenAt'])
+          : null,
+      lastMessageIsMine: json['lastMessageIsMine'] == true,
     );
   }
 
@@ -87,20 +87,20 @@ class Conversation {
     return null;
   }
 
-      factory Conversation.fromDbJson(Map<String, dynamic> row) {
-      final lastMessageAt = row['last_message_at'] as int?;
-      return Conversation(
-        id: row['id'] as String,
-        otherUserId: row['other_user_id'] as String,
-        otherUsername: row['other_username'] as String,
-        disappearingTimer: (row['disappearing_timer'] as int?) ?? 0,
-        lastMessageAt: lastMessageAt == null
+  factory Conversation.fromDbJson(Map<String, dynamic> row) {
+    final lastMessageAt = row['last_message_at'] as int?;
+    return Conversation(
+      id: row['id'] as String,
+      otherUserId: row['other_user_id'] as String,
+      otherUsername: row['other_username'] as String,
+      disappearingTimer: (row['disappearing_timer'] as int?) ?? 0,
+      lastMessageAt: lastMessageAt == null
           ? null
           : DateTime.fromMillisecondsSinceEpoch(lastMessageAt),
-        lastMessagePreview: row['last_message_preview'] as String?,
-        unreadCount: (row['unread_count'] as int?) ?? 0,
-      );
-      }
+      lastMessagePreview: row['last_message_preview'] as String?,
+      unreadCount: (row['unread_count'] as int?) ?? 0,
+    );
+  }
 
   Map<String, dynamic> toJson() => {
         'id': id,

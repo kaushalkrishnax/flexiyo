@@ -14,8 +14,7 @@ class RestrictedChatsScreen extends ConsumerStatefulWidget {
       _RestrictedChatsScreenState();
 }
 
-class _RestrictedChatsScreenState
-    extends ConsumerState<RestrictedChatsScreen> {
+class _RestrictedChatsScreenState extends ConsumerState<RestrictedChatsScreen> {
   @override
   void initState() {
     super.initState();
@@ -55,8 +54,7 @@ class BlockedChatsScreen extends ConsumerStatefulWidget {
   const BlockedChatsScreen({super.key});
 
   @override
-  ConsumerState<BlockedChatsScreen> createState() =>
-      _BlockedChatsScreenState();
+  ConsumerState<BlockedChatsScreen> createState() => _BlockedChatsScreenState();
 }
 
 class _BlockedChatsScreenState extends ConsumerState<BlockedChatsScreen> {
@@ -86,7 +84,8 @@ class _BlockedChatsScreenState extends ConsumerState<BlockedChatsScreen> {
                     final conv = items[index];
                     return _StateChatTile(
                       conversation: conv,
-                      onTap: () => context.go('/chats/${conv.id}?browse=blocked'),
+                      onTap: () =>
+                          context.go('/chats/${conv.id}?browse=blocked'),
                     );
                   },
                 ),

@@ -108,8 +108,7 @@ class _GoogleSignInButtonState extends State<GoogleSignInButton> {
   /// frame so the host is attached to the DOM, and only when the rendered
   /// shape (theme, label, width) actually changed.
   void _scheduleRender({required bool isDark, required double width}) {
-    final signature =
-        '${widget.signUp}|$isDark|${width.toStringAsFixed(1)}';
+    final signature = '${widget.signUp}|$isDark|${width.toStringAsFixed(1)}';
     if (signature == _renderedSignature) return;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -158,8 +157,8 @@ class _GoogleSignInButtonState extends State<GoogleSignInButton> {
           child: LayoutBuilder(
             builder: (context, constraints) {
               // Undo the CSS scale so the rendered width still fills the slot.
-              final width =
-                  math.min(constraints.maxWidth / _buttonScale, _maxButtonWidth);
+              final width = math.min(
+                  constraints.maxWidth / _buttonScale, _maxButtonWidth);
               _scheduleRender(isDark: isDark, width: width);
               return HtmlElementView.fromTagName(
                 tagName: 'div',

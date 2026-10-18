@@ -41,7 +41,8 @@ class User {
         if (createdAt != null) 'created_at': createdAt!.toIso8601String(),
       };
 
-  User copyWith({String? id, String? username, String? email, DateTime? createdAt}) {
+  User copyWith(
+      {String? id, String? username, String? email, DateTime? createdAt}) {
     return User(
       id: id ?? this.id,
       username: username ?? this.username,

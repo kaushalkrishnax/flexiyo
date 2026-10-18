@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:io';
+import 'dart:io' if (dart.library.html) 'package:flexiyo/core/io_stub.dart';
 import 'dart:math' as math;
 import 'dart:typed_data';
 

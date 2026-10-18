@@ -2,8 +2,22 @@ import type { Env, DOEvent } from '../types.js';
 import { verifyJWT } from '../utils/jwt.js';
 import type { JWTPayload } from '../types.js';
 
+interface Session {
+  id: string;
+  userId: string;
+  ws: WebSocket;
+  typingCount: number;
+  typingWindowStart: number;
+}
+
+const MAX_FRAME_BYTES = 64 * 1024;
+const MAX_TYPING_PER_WINDOW = 20;
+const TYPING_WINDOW_MS = 10_000;
+const MAX_SESSIONS_PER_USER = 8;
+
 export class ChatRoom {
-  private sessions: Map<string, WebSocket> = new Map();
+  private sessions: Map<string, Session> = new Map();
+  private userSessions: Map<string, Set<string>> = new Map();
 
   private env: Env;
 
@@ -32,7 +46,6 @@ export class ChatRoom {
       return new Response('Expected WebSocket upgrade', { status: 426 });
     }
 
-    // Authenticate via ?token= query param (headers not available post-upgrade)
     const url = new URL(request.url);
     const token = url.searchParams.get('token');
 
@@ -57,7 +70,6 @@ export class ChatRoom {
       );
     }
 
-    // Check token revocation
     const jwtPayload = payload as unknown as JWTPayload;
     if (jwtPayload.jti) {
       const revoked = await this.env.DB.prepare(
@@ -76,32 +88,64 @@ export class ChatRoom {
 
     const userId = jwtPayload.sub;
 
+    // Cap concurrent sessions per user to prevent connection leaks.
+    const existing = this.userSessions.get(userId);
+    if (existing && existing.size >= MAX_SESSIONS_PER_USER) {
+      // Drop the oldest session for this user.
+      const oldestId = existing.values().next().value;
+      if (oldestId) {
+        const old = this.sessions.get(oldestId);
+        if (old) {
+          try {
+            old.ws.close(1000, 'Session limit reached');
+          } catch {
+            // ignore
+          }
+          this.removeSession(oldestId);
+        }
+      }
+    }
+
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
 
     server.accept();
 
-    const existingSession = this.sessions.get(userId);
-    if (existingSession) {
-      try {
-        existingSession.close(1000, 'Replaced by new connection');
-      } catch {
-        // ignore — already closed
-      }
-    }
+    const sessionId = crypto.randomUUID();
+    const session: Session = {
+      id: sessionId,
+      userId,
+      ws: server,
+      typingCount: 0,
+      typingWindowStart: Date.now(),
+    };
 
-    this.sessions.set(userId, server);
+    this.sessions.set(sessionId, session);
+    if (!this.userSessions.has(userId)) {
+      this.userSessions.set(userId, new Set());
+    }
+    this.userSessions.get(userId)!.add(sessionId);
 
     server.addEventListener('message', (event: MessageEvent) => {
-      this.handleClientMessage(userId, event.data as string);
+      const data = event.data;
+      if (typeof data === 'string' && data.length > MAX_FRAME_BYTES) {
+        try {
+          server.close(1009, 'Frame too large');
+        } catch {
+          // ignore
+        }
+        this.removeSession(sessionId);
+        return;
+      }
+      this.handleClientMessage(sessionId, data as string);
     });
 
+    // Only remove THIS session on close/error, never a newer one.
     server.addEventListener('close', () => {
-      this.sessions.delete(userId);
+      this.removeSession(sessionId);
     });
-
     server.addEventListener('error', () => {
-      this.sessions.delete(userId);
+      this.removeSession(sessionId);
     });
 
     server.send(JSON.stringify({ type: 'connected', userId }));
@@ -109,58 +153,100 @@ export class ChatRoom {
     return new Response(null, { status: 101, webSocket: client });
   }
 
+  private removeSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    this.sessions.delete(sessionId);
+    const set = this.userSessions.get(session.userId);
+    if (set) {
+      set.delete(sessionId);
+      if (set.size === 0) this.userSessions.delete(session.userId);
+    }
+  }
+
   private async handleBroadcast(request: Request): Promise<Response> {
-    let event: DOEvent;
+    let body: unknown;
     try {
-      event = await request.json() as DOEvent;
+      body = await request.json();
     } catch {
       return new Response('Invalid JSON', { status: 400 });
     }
 
-    this.broadcast(event);
-    return new Response(JSON.stringify({ delivered: this.sessions.size }), {
+    // Support both a single event and a bounded batch of events.
+    let events: DOEvent[] = [];
+    if (Array.isArray((body as { events?: unknown })?.events)) {
+      events = ((body as { events: DOEvent[] }).events ?? []).slice(0, 100);
+    } else if (body && typeof body === 'object' && (body as { type?: unknown }).type) {
+      events = [body as DOEvent];
+    }
+
+    let delivered = 0;
+    for (const event of events) {
+      delivered += this.broadcast(event);
+    }
+
+    return new Response(JSON.stringify({ delivered }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
   }
 
-  broadcast(event: DOEvent): void {
+  /** Returns the number of sessions that received the event. */
+  broadcast(event: DOEvent): number {
     const message = JSON.stringify(event);
     const dead: string[] = [];
+    let count = 0;
 
-    for (const [userId, ws] of this.sessions.entries()) {
+    for (const session of this.sessions.values()) {
       try {
-        ws.send(message);
+        session.ws.send(message);
+        count++;
       } catch {
-        dead.push(userId);
+        dead.push(session.id);
       }
     }
 
-    for (const userId of dead) {
-      this.sessions.delete(userId);
+    for (const id of dead) {
+      this.removeSession(id);
     }
+
+    return count;
   }
 
-  private handleClientMessage(userId: string, data: string): void {
+  private handleClientMessage(sessionId: string, data: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
     let msg: { type?: string; messageId?: string } | null = null;
     try {
       msg = JSON.parse(data) as { type?: string; messageId?: string };
     } catch {
       return;
     }
+    if (!msg || typeof msg.type !== 'string') return;
 
-    if (msg?.type === 'delivery_ack' && msg.messageId) {
-        void this.handleDeliveryAck(userId, msg.messageId);
+    // Bound frame already enforced; validate event type.
+    if (msg.type === 'delivery_ack' && typeof msg.messageId === 'string' && msg.messageId.length <= 128) {
+      void this.handleDeliveryAck(session.userId, msg.messageId);
     }
 
-    if (msg?.type === 'typing_start' || msg?.type === 'typing_stop') {
-      const typingEvent = JSON.stringify({ type: msg.type, userId });
-      for (const [peerId, ws] of this.sessions.entries()) {
-        if (peerId !== userId) {
+    if (msg.type === 'typing_start' || msg.type === 'typing_stop') {
+      // Per-connection typing flood protection.
+      const now = Date.now();
+      if (now - session.typingWindowStart > TYPING_WINDOW_MS) {
+        session.typingCount = 0;
+        session.typingWindowStart = now;
+      }
+      session.typingCount++;
+      if (session.typingCount > MAX_TYPING_PER_WINDOW) return;
+
+      const typingEvent = JSON.stringify({ type: msg.type, userId: session.userId });
+      for (const peer of this.sessions.values()) {
+        if (peer.userId !== session.userId) {
           try {
-            ws.send(typingEvent);
+            peer.ws.send(typingEvent);
           } catch {
-            // ignore send errors for dead sessions
+            // ignore
           }
         }
       }
@@ -199,13 +285,21 @@ export class ChatRoom {
   }
 
   private sendToUser(userId: string, event: Record<string, unknown>): void {
-    const session = this.sessions.get(userId);
-    if (!session) return;
-    try {
-      session.send(JSON.stringify(event));
-    } catch {
-      this.sessions.delete(userId);
+    const message = JSON.stringify(event);
+    const set = this.userSessions.get(userId);
+    if (!set) return;
+    const dead: string[] = [];
+    for (const id of set) {
+      const session = this.sessions.get(id);
+      if (!session) continue;
+      try {
+        session.ws.send(message);
+      } catch {
+        dead.push(id);
+      }
+    }
+    for (const id of dead) {
+      this.removeSession(id);
     }
   }
-
 }

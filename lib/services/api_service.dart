@@ -117,8 +117,9 @@ class ApiService {
     await _post('/api/push/unregister', {'token': token});
   }
 
-  Future<void> registerDevice(Map<String, dynamic> keyBundle) async {
-    await _post('/api/devices/register', keyBundle);
+  Future<int> registerDevice(Map<String, dynamic> keyBundle) async {
+    final response = await _post('/api/devices/register', keyBundle);
+    return (response['deviceId'] as num?)?.toInt() ?? 0;
   }
 
   Future<int> getPreKeyCount() async {

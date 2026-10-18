@@ -67,9 +67,7 @@ class AppRouterNotifier extends ChangeNotifier {
     }
 
     if (!auth.isInitialized) {
-      if (location != '/login' &&
-          location != '/register' &&
-          location != '/') {
+      if (location != '/login' && location != '/register' && location != '/') {
         _pendingDeepLink = uri;
       }
       return hasSession || isAuthRoute ? null : '/login';
@@ -79,9 +77,7 @@ class AppRouterNotifier extends ChangeNotifier {
       if (auth.isAuthenticated) {
         final target = _pendingDeepLink;
         _pendingDeepLink = null;
-        if (target != null &&
-            target != '/' &&
-            !target.startsWith('/login')) {
+        if (target != null && target != '/' && !target.startsWith('/login')) {
           return target;
         }
         return '/chats';

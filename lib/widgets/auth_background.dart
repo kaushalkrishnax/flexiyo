@@ -95,8 +95,12 @@ class AuthBackground extends StatelessWidget {
                     child: Align(
                       alignment: Alignment.centerLeft,
                       child: IconButton(
-                        icon: HugeIcon(icon: HugeIcons.strokeRoundedArrowLeft01, color: backArrowColor, size: 24),
-                        onPressed: onBack ?? () => Navigator.of(context).maybePop(),
+                        icon: HugeIcon(
+                            icon: HugeIcons.strokeRoundedArrowLeft01,
+                            color: backArrowColor,
+                            size: 24),
+                        onPressed:
+                            onBack ?? () => Navigator.of(context).maybePop(),
                       ),
                     ),
                   ),
@@ -152,7 +156,10 @@ class FlexiyoLogo extends StatelessWidget {
                 colors: [Color(0xFFD11D89), Color(0xFF00B4D8)],
               ),
             ),
-            child: const HugeIcon(icon: HugeIcons.strokeRoundedLock, color: Colors.white, size: 40),
+            child: const HugeIcon(
+                icon: HugeIcons.strokeRoundedLock,
+                color: Colors.white,
+                size: 40),
           ),
         ),
       ],

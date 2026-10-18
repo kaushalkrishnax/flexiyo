@@ -31,10 +31,11 @@ class KeyBundle {
   /// Base64-encoded signature of the signed pre-key.
   final String signedPreKeySignature;
 
-  final int preKeyId;
+  final int? preKeyId;
 
-  /// Base64-encoded one-time pre-key public key.
-  final String preKey;
+  /// Base64-encoded one-time pre-key public key. Null when the bundle has no
+  /// one-time pre-key (X3DH without a one-time key, protocol-valid).
+  final String? preKey;
 
   factory KeyBundle.fromJson(Map<String, dynamic> json) {
     final signedPreKey = json['signedPreKey'] as Map? ?? const {};
@@ -54,8 +55,8 @@ class KeyBundle {
           (signedPreKey['publicKey'] ?? json['signed_pre_key']) as String,
       signedPreKeySignature: (signedPreKey['signature'] ??
           json['signed_pre_key_signature']) as String,
-      preKeyId: (preKey['keyId'] ?? json['pre_key_id']) as int,
-      preKey: (preKey['publicKey'] ?? json['pre_key']) as String,
+      preKeyId: preKey['keyId'] as int? ?? 0,
+      preKey: preKey['publicKey'] as String?,
     );
   }
 

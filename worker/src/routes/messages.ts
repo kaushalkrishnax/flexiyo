@@ -290,8 +290,31 @@ messagesRouter.post(
       });
     }
 
-    const now = Math.floor(Date.now() / 1000);
+    const existingMessage = await env.DB.prepare(
+      `SELECT id, sender_id, conversation_id FROM messages WHERE id = ?`,
+    )
+      .bind(msgId)
+      .first<{ id: string; sender_id: string; conversation_id: string }>();
 
+    if (existingMessage) {
+      // Idempotent retry: the message was already committed. Do not duplicate
+      // side effects; return the existing committed result.
+      if (
+        existingMessage.sender_id !== userId ||
+        existingMessage.conversation_id !== conversationId
+      ) {
+        return new Response(JSON.stringify({ error: 'Message id conflict' }), {
+          status: 409,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(
+        JSON.stringify({ id: msgId, status: 'already_committed' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+
+    const now = Math.floor(Date.now() / 1000);
     // Disappearing-message timers start when a recipient reads the message.
     const expiresAt = null;
 

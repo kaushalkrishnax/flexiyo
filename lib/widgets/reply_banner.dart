@@ -70,7 +70,8 @@ class ReplyBanner extends StatelessWidget {
           // Dismiss button
           IconButton(
             onPressed: onDismiss,
-            icon: const HugeIcon(icon: HugeIcons.strokeRoundedCancel01, size: 18),
+            icon:
+                const HugeIcon(icon: HugeIcons.strokeRoundedCancel01, size: 18),
             color: cs.onSurfaceVariant,
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(minWidth: 32, minHeight: 32),

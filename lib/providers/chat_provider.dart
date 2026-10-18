@@ -6,7 +6,6 @@ import 'package:flexiyo/services/ws_service.dart';
 import 'package:flexiyo/storage/local_db.dart';
 import 'package:flutter_riverpod/legacy.dart';
 
-
 class ChatsState {
   const ChatsState({
     this.conversations = const [],
@@ -51,7 +50,6 @@ class ChatsState {
   }
 }
 
-
 class ChatsNotifier extends StateNotifier<ChatsState> {
   ChatsNotifier(this._api) : super(const ChatsState());
 
@@ -92,8 +90,7 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
       result.add(conv.copyWith(
         isPinned: row != null && (row['is_pinned'] as int? ?? 0) == 1,
         isMuted: row != null && (row['is_muted'] as int? ?? 0) == 1,
-        isRestricted:
-            row != null && (row['is_restricted'] as int? ?? 0) == 1,
+        isRestricted: row != null && (row['is_restricted'] as int? ?? 0) == 1,
       ));
     }
     return result;
@@ -320,8 +317,7 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     final hydrated = conversation.copyWith(
       isPinned: row != null && (row['is_pinned'] as int? ?? 0) == 1,
       isMuted: row != null && (row['is_muted'] as int? ?? 0) == 1,
-      isRestricted:
-          row != null && (row['is_restricted'] as int? ?? 0) == 1,
+      isRestricted: row != null && (row['is_restricted'] as int? ?? 0) == 1,
     );
 
     // Upsert payloads do not carry preview/read-receipt state; keep the local
@@ -348,15 +344,15 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
         hydrated.initiatedById != null &&
         hydrated.initiatedById == hydrated.otherUserId &&
         !hydrated.isRestricted) {
-      final remaining = state.conversations
-          .where((c) => c.id != conversation.id)
-          .toList();
+      final remaining =
+          state.conversations.where((c) => c.id != conversation.id).toList();
       state = state.copyWith(
         conversations: remaining,
         requestCount: state.requestCount + 1,
         clearError: true,
       );
-      await LocalDb.instance.upsertConversation(_conversationToDbRow(conversation));
+      await LocalDb.instance
+          .upsertConversation(_conversationToDbRow(conversation));
       await LocalDb.instance.applyChatState(
         conversation.id,
         isPinned: hydrated.isPinned,
@@ -387,7 +383,8 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
       list.insert(0, merged);
       state = state.copyWith(conversations: _sort(list));
     }
-    await LocalDb.instance.upsertConversation(_conversationToDbRow(conversation));
+    await LocalDb.instance
+        .upsertConversation(_conversationToDbRow(conversation));
     await LocalDb.instance.applyChatState(
       conversation.id,
       isPinned: hydrated.isPinned,
@@ -426,7 +423,8 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     final conversations = [...state.conversations]
       ..removeWhere((item) => item.id == conversation.id);
     conversations.insert(0, conversation);
-    state = state.copyWith(conversations: _sort(conversations), clearError: true);
+    state =
+        state.copyWith(conversations: _sort(conversations), clearError: true);
     await LocalDb.instance
         .upsertConversation(_conversationToDbRow(conversation));
   }
@@ -437,15 +435,12 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
         await LocalDb.instance.deleteConversationData(conversationId);
     await LocalDb.instance.applyChatState(conversationId, isDeleted: true);
     state = state.copyWith(
-      conversations: state.conversations
-          .where((c) => c.id != conversationId)
-          .toList(),
-      restrictedChats: state.restrictedChats
-          .where((c) => c.id != conversationId)
-          .toList(),
-      blockedChats: state.blockedChats
-          .where((c) => c.id != conversationId)
-          .toList(),
+      conversations:
+          state.conversations.where((c) => c.id != conversationId).toList(),
+      restrictedChats:
+          state.restrictedChats.where((c) => c.id != conversationId).toList(),
+      blockedChats:
+          state.blockedChats.where((c) => c.id != conversationId).toList(),
     );
     void _ = messageIds;
   }
@@ -565,15 +560,13 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     await LocalDb.instance.applyChatState(conversationId, isRestricted: false);
   }
 
-
   void onNewMessage({
     required String conversationId,
     required String preview,
     required DateTime lastMessageAt,
     bool isIncoming = false,
   }) {
-    final readWhileOpen =
-        isIncoming && _activeConversationId == conversationId;
+    final readWhileOpen = isIncoming && _activeConversationId == conversationId;
     void update(List<Conversation> list) {
       final idx = list.indexWhere((c) => c.id == conversationId);
       if (idx == -1) return;
@@ -692,7 +685,6 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
     state = state.copyWith(requestCount: count);
   }
 
-
   static Map<String, dynamic> _conversationToDbRow(Conversation conv) => {
         'id': conv.id,
         'other_user_id': conv.otherUserId,
@@ -706,7 +698,6 @@ class ChatsNotifier extends StateNotifier<ChatsState> {
         'created_at': DateTime.now().millisecondsSinceEpoch,
       };
 }
-
 
 final chatsProvider = StateNotifierProvider<ChatsNotifier, ChatsState>((ref) {
   final api = ref.watch(apiServiceProvider);

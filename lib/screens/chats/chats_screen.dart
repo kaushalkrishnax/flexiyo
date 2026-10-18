@@ -183,7 +183,8 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                         if (context.canPop()) ...[
                           IconButton(
                             onPressed: () => context.pop(),
-                            icon: const HugeIcon(icon: HugeIcons.strokeRoundedArrowLeft01),
+                            icon: const HugeIcon(
+                                icon: HugeIcons.strokeRoundedArrowLeft01),
                             visualDensity: VisualDensity.compact,
                           ),
                           const SizedBox(width: 4),
@@ -244,7 +245,8 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
                         ),
                         IconButton(
                           onPressed: () => context.go('/settings'),
-                          icon: const HugeIcon(icon: HugeIcons.strokeRoundedSettings01),
+                          icon: const HugeIcon(
+                              icon: HugeIcons.strokeRoundedSettings01),
                           tooltip: 'Settings',
                         ),
                       ],
@@ -432,7 +434,8 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not update disappearing messages: $error')),
+        SnackBar(
+            content: Text('Could not update disappearing messages: $error')),
       );
     }
   }

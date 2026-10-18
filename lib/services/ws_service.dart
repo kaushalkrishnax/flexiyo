@@ -13,6 +13,8 @@ class WsService {
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _sub;
   bool _disposed = false;
+  bool _connecting = false;
+  Timer? _retryTimer;
 
   int _retryCount = 0;
   static const int _maxRetries = 5;
@@ -27,13 +29,14 @@ class WsService {
   void Function(bool isConnected)? onConnectionChanged;
 
   Future<void> connect() async {
-    if (_disposed) return;
+    if (_disposed || _connecting) return;
     _retryCount = 0;
     await _openConnection();
   }
 
   Future<void> _openConnection() async {
-    if (_disposed) return;
+    if (_disposed || _connecting) return;
+    _connecting = true;
 
     try {
       final uri = Uri.parse(wsUrl);
@@ -41,6 +44,7 @@ class WsService {
       await _channel!.ready;
       if (_disposed) {
         await _channel?.sink.close();
+        _connecting = false;
         return;
       }
       _connected = true;
@@ -53,8 +57,7 @@ class WsService {
             try {
               final decoded = jsonDecode(data) as Map<String, dynamic>;
               _eventController.add(decoded);
-            } catch (_) {
-            }
+            } catch (_) {}
           }
         },
         onDone: _onDisconnected,
@@ -62,10 +65,15 @@ class WsService {
         cancelOnError: false,
       );
     } catch (_) {
-      if (_disposed) return;
+      if (_disposed) {
+        _connecting = false;
+        return;
+      }
       _connected = false;
       onConnectionChanged?.call(false);
       _scheduleRetry();
+    } finally {
+      _connecting = false;
     }
   }
 
@@ -80,10 +88,15 @@ class WsService {
   }
 
   void _scheduleRetry() {
-    if (_disposed || _retryCount >= _maxRetries) return;
-    final delay = Duration(seconds: (2 << _retryCount).clamp(2, 60));
+    if (_disposed || _retryCount >= _maxRetries || _retryTimer != null) return;
+    // Exponential backoff with jitter to avoid thundering herd.
+    final baseSeconds = (2 << _retryCount).clamp(2, 60);
+    final jitter =
+        (baseSeconds * 0.3 * (DateTime.now().microsecond / 1e6)).round();
+    final delay = Duration(seconds: baseSeconds + jitter);
     _retryCount++;
-    Future.delayed(delay, () {
+    _retryTimer = Timer(delay, () {
+      _retryTimer = null;
       if (!_disposed) _openConnection();
     });
   }
@@ -92,8 +105,7 @@ class WsService {
     if (_disposed || _channel == null || !_connected) return;
     try {
       _channel!.sink.add(jsonEncode(event));
-    } catch (_) {
-    }
+    } catch (_) {}
   }
 
   void sendTypingStart() => send({'type': 'typing_start'});
@@ -105,6 +117,8 @@ class WsService {
   Future<void> dispose() async {
     _disposed = true;
     _connected = false;
+    _retryTimer?.cancel();
+    _retryTimer = null;
     onConnectionChanged = null;
     await _sub?.cancel();
     _sub = null;

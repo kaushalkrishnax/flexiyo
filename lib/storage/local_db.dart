@@ -158,7 +158,8 @@ class LocalDb {
         await database.execute(
           'CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_settings_conversation ON conversation_settings(conversation_id);',
         );
-        await database.execute('ALTER TABLE conversations RENAME TO conversations_old;');
+        await database
+            .execute('ALTER TABLE conversations RENAME TO conversations_old;');
         await database.execute('''
           CREATE TABLE conversations (
             id TEXT PRIMARY KEY,

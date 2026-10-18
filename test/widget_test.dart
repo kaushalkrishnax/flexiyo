@@ -14,7 +14,8 @@ class FakeAuthController extends AuthController {
   final Object? error;
 
   @override
-  Future<void> login({required String username, required String password}) async {
+  Future<void> login(
+      {required String username, required String password}) async {
     state = state.copyWith(isLoading: true);
     if (error != null) {
       state = state.copyWith(isLoading: false);

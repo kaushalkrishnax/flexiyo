@@ -80,11 +80,11 @@ class GoogleAuthService {
 
   /// Sign-in results emitted by the Google-rendered button widget, which is
   /// the only way to sign in on web.
-  Stream<GoogleAuthResult> get authenticationEvents => GoogleSignIn
-      .instance.authenticationEvents
-      .where((event) => event is GoogleSignInAuthenticationEventSignIn)
-      .map((event) =>
-          _toResult((event as GoogleSignInAuthenticationEventSignIn).user));
+  Stream<GoogleAuthResult> get authenticationEvents =>
+      GoogleSignIn.instance.authenticationEvents
+          .where((event) => event is GoogleSignInAuthenticationEventSignIn)
+          .map((event) =>
+              _toResult((event as GoogleSignInAuthenticationEventSignIn).user));
 
   GoogleAuthResult _toResult(GoogleSignInAccount account) {
     final auth = account.authentication;

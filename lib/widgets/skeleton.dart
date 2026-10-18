@@ -16,7 +16,8 @@ class _Skeleton extends StatefulWidget {
   State<_Skeleton> createState() => _SkeletonState();
 }
 
-class _SkeletonState extends State<_Skeleton> with SingleTickerProviderStateMixin {
+class _SkeletonState extends State<_Skeleton>
+    with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
 
   @override
@@ -38,7 +39,8 @@ class _SkeletonState extends State<_Skeleton> with SingleTickerProviderStateMixi
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final fillColor = isDark ? const Color(0xFF2A2A2C) : const Color(0xFFE8E8EA);
+    final fillColor =
+        isDark ? const Color(0xFF2A2A2C) : const Color(0xFFE8E8EA);
     return AnimatedBuilder(
       animation: _controller,
       builder: (context, _) => Opacity(
@@ -139,7 +141,8 @@ class ConversationSkeleton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    Widget bubble({required double width, required double height, bool mine = false}) {
+    Widget bubble(
+        {required double width, required double height, bool mine = false}) {
       return Row(
         mainAxisAlignment:
             mine ? MainAxisAlignment.end : MainAxisAlignment.start,

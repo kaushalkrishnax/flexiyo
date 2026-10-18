@@ -157,47 +157,47 @@ class AppPopupMenu {
 }
 
 Future<void> showRequestsListsMenu(
-    BuildContext context, {
-    required VoidCallback onRestricted,
-    required VoidCallback onBlocked,
-    Rect? position,
-  }) {
-    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
-    final anchor = position ??
-        Rect.fromLTWH(
-          MediaQuery.of(context).size.width - 200,
-          80,
-          0,
-          0,
-        );
-    final relative = RelativeRect.fromRect(anchor, Offset.zero & overlay!.size);
-    return showMenu<void>(
-      context: context,
-      position: relative,
-      items: [
-        PopupMenuItem<void>(
-          onTap: onRestricted,
-          child: const Row(
-            children: [
-              HugeIcon(icon: HugeIcons.strokeRoundedBlocked, size: 22),
-              SizedBox(width: 14),
-              Text('Restricted'),
-            ],
-          ),
+  BuildContext context, {
+  required VoidCallback onRestricted,
+  required VoidCallback onBlocked,
+  Rect? position,
+}) {
+  final overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
+  final anchor = position ??
+      Rect.fromLTWH(
+        MediaQuery.of(context).size.width - 200,
+        80,
+        0,
+        0,
+      );
+  final relative = RelativeRect.fromRect(anchor, Offset.zero & overlay!.size);
+  return showMenu<void>(
+    context: context,
+    position: relative,
+    items: [
+      PopupMenuItem<void>(
+        onTap: onRestricted,
+        child: const Row(
+          children: [
+            HugeIcon(icon: HugeIcons.strokeRoundedBlocked, size: 22),
+            SizedBox(width: 14),
+            Text('Restricted'),
+          ],
         ),
-        PopupMenuItem<void>(
-          onTap: onBlocked,
-          child: const Row(
-            children: [
-              HugeIcon(icon: HugeIcons.strokeRoundedUserRemove01, size: 22),
-              SizedBox(width: 14),
-              Text('Blocked'),
-            ],
-          ),
+      ),
+      PopupMenuItem<void>(
+        onTap: onBlocked,
+        child: const Row(
+          children: [
+            HugeIcon(icon: HugeIcons.strokeRoundedUserRemove01, size: 22),
+            SizedBox(width: 14),
+            Text('Blocked'),
+          ],
         ),
-      ],
-    );
-  }
+      ),
+    ],
+  );
+}
 
 class _MessageMenuOverlay extends StatelessWidget {
   const _MessageMenuOverlay({
@@ -558,7 +558,8 @@ class _InboxModalContent extends StatelessWidget {
                 textColor: textColor,
               ),
               _ModalActionRow(
-                label: conversation.isMuted ? 'Unmute messages' : 'Mute messages',
+                label:
+                    conversation.isMuted ? 'Unmute messages' : 'Mute messages',
                 icon: conversation.isMuted
                     ? HugeIcons.strokeRoundedBell
                     : HugeIcons.strokeRoundedBellOff,

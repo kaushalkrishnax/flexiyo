@@ -2,6 +2,7 @@ import { IRequest, Router } from 'itty-router';
 import { z } from 'zod';
 import type { Env, AuthenticatedRequest, DeviceRow, DeviceStatus } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { checkRateLimitDistributed } from '../middleware/rateLimit.js';
 import { generateId } from '../utils/crypto.js';
 
 export const devicesRouter = Router({ base: '/api/devices' });
@@ -345,7 +346,30 @@ devicesRouter.get(
   (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
   async (request: IRequest, env: Env): Promise<Response> => {
     const { userId } = request.params as { userId: string };
+    const requesterId = (request as unknown as AuthenticatedRequest).user.sub;
+    const allowed = await checkRateLimitDistributed(
+      env,
+      `keybundle:${requesterId}:${userId}`,
+      { limit: 10, windowMs: 60_000 },
+    );
+    if (!allowed) {
+      return json({ error: 'Too many requests. Please slow down.' }, 429);
+    }
     const now = Math.floor(Date.now() / 1000);
+
+    // Relationship gate: never hand out (and consume) one-time pre-keys for a
+    // target that has blocked the requester, or that the requester has blocked.
+    const block = await env.DB.prepare(
+      `SELECT 1 FROM user_blocks
+       WHERE (blocker_id = ? AND blocked_id = ?)
+          OR (blocker_id = ? AND blocked_id = ?)
+       LIMIT 1`,
+    )
+      .bind(userId, requesterId, requesterId, userId)
+      .first();
+    if (block) {
+      return json({ error: 'Cannot establish a session with this account' }, 403);
+    }
 
     const target = await env.DB.prepare(`SELECT id FROM users WHERE id = ?`)
       .bind(userId)
@@ -378,7 +402,28 @@ devicesRouter.get(
   (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
   async (request: IRequest, env: Env): Promise<Response> => {
     const { userId } = request.params as { userId: string };
+    const requesterId = (request as unknown as AuthenticatedRequest).user.sub;
+    const allowed = await checkRateLimitDistributed(
+      env,
+      `keybundle:${requesterId}:${userId}`,
+      { limit: 10, windowMs: 60_000 },
+    );
+    if (!allowed) {
+      return json({ error: 'Too many requests. Please slow down.' }, 429);
+    }
     const now = Math.floor(Date.now() / 1000);
+
+    const block = await env.DB.prepare(
+      `SELECT 1 FROM user_blocks
+       WHERE (blocker_id = ? AND blocked_id = ?)
+          OR (blocker_id = ? AND blocked_id = ?)
+       LIMIT 1`,
+    )
+      .bind(userId, requesterId, requesterId, userId)
+      .first();
+    if (block) {
+      return json({ error: 'Cannot establish a session with this account' }, 403);
+    }
 
     const device = await env.DB.prepare(
       `SELECT * FROM devices WHERE user_id = ? AND status = 'active' ORDER BY id ASC LIMIT 1`,

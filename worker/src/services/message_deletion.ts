@@ -36,20 +36,18 @@ export async function deleteMessages(
     .first<{ user_a_id: string; user_b_id: string }>();
 
   const room = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(conversationId));
-  await Promise.all(
-    ids.map((messageId) =>
-      room.fetch(
-        new Request('https://internal/broadcast', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: 'message_deleted',
-            messageId,
-            conversationId,
-          }),
-        }),
-      ),
-    ),
+  await room.fetch(
+    new Request('https://internal/broadcast', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        events: ids.map((messageId) => ({
+          type: 'message_deleted',
+          messageId,
+          conversationId,
+        })),
+      }),
+    }),
   );
 
   if (conversation) {

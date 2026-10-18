@@ -124,10 +124,8 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
                 final size = box?.size ?? Size.zero;
                 showRequestsListsMenu(
                   context,
-                  onRestricted: () =>
-                      context.go('/chats/requests/restricted'),
-                  onBlocked: () =>
-                      context.go('/chats/requests/blocked'),
+                  onRestricted: () => context.go('/chats/requests/restricted'),
+                  onBlocked: () => context.go('/chats/requests/blocked'),
                   position: Rect.fromLTWH(
                     offset.dx,
                     offset.dy + size.height,
@@ -157,7 +155,8 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
                       const SizedBox(height: 12),
                       FilledButton.icon(
                         onPressed: _loadRequests,
-                        icon: const HugeIcon(icon: HugeIcons.strokeRoundedRefresh),
+                        icon: const HugeIcon(
+                            icon: HugeIcons.strokeRoundedRefresh),
                         label: const Text('Retry'),
                       ),
                     ],
@@ -176,8 +175,8 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
                           final busy = _responding.contains(request.id);
 
                           return ListTile(
-                            onTap: () => context
-                                .go('/chats/${request.id}?request=true'),
+                            onTap: () =>
+                                context.go('/chats/${request.id}?request=true'),
                             leading: UserAvatar(
                               username: request.otherUsername,
                               radius: 24,
@@ -208,8 +207,8 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
                                     children: [
                                       IconButton(
                                         tooltip: 'Delete request',
-                                        onPressed: () => _respond(request,
-                                            accept: false),
+                                        onPressed: () =>
+                                            _respond(request, accept: false),
                                         icon: HugeIcon(
                                           icon: HugeIcons.strokeRoundedCancel01,
                                           color: colorScheme.error,
@@ -217,8 +216,8 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
                                       ),
                                       IconButton(
                                         tooltip: 'Accept request',
-                                        onPressed: () => _respond(request,
-                                            accept: true),
+                                        onPressed: () =>
+                                            _respond(request, accept: true),
                                         icon: HugeIcon(
                                           icon: HugeIcons.strokeRoundedCheck,
                                           color: colorScheme.primary,

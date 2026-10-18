@@ -24,7 +24,6 @@ class SignalCryptoService {
         _api = api,
         _store = store;
 
-  static const int _deviceId = 1;
   static const int _preKeyCount = 100;
   static const int _preKeyReplenishThreshold = 20;
 
@@ -78,7 +77,13 @@ class SignalCryptoService {
 
     payload['installationId'] = await _installationId();
 
-    await _api.registerDevice(payload);
+    final deviceId = await _api.registerDevice(payload);
+    if (deviceId > 0) {
+      await _storage.saveString(
+        _store.storageKey('device.id'),
+        deviceId.toString(),
+      );
+    }
     await _storage.saveString(registeredKey, 'true');
     await _storage.deleteString(pendingKey);
     await _replenishPreKeysIfNeeded();
@@ -131,6 +136,13 @@ class SignalCryptoService {
     };
   }
 
+  Future<int> _deviceId() async {
+    final stored = await _storage.readString(_store.storageKey('device.id'));
+    final parsed = int.tryParse(stored ?? '');
+    if (parsed != null && parsed > 0) return parsed;
+    return 1; // Legacy fallback for installations registered before this change.
+  }
+
   Future<String> _installationId() async {
     const key = 'flexiyo.installation_id';
     final existing = await _storage.readString(key);
@@ -174,7 +186,7 @@ class SignalCryptoService {
     String recipientId,
     String plaintext,
   ) async {
-    final address = SignalProtocolAddress(recipientId, _deviceId);
+    final address = SignalProtocolAddress(recipientId, await _deviceId());
     if (!await _store.containsSession(address)) {
       final bundle = await _api.fetchKeyBundle(recipientId);
       await SessionBuilder.fromSignalStore(_store, address)
@@ -197,7 +209,7 @@ class SignalCryptoService {
     required String payload,
     required String messageType,
   }) async {
-    final address = SignalProtocolAddress(senderId, _deviceId);
+    final address = SignalProtocolAddress(senderId, await _deviceId());
     final bytes = Uint8List.fromList(base64Decode(payload));
     final cipher = SessionCipher.fromStore(_store, address);
     final plaintext = messageType == 'prekey'
@@ -215,15 +227,17 @@ class SignalCryptoService {
       Uint8List.fromList(base64Decode(bundle.signedPreKey)),
       0,
     );
-    final preKey = Curve.decodePoint(
-      Uint8List.fromList(base64Decode(bundle.preKey)),
-      0,
-    );
+    final preKey = bundle.preKey != null
+        ? Curve.decodePoint(
+            Uint8List.fromList(base64Decode(bundle.preKey!)),
+            0,
+          )
+        : null;
 
     return PreKeyBundle(
       bundle.registrationId,
       bundle.deviceId,
-      bundle.preKeyId,
+      bundle.preKeyId ?? 0,
       preKey,
       bundle.signedPreKeyId,
       signedPreKey,

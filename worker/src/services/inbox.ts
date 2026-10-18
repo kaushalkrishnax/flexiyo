@@ -48,15 +48,17 @@ export async function notifyInboxes(
     .map((userId) => ({ userId, events: buildEvents(userId) }));
 
   await Promise.allSettled(
-    userEvents.flatMap(({ userId, events }) =>
-      events.map((event) => {
-        const stub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(`inbox:${userId}`));
-        return stub.fetch(new Request('https://internal/broadcast', {
+    userEvents.flatMap(({ userId, events }) => {
+      if (events.length === 0) return [];
+      // One request per user carrying all events, rather than one per event.
+      const stub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(`inbox:${userId}`));
+      return [
+        stub.fetch(new Request('https://internal/broadcast', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(event),
-        }));
-      }),
-    ),
+          body: JSON.stringify({ events }),
+        })),
+      ];
+    }),
   );
 }

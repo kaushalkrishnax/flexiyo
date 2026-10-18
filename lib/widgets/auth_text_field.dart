@@ -121,8 +121,7 @@ class _AuthTextFieldState extends State<AuthTextField> {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final isFloating =
-        _focusNode.hasFocus || widget.controller.text.isNotEmpty;
+    final isFloating = _focusNode.hasFocus || widget.controller.text.isNotEmpty;
     final isFocused = _focusNode.hasFocus;
 
     Color effectiveBorderColor;
@@ -146,7 +145,8 @@ class _AuthTextFieldState extends State<AuthTextField> {
 
     final effectiveRadius = widget.borderRadius ?? BorderRadius.circular(14);
     final textColor = isDark ? Colors.white : const Color(0xFF18181B);
-    final hintColor = isDark ? const Color(0xFF8E8E93) : const Color(0xFF8E8E93);
+    final hintColor =
+        isDark ? const Color(0xFF8E8E93) : const Color(0xFF8E8E93);
 
     // FLAVOR: None (inline / capsule / search input)
     if (widget.labelType == AuthTextFieldLabelType.none) {

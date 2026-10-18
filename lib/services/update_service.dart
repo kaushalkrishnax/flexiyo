@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Directory;
+import 'dart:io' if (dart.library.html) 'package:flexiyo/core/io_stub.dart'
+    show Directory;
 
 import 'package:dio/dio.dart';
 import 'package:flexiyo/core/exceptions.dart';
@@ -24,7 +25,8 @@ const String _seenVersionKey = 'flexiyo.update_seen_version';
 /// Minimum time between automatic update checks (24h).
 const Duration _checkInterval = Duration(hours: 24);
 
-bool get _isAndroid => !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+bool get _isAndroid =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 bool get _isIOS => !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
 
 class UpdateService {

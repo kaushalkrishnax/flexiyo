@@ -176,8 +176,10 @@ class MessageBubble extends StatelessWidget {
     final verticalPad = isLast ? 14.0 : 6.0;
 
     final isMediaMessage = message.isMedia;
-    final bodyText =
-        message.decryptedText ?? 'Message unavailable on this device';
+    final bodyText = message.decryptedText ??
+        (!isMine && message.encryptedPayload != null
+            ? 'Message could not be decrypted'
+            : 'Message unavailable on this device');
 
     final BoxDecoration bubbleDecoration;
     if (isMediaMessage) {
@@ -471,7 +473,8 @@ class _BubbleRow extends StatelessWidget {
     }
 
     final row = Row(
-      mainAxisAlignment: isMine ? MainAxisAlignment.end : MainAxisAlignment.start,
+      mainAxisAlignment:
+          isMine ? MainAxisAlignment.end : MainAxisAlignment.start,
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
         if (!isMine) ...[

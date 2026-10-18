@@ -3,13 +3,12 @@ import { deleteMessages } from './message_deletion.js';
 
 const CLEANUP_INTERVAL_SECONDS = 60;
 
+const MAX_EXPIRED_PER_RUN = 500;
+
 export async function cleanExpiredMessages(env: Env): Promise<void> {
   const db = env.DB;
   const now = Math.floor(Date.now() / 1000);
 
-  // Skip if a cleanup ran recently (timestamp kept in the migration-managed
-  // worker_meta table — never _worker_meta, which was an undocumented
-  // runtime-created duplicate removed in 0009).
   const lastCleanup = await db
     .prepare(`SELECT value FROM worker_meta WHERE key = 'last_expiry_cleanup'`)
     .first<{ value: string }>();
@@ -17,15 +16,17 @@ export async function cleanExpiredMessages(env: Env): Promise<void> {
   const lastCleanupTs = lastCleanup ? parseInt(lastCleanup.value, 10) : 0;
 
   if (now - lastCleanupTs < CLEANUP_INTERVAL_SECONDS) {
-    return; // Too soon — skip
+    return;
   }
 
   const expired = await db
     .prepare(
       `SELECT id, conversation_id FROM messages
-       WHERE expires_at IS NOT NULL AND expires_at <= ?`,
+       WHERE expires_at IS NOT NULL AND expires_at <= ?
+       ORDER BY expires_at ASC
+       LIMIT ?`,
     )
-    .bind(now)
+    .bind(now, MAX_EXPIRED_PER_RUN)
     .all<{ id: string; conversation_id: string }>();
 
   const byConversation = new Map<string, string[]>();
@@ -38,7 +39,6 @@ export async function cleanExpiredMessages(env: Env): Promise<void> {
     await deleteMessages(env, conversationId, ids);
   }
 
-  // Update last cleanup timestamp
   await db
     .prepare(
       `INSERT INTO worker_meta (key, value)

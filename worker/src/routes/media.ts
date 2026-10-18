@@ -292,19 +292,14 @@ mediaRouter.delete(
     const { id: mediaId } = request.params as { id: string };
 
     const media = await env.DB.prepare(
-      'SELECT id, conversation_id, r2_key FROM media WHERE id = ?',
+      'SELECT id, conversation_id, r2_key, sender_id FROM media WHERE id = ?',
     )
       .bind(mediaId)
-      .first<{ id: string; conversation_id: string; r2_key: string }>();
+      .first<{ id: string; conversation_id: string; r2_key: string; sender_id: string }>();
 
     if (media) {
-      const conv = await getConversationForMember(
-        media.conversation_id,
-        userId,
-        env.DB,
-      );
-      if (!conv) {
-        return new Response(JSON.stringify({ error: 'Not a conversation participant' }), {
+      if (media.sender_id !== userId) {
+        return new Response(JSON.stringify({ error: 'Only the sender can purge media' }), {
           status: 403,
           headers: { 'Content-Type': 'application/json' },
         });

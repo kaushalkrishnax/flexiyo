@@ -360,6 +360,20 @@ messagesRouter.post(
         );
       }
     }
+    // Every active recipient device must receive a ciphertext, otherwise a
+    // device silently misses the message.
+    const missing = recipientDeviceIds.filter(
+      (id) => !deliveryRows.some((r) => r.deviceId === id),
+    );
+    if (missing.length > 0) {
+      return new Response(
+        JSON.stringify({
+          error: 'missing_device_payloads',
+          missingDeviceIds: missing,
+        }),
+        { status: 409, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
 
     // sender_id always from JWT — never from client body
     await env.DB.prepare(

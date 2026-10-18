@@ -3,7 +3,6 @@ import { and, like, ne } from 'drizzle-orm';
 import type { Env, AuthenticatedRequest } from '../types.js';
 import { getDb } from '../database/db.js';
 import { users } from '../database/schema.js';
-import { authMiddleware } from '../middleware/auth.js';
 import { rateLimitMiddleware } from '../middleware/rateLimit.js';
 
 export const usersRouter = Router({ base: '/api/users' });
@@ -11,9 +10,9 @@ export const usersRouter = Router({ base: '/api/users' });
 usersRouter.get(
   '/search',
   rateLimitMiddleware({ limit: 30, windowMs: 60_000 }),
-  // @ts-ignore
+  // @ts-ignore — itty-router v5 handler arity: auth middleware is (Request, Env)
   (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
-  // @ts-ignore
+  // @ts-ignore — itty-router v5 handler arity
   async (request: IRequest, env: Env, _ctx: ExecutionContext): Promise<Response> => {
     const authReq = request as unknown as AuthenticatedRequest;
     const url = new URL(request.url);

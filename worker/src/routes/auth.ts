@@ -290,7 +290,7 @@ authRouter.get(
   },
 );
 
-const handleGoogleOAuth = async (request: IRequest, env: Env): Promise<Response> => {
+export const handleGoogleOAuth = async (request: IRequest, env: Env): Promise<Response> => {
   let body: unknown;
   try {
     body = await request.json();

@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -326,7 +325,6 @@ class MediaService {
     ));
 
     List<int> raw;
-    var viewsRemaining = '';
     try {
       final resp = await dio.get<dynamic>(
         '${AppConstants.apiBaseUrl}/api/media/${ref.id}',
@@ -341,7 +339,6 @@ class MediaService {
       } else {
         throw Exception('Unexpected response data type: ${data.runtimeType}');
       }
-      viewsRemaining = resp.headers.value('x-media-views-remaining') ?? '';
     } on DioException catch (e) {
       final status = e.response?.statusCode;
       if (status == 410) throw MediaExpiredException();
@@ -360,12 +357,6 @@ class MediaService {
       nonce: ref.nonce,
       mac: ref.mac,
     );
-
-    // Last allowed view served — make the server-side purge explicit once the
-    // recipient has seen the media as many times as the policy permits.
-    if (viewsRemaining == '0') {
-      unawaited(_notifyPurge(ref.id));
-    }
 
     try {
       if (persist && storeCache) {
@@ -396,20 +387,6 @@ class MediaService {
         if (await cache.exists()) await cache.delete();
       } catch (_) {}
     }
-  }
-
-  /// Asks the Worker to remove the stored object immediately.
-  Future<void> _notifyPurge(String mediaId) async {
-    try {
-      final token = await _secureKeys.getJwt();
-      if (token == null) return;
-      final dio = Dio(BaseOptions(
-        connectTimeout: const Duration(seconds: 15),
-        headers: {'Authorization': 'Bearer $token'},
-      ));
-      await dio
-          .delete<dynamic>('${AppConstants.apiBaseUrl}/api/media/$mediaId');
-    } catch (_) {}
   }
 
   /// Decrypted media for players that consume a path; fetches if missing.

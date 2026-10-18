@@ -125,11 +125,15 @@ class ApiService {
     await _post('/api/devices/prekeys/replenish', {'preKeys': preKeys});
   }
 
-  Future<KeyBundle> fetchKeyBundle(String userId) async {
-    // Backend serves the bundle at /key-bundle/:userId — the device id segment
-    // comes AFTER the resource, not before.
-    final data = await _get('/api/devices/key-bundle/$userId');
-    return KeyBundle.fromJson(data as Map<String, dynamic>);
+  /// Fetches every active device bundle for [userId]; the caller encrypts one
+  /// ciphertext per bundle so each device gets a session it can read.
+  Future<List<KeyBundle>> fetchKeyBundles(String userId) async {
+    final data =
+        await _get('/api/devices/key-bundles/$userId') as Map<String, dynamic>;
+    final rawList = (data['bundles'] as List<dynamic>?) ?? const [];
+    return rawList
+        .map((b) => KeyBundle.fromJson(b as Map<String, dynamic>))
+        .toList();
   }
 
   /// Announce server-side that this client is exiting; server revokes the

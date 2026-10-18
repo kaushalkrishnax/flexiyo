@@ -726,13 +726,13 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       await _api.sendMessage(
         conversationId,
         recipientId: conv.otherUserId,
-        payloads: [
-          {
-            'deviceId': encrypted.recipientDeviceId,
-            'ciphertext': encrypted.payload,
-            'messageType': encrypted.messageType,
-          },
-        ],
+        payloads: encrypted.payloads
+            .map((p) => {
+                  'deviceId': p.recipientDeviceId,
+                  'ciphertext': p.payload,
+                  'messageType': p.messageType,
+                })
+            .toList(),
         messageType: encrypted.messageType,
         messageId: msgId,
         mediaId: MediaRef.parse(text)?.id,
@@ -742,7 +742,8 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       // Confirm as sent
       _updateMessageStatus(msgId, MessageStatus.sent);
       final sent = optimistic.copyWith(
-        encryptedPayload: encrypted.payload,
+        encryptedPayload: encrypted.payloads.first.payload,
+        senderDeviceId: encrypted.payloads.first.recipientDeviceId,
         messageType: encrypted.messageType == 'prekey'
             ? MessageType.prekey
             : MessageType.signal,
@@ -803,8 +804,8 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     _upsertMessage(
       original.copyWith(
         decryptedText: newText,
-        encryptedPayload: encrypted.payload,
-        senderDeviceId: encrypted.recipientDeviceId,
+        encryptedPayload: encrypted.payloads.first.payload,
+        senderDeviceId: encrypted.payloads.first.recipientDeviceId,
         isEdited: true,
         editedAt: now,
         version: original.version + 1,
@@ -817,13 +818,13 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       await _api.editMessage(
         conversationId,
         messageId,
-        payloads: [
-          {
-            'deviceId': encrypted.recipientDeviceId,
-            'ciphertext': encrypted.payload,
-            'messageType': encrypted.messageType,
-          },
-        ],
+        payloads: encrypted.payloads
+            .map((p) => {
+                  'deviceId': p.recipientDeviceId,
+                  'ciphertext': p.payload,
+                  'messageType': p.messageType,
+                })
+            .toList(),
         version: original.version,
         messageType: encrypted.messageType,
       );

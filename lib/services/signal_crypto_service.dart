@@ -20,6 +20,14 @@ class EncryptedPayload {
   final int recipientDeviceId;
 }
 
+class EncryptedMessage {
+  const EncryptedMessage({required this.payloads, required this.messageType});
+
+  /// One ciphertext per target device.
+  final List<EncryptedPayload> payloads;
+  final String messageType;
+}
+
 class SignalCryptoService {
   SignalCryptoService._({
     required SecureKeyValueStore storage,
@@ -180,26 +188,38 @@ class SignalCryptoService {
     );
   }
 
-  Future<EncryptedPayload> encryptForUser(
+  Future<EncryptedMessage> encryptForUser(
     String recipientId,
     String plaintext,
   ) async {
-    final bundle = await _api.fetchKeyBundle(recipientId);
-    final address = SignalProtocolAddress(recipientId, bundle.deviceId);
-    if (!await _store.containsSession(address)) {
-      await SessionBuilder.fromSignalStore(_store, address)
-          .processPreKeyBundle(_toPreKeyBundle(bundle));
+    final bundles = await _api.fetchKeyBundles(recipientId);
+    if (bundles.isEmpty) {
+      throw Exception('Recipient has no registered devices');
     }
 
-    final ciphertext = await SessionCipher.fromStore(_store, address).encrypt(
-      Uint8List.fromList(utf8.encode(plaintext)),
-    );
-    return EncryptedPayload(
-      payload: base64Encode(ciphertext.serialize()),
-      messageType: ciphertext.getType() == CiphertextMessage.prekeyType
-          ? 'prekey'
-          : 'signal',
-      recipientDeviceId: bundle.deviceId,
+    final bytes = Uint8List.fromList(utf8.encode(plaintext));
+    final payloads = <EncryptedPayload>[];
+    for (final bundle in bundles) {
+      final address = SignalProtocolAddress(recipientId, bundle.deviceId);
+      if (!await _store.containsSession(address)) {
+        await SessionBuilder.fromSignalStore(_store, address)
+            .processPreKeyBundle(_toPreKeyBundle(bundle));
+      }
+
+      final ciphertext = await SessionCipher.fromStore(_store, address).encrypt(
+        bytes,
+      );
+      payloads.add(EncryptedPayload(
+        payload: base64Encode(ciphertext.serialize()),
+        messageType: ciphertext.getType() == CiphertextMessage.prekeyType
+            ? 'prekey'
+            : 'signal',
+        recipientDeviceId: bundle.deviceId,
+      ));
+    }
+    return EncryptedMessage(
+      payloads: payloads,
+      messageType: payloads.first.messageType,
     );
   }
 

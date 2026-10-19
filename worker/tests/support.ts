@@ -113,6 +113,17 @@ export async function seedMessage(
     .run();
 }
 
+/** Registers an FCM token for a user (mirrors POST /api/push/register). */
+export async function seedPushToken(userId: string, token: string): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO push_tokens (id, user_id, token, platform, created_at, updated_at)
+       VALUES (?, ?, ?, 'android', 0, 0)`,
+    )
+    .bind(crypto.randomUUID(), userId, token)
+    .run();
+}
+
 /** Access token for a user, signed with the test runtime's JWT secret. */
 export function tokenFor(userId: string, jti: string = crypto.randomUUID()): Promise<string> {
   return signJWT({ sub: userId, username: `user-${userId}`, jti }, testEnv.JWT_SECRET);

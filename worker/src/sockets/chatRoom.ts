@@ -1,6 +1,7 @@
 import type { Env, DOEvent } from '../types.js';
 import { verifyJWT } from '../utils/jwt.js';
 import { notifyInboxes } from '../services/inbox.js';
+import { sendMessagePush } from '../services/push.js';
 import { pairedActiveDeviceIds } from '../middleware/device.js';
 import type { JWTPayload } from '../types.js';
 
@@ -687,8 +688,11 @@ export class ChatRoom {
 
     this.broadcast(event);
 
+    // Inbox fan-out is best-effort; its result also tells us which recipients
+    // already have a live socket, so an online recipient is not also pushed.
+    let activeUsers = new Set<string>();
     try {
-      await notifyInboxes(this.env, [userId, expectedRecipient], (targetUserId) => [{
+      activeUsers = await notifyInboxes(this.env, [userId, expectedRecipient], (targetUserId) => [{
         type: 'inbox_message',
         conversationId: targetConversationId,
         senderId: userId,
@@ -701,6 +705,16 @@ export class ChatRoom {
     }
 
     sendAck({ type: 'ack', ok: true, messageId: msgId, status: 'sent' });
+
+    // Offline recipients get an FCM notification through the same helper the
+    // HTTP path uses. Runs after the sender's ack so notification latency
+    // never delays the send, and is non-fatal by design.
+    await sendMessagePush(this.env, {
+      senderId: userId,
+      recipientId: expectedRecipient,
+      conversationId: targetConversationId,
+      recipientHasActiveSocket: activeUsers.has(expectedRecipient),
+    });
   }
 
   private sendToUser(userId: string, event: Record<string, unknown>): void {

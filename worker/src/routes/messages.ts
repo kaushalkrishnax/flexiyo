@@ -10,7 +10,7 @@ import {
 } from '../services/messagePermissions.js';
 import { notifyInboxes } from '../services/inbox.js';
 import { deleteMessages } from '../services/message_deletion.js';
-import { sendPushToUser } from '../services/push.js';
+import { sendMessagePush } from '../services/push.js';
 import { getConversationAccess, getConversationForMember } from './conversations.js';
 
 export const messagesRouter = Router({ base: '/api/conversations' });
@@ -458,22 +458,12 @@ messagesRouter.post(
     // Best-effort FCM push so a backgrounded/offline recipient still learns
     // about the message. Restricted and muted chats never notify. Failures
     // never affect delivery.
-    try {
-      const senderUser = await env.DB.prepare(
-        'SELECT username FROM users WHERE id = ?',
-      )
-        .bind(userId)
-        .first<{ username: string }>();
-      if (!activeUsers.has(recipientId)) {
-        await sendPushToUser(env, recipientId, {
-          title: senderUser?.username ?? 'New message',
-          body: 'Sent you a message',
-          data: { type: 'message', conversationId },
-        });
-      }
-    } catch {
-      // Non-fatal.
-    }
+    await sendMessagePush(env, {
+      senderId: userId,
+      recipientId,
+      conversationId,
+      recipientHasActiveSocket: activeUsers.has(recipientId),
+    });
 
     return new Response(
       JSON.stringify({

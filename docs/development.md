@@ -87,6 +87,7 @@ See [`.env.example`](../.env.example) for the complete secrets template.
 | Backend Dev | `bun run dev` | Start local Worker dev server via Wrangler |
 | Backend Tests | `bun run test` | Run Vitest suite for Workers API |
 | Backend Types | `bun run type-check` | Run TypeScript compiler checks |
+| Load Test | `bun run loadtest` | Simulate a day of traffic and project Cloudflare free-plan usage |
 | Local DB Migrate | `bun run db:migrate:local` | Apply D1 SQL migrations locally |
 | Remote DB Migrate | `bun run db:migrate:remote` | Apply D1 SQL migrations to remote D1 |
 | Flutter Deps | `flutter pub get` | Install Flutter package dependencies |
@@ -122,6 +123,27 @@ flutter test
 ```bash
 flutter analyze
 ```
+
+---
+
+## Load Testing
+
+`scripts/loadtest` drives a compressed day of real API traffic (signup, devices,
+conversations, WebSockets, messages, reads) for N daily active users and
+projects the totals onto the Cloudflare free-plan limits.
+
+```bash
+bun run dev              # terminal 1
+bun run loadtest         # terminal 2: 50 users/day
+bun run loadtest --users 200 --messages 30
+bun run loadtest --reuse # repeat without creating new accounts
+```
+
+The report prints per-user-day traffic, the modeled Durable Object and D1 costs,
+and the daily user count at which each cap is reached. See
+`scripts/loadtest/README.md` for the scenario definition, what is measured vs.
+modeled, and the caveats (local D1 storage granularity, unenforced CPU limits,
+excluded push traffic).
 
 ---
 

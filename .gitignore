@@ -20,6 +20,10 @@ dist/
 .wrangler/state/
 wrangler.toml.bak
 
+# Load test artifacts
+scripts/loadtest/.state.json
+scripts/loadtest/results/
+
 # Flutter / Dart
 .dart_tool/
 .flutter-plugins

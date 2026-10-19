@@ -7,6 +7,7 @@
     "dev": "cd worker && bunx wrangler dev",
     "test": "cd worker && bunx vitest run",
     "test:watch": "cd worker && bunx vitest",
+    "loadtest": "bun run scripts/loadtest/index.js",
     "type-check": "cd worker && bunx tsc --noEmit",
     "db:migrate:local": "cd worker && bunx wrangler d1 migrations apply flexiyo-db --local",
     "db:migrate:remote": "cd worker && bunx wrangler d1 migrations apply flexiyo-db --remote",

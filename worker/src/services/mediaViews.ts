@@ -3,6 +3,10 @@ import type { ViewPolicy } from '../types.js';
 /** Allowed recipient views per limited policy. */
 const VIEW_LIMITS: Record<'once' | 'twice', number> = { once: 1, twice: 2 };
 
+export function viewLimit(policy: ViewPolicy): number | null {
+  return policy === 'unlimited' ? null : VIEW_LIMITS[policy];
+}
+
 export interface ViewDecision {
   /** False once the recipient has already used every allowed view. */
   allowed: boolean;

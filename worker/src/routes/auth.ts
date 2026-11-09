@@ -9,6 +9,7 @@ import { signJWT } from '../utils/jwt.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { rateLimitMiddleware } from '../middleware/rateLimit.js';
 import { issueEmailVerificationCode, verifyEmailCode } from '../services/brevo.js';
+import { readJsonBody } from '../utils/http.js';
 
 export const authRouter = Router({ base: '/api/auth' });
 
@@ -39,15 +40,9 @@ authRouter.post(
   rateLimitMiddleware({ limit: 10, windowMs: 60_000 }),
   // @ts-ignore
   async (request: IRequest, env: Env, _ctx: ExecutionContext): Promise<Response> => {
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) return bodyResult.response;
+    const body = bodyResult.body;
 
     const parsed = registerSchema.safeParse(body);
     if (!parsed.success) {
@@ -103,15 +98,9 @@ authRouter.post(
   rateLimitMiddleware({ limit: 15, windowMs: 60_000 }),
   // @ts-ignore
   async (request: IRequest, env: Env, _ctx: ExecutionContext): Promise<Response> => {
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) return bodyResult.response;
+    const body = bodyResult.body;
 
     const parsed = loginSchema.safeParse(body);
     if (!parsed.success) {
@@ -291,15 +280,9 @@ authRouter.get(
 );
 
 export const handleGoogleOAuth = async (request: IRequest, env: Env): Promise<Response> => {
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
+  const bodyResult = await readJsonBody(request);
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.body;
 
   const parsed = googleAuthSchema.safeParse(body);
   if (!parsed.success) {
@@ -440,15 +423,9 @@ authRouter.post(
   (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
   // @ts-ignore
   async (request: IRequest, env: Env, _ctx: ExecutionContext): Promise<Response> => {
-    let body: any;
-    try {
-      body = await request.json();
-    } catch {
-      return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) return bodyResult.response;
+    const body = bodyResult.body as { email?: string; code?: string };
 
     const email = (body.email || '').trim().toLowerCase();
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -513,15 +490,9 @@ authRouter.post(
   (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
   // @ts-ignore
   async (request: IRequest, env: Env, _ctx: ExecutionContext): Promise<Response> => {
-    let body: any;
-    try {
-      body = await request.json();
-    } catch {
-      return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) return bodyResult.response;
+    const body = bodyResult.body as { email?: string; code?: string };
 
     const code = (body.code || '').trim();
     if (!/^\d{6}$/.test(code)) {

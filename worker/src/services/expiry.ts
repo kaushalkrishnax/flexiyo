@@ -9,15 +9,20 @@ export async function cleanExpiredMessages(env: Env): Promise<void> {
   const db = env.DB;
   const now = Math.floor(Date.now() / 1000);
 
-  const lastCleanup = await db
-    .prepare(`SELECT value FROM worker_meta WHERE key = 'last_expiry_cleanup'`)
+  // Claim the sweep with one conditional UPSERT. A read-then-write throttle
+  // lets two overlapping invocations both run the same cleanup.
+  const claimed = await db
+    .prepare(
+      `INSERT INTO worker_meta (key, value)
+       VALUES ('last_expiry_cleanup', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value
+       WHERE CAST(worker_meta.value AS INTEGER) <= ?
+       RETURNING value`,
+    )
+    .bind(String(now), now - CLEANUP_INTERVAL_SECONDS)
     .first<{ value: string }>();
 
-  const lastCleanupTs = lastCleanup ? parseInt(lastCleanup.value, 10) : 0;
-
-  if (now - lastCleanupTs < CLEANUP_INTERVAL_SECONDS) {
-    return;
-  }
+  if (!claimed) return;
 
   const expired = await db
     .prepare(
@@ -38,13 +43,4 @@ export async function cleanExpiredMessages(env: Env): Promise<void> {
   for (const [conversationId, ids] of byConversation) {
     await deleteMessages(env, conversationId, ids);
   }
-
-  await db
-    .prepare(
-      `INSERT INTO worker_meta (key, value)
-       VALUES ('last_expiry_cleanup', ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-    )
-    .bind(String(now))
-    .run();
 }

@@ -10,6 +10,7 @@ import { pushRouter } from './routes/push.js';
 import { handlePreflight, withCors } from './middleware/cors.js';
 import { cleanExpiredMessages } from './services/expiry.js';
 import { purgeExpiredMedia } from './services/media_purge.js';
+import { pruneOperationalData } from './services/maintenance.js';
 import { ChatRoom } from './sockets/chatRoom.js';
 import type { Env } from './types.js';
 import { verifyJWT } from './utils/jwt.js';
@@ -139,8 +140,19 @@ export default {
   },
 
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
-    await cleanExpiredMessages(env);
-    await purgeExpiredMedia(env.DB, env);
+    // Isolate each task: one failing maintenance job must not starve the rest.
+    const tasks: Array<() => Promise<void>> = [
+      () => cleanExpiredMessages(env),
+      () => purgeExpiredMedia(env.DB, env),
+      () => pruneOperationalData(env),
+    ];
+    for (const task of tasks) {
+      try {
+        await task();
+      } catch (error) {
+        console.error('Scheduled maintenance task failed', error);
+      }
+    }
   },
 };
 

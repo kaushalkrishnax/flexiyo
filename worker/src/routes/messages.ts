@@ -12,12 +12,16 @@ import { notifyInboxes } from '../services/inbox.js';
 import { deleteMessages } from '../services/message_deletion.js';
 import { sendMessagePush } from '../services/push.js';
 import { getConversationAccess, getConversationForMember } from './conversations.js';
+import { readJsonBody } from '../utils/http.js';
+import { runBatched } from '../utils/d1.js';
 
 export const messagesRouter = Router({ base: '/api/conversations' });
 
+const MAX_CIPHERTEXT_CHARS = 64 * 1024;
+
 const devicePayloadSchema = z.object({
   deviceId: z.number().int().positive(),
-  ciphertext: z.string().min(1),
+  ciphertext: z.string().min(1).max(MAX_CIPHERTEXT_CHARS),
   messageType: z.enum(['signal', 'prekey']).optional(),
 });
 
@@ -104,10 +108,10 @@ messagesRouter.get(
     if (before) {
       // Cursor-based pagination: get messages older than the cursor message
       const cursorMsg = await env.DB.prepare(
-        'SELECT created_at FROM messages WHERE id = ? AND conversation_id = ?',
+        'SELECT created_at, id FROM messages WHERE id = ? AND conversation_id = ?',
       )
         .bind(before, conversationId)
-        .first<{ created_at: number }>();
+        .first<{ created_at: number; id: string }>();
 
       if (!cursorMsg) {
         return new Response(JSON.stringify({ error: 'Cursor message not found' }), {
@@ -136,8 +140,8 @@ messagesRouter.get(
            AND m.message_type != 'system'
            AND (m.expires_at IS NULL OR m.expires_at > ?)
            AND (? IS NULL OR m.created_at >= ?)
-           AND m.created_at < ?
-         ORDER BY m.created_at DESC
+           AND (m.created_at < ? OR (m.created_at = ? AND m.id < ?))
+         ORDER BY m.created_at DESC, m.id DESC
          LIMIT ?`,
       )
         .bind(
@@ -149,6 +153,8 @@ messagesRouter.get(
           after,
           after,
           cursorMsg.created_at,
+          cursorMsg.created_at,
+          cursorMsg.id,
           limit,
         )
         .all<MessageRow>();
@@ -173,7 +179,7 @@ messagesRouter.get(
            AND m.message_type != 'system'
            AND (m.expires_at IS NULL OR m.expires_at > ?)
            AND (? IS NULL OR m.created_at >= ?)
-         ORDER BY m.created_at DESC
+         ORDER BY m.created_at DESC, m.id DESC
          LIMIT ?`,
       )
         .bind(userId, userId, myDeviceId, conversationId, now, after, after, limit)
@@ -247,15 +253,9 @@ messagesRouter.post(
       });
     }
 
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) return bodyResult.response;
+    const body = bodyResult.body;
 
     const parsed = sendMessageSchema.safeParse(body);
     if (!parsed.success) {
@@ -281,7 +281,8 @@ messagesRouter.post(
     const [media, existingMessage, deviceRows] = await Promise.all([
       mediaId != null
         ? env.DB.prepare(
-            `SELECT id FROM media WHERE id = ? AND conversation_id = ? AND sender_id = ?`,
+            `SELECT id FROM media
+             WHERE id = ? AND conversation_id = ? AND sender_id = ? AND consumed = 0`,
           )
             .bind(mediaId, conversationId, userId)
             .first<{ id: string }>()
@@ -305,16 +306,11 @@ messagesRouter.post(
         : Promise.resolve(null),
     ]);
 
-    if (mediaId != null && !media) {
-      return new Response(JSON.stringify({ error: 'Invalid mediaId' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
     if (existingMessage) {
       // Idempotent retry: the message was already committed. Do not duplicate
-      // side effects; return the existing committed result.
+      // side effects; return the existing committed result. This check runs
+      // before media validation so a retried send still succeeds after the
+      // media was consumed.
       if (
         existingMessage.sender_id !== userId ||
         existingMessage.conversation_id !== conversationId
@@ -328,6 +324,13 @@ messagesRouter.post(
         JSON.stringify({ id: msgId, status: 'already_committed' }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
+    }
+
+    if (mediaId != null && !media) {
+      return new Response(JSON.stringify({ error: 'Invalid mediaId' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
     }
 
     const now = Math.floor(Date.now() / 1000);
@@ -504,15 +507,9 @@ messagesRouter.post(
       });
     }
 
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) return bodyResult.response;
+    const body = bodyResult.body;
     const parsed = deleteForMeSchema.safeParse(body);
     if (!parsed.success) {
       return new Response(JSON.stringify({ error: 'Invalid message IDs' }), {
@@ -536,7 +533,7 @@ messagesRouter.post(
     }
 
     const now = Math.floor(Date.now() / 1000);
-    await env.DB.batch(messageIds.map((messageId) =>
+    await runBatched(env.DB, messageIds.map((messageId) =>
       env.DB.prepare(
         `INSERT OR IGNORE INTO local_deletions (id, user_id, message_id, deleted_at)
          VALUES (?, ?, ?, ?)`,
@@ -611,21 +608,21 @@ messagesRouter.post(
 
     const newlyReadMessageIds = (unreadMessages.results ?? []).map((row) => row.id);
 
-    const stub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(conversationId));
-    await stub.fetch(new Request('https://internal/broadcast', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        events: [{
-          type: 'messages_read',
-          conversationId,
-          readBy: userId,
-          readAt: now,
-        }],
-      }),
-    }));
-
     if (newlyReadMessageIds.length > 0) {
+      const stub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(conversationId));
+      await stub.fetch(new Request('https://internal/broadcast', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          events: [{
+            type: 'messages_read',
+            conversationId,
+            readBy: userId,
+            readAt: now,
+          }],
+        }),
+      }));
+
       if (conversation.disappearing_timer === -1) {
         await deleteMessages(env, conversationId, newlyReadMessageIds);
       } else if (conversation.disappearing_timer > 0) {
@@ -636,12 +633,12 @@ messagesRouter.post(
           .bind(now + conversation.disappearing_timer, JSON.stringify(newlyReadMessageIds))
           .run();
       }
-    }
 
-    await notifyInboxes(env, [userId], () => [{
-      type: 'unread_reset',
-      conversationId,
-    }]);
+      await notifyInboxes(env, [userId], () => [{
+        type: 'unread_reset',
+        conversationId,
+      }]);
+    }
 
     return new Response(JSON.stringify({ read: true, readAt: now }), {
       status: 200,
@@ -712,15 +709,9 @@ messagesRouter.patch(
       });
     }
 
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) return bodyResult.response;
+    const body = bodyResult.body;
 
     const parsed = editMessageSchema.safeParse(body);
     if (!parsed.success) {
@@ -943,15 +934,9 @@ messagesRouter.post(
       });
     }
 
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) return bodyResult.response;
+    const body = bodyResult.body;
 
     const parsed = reactionSchema.safeParse(body);
     if (!parsed.success) {

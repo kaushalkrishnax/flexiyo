@@ -15,6 +15,7 @@ import {
 import { notifyInboxes } from '../services/inbox.js';
 import { sendPushToUser } from '../services/push.js';
 import type { InboxEvent } from '../services/inbox.js';
+import { readJsonBody } from '../utils/http.js';
 
 export const conversationsRouter = Router({ base: '/api/conversations' });
 
@@ -92,15 +93,9 @@ conversationsRouter.post(
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
 
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) return bodyResult.response;
+    const body = bodyResult.body;
 
     const parsed = createConversationSchema.safeParse(body);
     if (!parsed.success) {
@@ -264,15 +259,9 @@ conversationsRouter.patch(
       });
     }
 
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) return bodyResult.response;
+    const body = bodyResult.body;
     const parsed = requestDecisionSchema.safeParse(body);
     if (!parsed.success) {
       return new Response(JSON.stringify({ error: 'Invalid request action' }), {
@@ -423,7 +412,7 @@ conversationsRouter.get(
       .first<{ id: string; username: string }>();
 
     const unread = await env.DB.prepare(
-      `SELECT COUNT(*) AS unread_count FROM message_deliveries md
+      `SELECT COUNT(DISTINCT md.message_id) AS unread_count FROM message_deliveries md
        JOIN messages m ON m.id = md.message_id
        WHERE md.recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)
          AND md.read_at IS NULL
@@ -467,15 +456,9 @@ conversationsRouter.patch(
       });
     }
 
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) return bodyResult.response;
+    const body = bodyResult.body;
 
     const parsed = disappearingTimerSchema.safeParse(body);
     if (!parsed.success) {

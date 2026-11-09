@@ -34,6 +34,7 @@ interface ConversationGateRow {
 }
 
 const MAX_FRAME_BYTES = 64 * 1024;
+const MAX_PAYLOADS = 10;
 const MAX_TYPING_PER_WINDOW = 20;
 const TYPING_WINDOW_MS = 10_000;
 const MAX_SESSIONS_PER_USER = 8;
@@ -577,6 +578,26 @@ export class ChatRoom {
       return;
     }
 
+    if (payloads.length > MAX_PAYLOADS) {
+      sendAck({ type: 'error', code: 'invalid_payloads', message: 'Too many device payloads' });
+      return;
+    }
+
+    // The HTTP path has always required the media row to belong to this
+    // conversation and sender; the socket path must enforce the same rule.
+    if (mediaId) {
+      const media = await this.env.DB.prepare(
+        `SELECT id FROM media
+         WHERE id = ? AND conversation_id = ? AND sender_id = ? AND consumed = 0`,
+      )
+        .bind(mediaId, targetConversationId, userId)
+        .first<{ id: string }>();
+      if (!media) {
+        sendAck({ type: 'error', code: 'invalid_media', message: 'Invalid mediaId' });
+        return;
+      }
+    }
+
     // Sender's own active devices (sender-device sync: each of the sender's
     // sibling installations gets a ciphertext it can decrypt) and the
     // recipient's active devices, in one round trip.
@@ -641,7 +662,9 @@ export class ChatRoom {
       return {
         deviceId: dp.deviceId as number,
         payload: dp.ciphertext as string,
-        messageType: typeof dp.messageType === 'string' ? dp.messageType : messageType,
+        messageType: dp.messageType === 'prekey' || dp.messageType === 'signal'
+          ? dp.messageType
+          : messageType,
       };
     });
 

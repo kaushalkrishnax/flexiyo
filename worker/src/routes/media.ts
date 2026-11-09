@@ -1,7 +1,7 @@
 import { IRequest, Router } from 'itty-router';
 import type { Env, AuthenticatedRequest, MediaDto, MediaRow, ViewPolicy } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
-import { decideView } from '../services/mediaViews.js';
+import { decideView, viewLimit } from '../services/mediaViews.js';
 import { generateId } from '../utils/crypto.js';
 import { getConversationForMember } from './conversations.js';
 
@@ -44,6 +44,23 @@ async function consume(env: Env, mediaId: string, r2Key: string): Promise<void> 
     .run();
 }
 
+/** Returns a claimed view that could not be served because the object failed. */
+async function releaseView(env: Env, mediaId: string, userId: string): Promise<void> {
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE media_views SET count = count - 1
+         WHERE media_id = ? AND user_id = ? AND count > 1`,
+      ).bind(mediaId, userId),
+      env.DB.prepare(
+        `DELETE FROM media_views WHERE media_id = ? AND user_id = ? AND count <= 1`,
+      ).bind(mediaId, userId),
+    ]);
+  } catch {
+    // Cleanup is best-effort; the media is consumed below regardless.
+  }
+}
+
 mediaRouter.post(
   '/media',
   (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
@@ -79,9 +96,17 @@ mediaRouter.post(
       });
     }
 
+    const maxUpload = envNum(env, MAX_UPLOAD_VAR, DEFAULT_MAX_UPLOAD_BYTES);
+    const declaredLength = Number(request.headers.get('content-length'));
+    if (Number.isFinite(declaredLength) && declaredLength > maxUpload) {
+      return new Response(JSON.stringify({ error: 'File is empty or too large' }), {
+        status: 413,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
     const arrayBuffer = await request.arrayBuffer();
     const size = arrayBuffer.byteLength;
-    const maxUpload = envNum(env, MAX_UPLOAD_VAR, DEFAULT_MAX_UPLOAD_BYTES);
     if (size === 0 || size > maxUpload) {
       return new Response(JSON.stringify({ error: 'File is empty or too large' }), {
         status: 413,
@@ -193,34 +218,7 @@ mediaRouter.get(
     const now = Math.floor(Date.now() / 1000);
     const today = utcDayKey();
     const isSender = media.sender_id === userId;
-
-    // View-once / view-twice enforcement (non-sender).
-    let isFinalView = false;
-    let viewsRemaining: number | null = null;
-    if (!isSender && media.view_policy !== 'unlimited') {
-      const existing = await env.DB.prepare(
-        'SELECT count FROM media_views WHERE media_id = ? AND user_id = ?',
-      )
-        .bind(mediaId, userId)
-        .first<{ count: number }>();
-      const decision = decideView(media.view_policy, existing?.count ?? 0);
-      if (!decision.allowed) {
-        await consume(env, mediaId, media.r2_key);
-        return new Response(JSON.stringify({ error: 'View limit reached' }), {
-          status: 410,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-      await env.DB.prepare(
-        `INSERT INTO media_views (media_id, user_id, count, updated_at)
-         VALUES (?, ?, 1, ?)
-         ON CONFLICT(media_id, user_id) DO UPDATE SET count = count + 1, updated_at = excluded.updated_at`,
-      )
-        .bind(mediaId, userId, now)
-        .run();
-      isFinalView = decision.final;
-      viewsRemaining = decision.remaining;
-    }
+    const limit = viewLimit(media.view_policy);
 
     const downloadCap = envNum(env, DOWNLOAD_CAP_VAR, 200 * 1024 * 1024);
     const downRow = await env.DB.prepare(
@@ -235,13 +233,6 @@ mediaRouter.get(
         headers: { 'Content-Type': 'application/json' },
       });
     }
-    await env.DB.prepare(
-      `INSERT INTO daily_usage (user_id, day, bytes_up, bytes_down)
-       VALUES (?, ?, 0, ?)
-       ON CONFLICT(user_id, day) DO UPDATE SET bytes_down = bytes_down + excluded.bytes_down`,
-    )
-      .bind(userId, today, media.size)
-      .run();
 
     let object: R2Object | null;
     try {
@@ -257,8 +248,61 @@ mediaRouter.get(
       });
     }
 
+    // Claim the view atomically before reading the object. A read-then-write
+    // check lets two concurrent requests both observe the same count and
+    // exceed a view-once/view-twice policy.
+    let isFinalView = false;
+    let viewsRemaining: number | null = null;
+    let claimedView = false;
+    if (!isSender && limit !== null) {
+      const claimed = await env.DB.prepare(
+        `INSERT INTO media_views (media_id, user_id, count, updated_at)
+         VALUES (?, ?, 1, ?)
+         ON CONFLICT(media_id, user_id) DO UPDATE SET
+           count = media_views.count + 1,
+           updated_at = excluded.updated_at
+         WHERE media_views.count < ?
+         RETURNING count`,
+      )
+        .bind(mediaId, userId, now, limit)
+        .first<{ count: number }>();
+
+      if (!claimed) {
+        // The request that used the final view is responsible for consuming
+        // the object; deleting it here would race that response.
+        return new Response(JSON.stringify({ error: 'View limit reached' }), {
+          status: 410,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      claimedView = true;
+      const decision = decideView(media.view_policy, claimed.count - 1);
+      isFinalView = decision.final;
+      viewsRemaining = decision.remaining;
+    }
+
     const r2Body = object as R2ObjectBody;
-    const payload = await r2Body.arrayBuffer();
+    let payload: ArrayBuffer;
+    try {
+      payload = await r2Body.arrayBuffer();
+    } catch {
+      if (claimedView) await releaseView(env, mediaId, userId);
+      await consume(env, mediaId, media.r2_key);
+      return new Response(JSON.stringify({ error: 'Media object unavailable' }), {
+        status: 410,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    await env.DB.prepare(
+      `INSERT INTO daily_usage (user_id, day, bytes_up, bytes_down)
+       VALUES (?, ?, 0, ?)
+       ON CONFLICT(user_id, day) DO UPDATE SET bytes_down = bytes_down + excluded.bytes_down`,
+    )
+      .bind(userId, today, media.size)
+      .run();
+
     if (isFinalView) {
       // Last allowed view served — purge the object now so nothing remains
       // in storage even if the app never fetches it again.

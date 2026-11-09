@@ -1,5 +1,8 @@
 import type { Env } from '../types.js';
 
+/** Bounds FCM fan-out and per-account registration growth. */
+export const MAX_PUSH_TOKENS_PER_USER = 10;
+
 /**
  * Firebase Cloud Messaging (HTTP v1) delivery for offline notifications.
  *
@@ -295,9 +298,9 @@ export async function sendPushToUser(
 
   try {
     const { results } = await env.DB.prepare(
-      'SELECT token FROM push_tokens WHERE user_id = ?',
+      'SELECT token FROM push_tokens WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?',
     )
-      .bind(userId)
+      .bind(userId, MAX_PUSH_TOKENS_PER_USER)
       .all<{ token: string }>();
     const tokens = (results ?? []).map((row) => row.token);
     if (tokens.length === 0) {

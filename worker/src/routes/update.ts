@@ -1,6 +1,7 @@
 import { IRequest, Router } from 'itty-router';
 import type { Env } from '../types.js';
 import { rateLimitMiddleware } from '../middleware/rateLimit.js';
+import { readJsonBody } from '../utils/http.js';
 
 export const updateRouter = Router({ base: '/api/update' });
 
@@ -128,12 +129,9 @@ updateRouter.post(
   rateLimitMiddleware({ limit: 30, windowMs: 60_000 }),
   // @ts-ignore
   async (request: IRequest, env: Env, _ctx: ExecutionContext): Promise<Response> => {
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return json({ error: 'Invalid JSON body' }, 400);
-    }
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) return bodyResult.response;
+    const body = bodyResult.body;
 
     const { version, arch, platform } = (body ?? {}) as {
       version?: unknown;

@@ -1,4 +1,5 @@
 import type { Env } from '../types.js';
+import { runBatched } from '../utils/d1.js';
 
 // Deletes expired R2 media + rows and prunes old usage rows (scheduled handler).
 const MAX_EXPIRED_MEDIA_PER_RUN = 200;
@@ -18,15 +19,14 @@ export async function purgeExpiredMedia(db: D1Database, env: Env): Promise<void>
 
   const rows = expired.results ?? [];
   if (rows.length > 0) {
-    for (const row of rows) {
-      try {
-        await env.MEDIA.delete(row.r2_key);
-      } catch {}
-    }
-    await db.batch(rows.flatMap((row) => [
-      db.prepare('DELETE FROM media_views WHERE media_id = ?').bind(row.id),
-      db.prepare('DELETE FROM media WHERE id = ?').bind(row.id),
-    ]));
+    await Promise.allSettled(rows.map((row) => env.MEDIA.delete(row.r2_key)));
+    await runBatched(
+      db,
+      rows.flatMap((row) => [
+        db.prepare('DELETE FROM media_views WHERE media_id = ?').bind(row.id),
+        db.prepare('DELETE FROM media WHERE id = ?').bind(row.id),
+      ]),
+    );
   }
 
   // Prune usage rows older than 30 days.

@@ -44,7 +44,7 @@ const BLOCKED_WHERE = `
           CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END)
        AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.is_unsent = 0)`;
 
-const UNREAD_COUNT = `(SELECT COUNT(*) FROM message_deliveries md
+const UNREAD_COUNT = `(SELECT COUNT(DISTINCT md.message_id) FROM message_deliveries md
       JOIN messages m ON m.id = md.message_id
       WHERE md.recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)
         AND md.read_at IS NULL

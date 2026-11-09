@@ -4,25 +4,32 @@ import type { Env, AuthenticatedRequest, DeviceRow, DeviceStatus } from '../type
 import { authMiddleware } from '../middleware/auth.js';
 import { checkRateLimitDistributed } from '../middleware/rateLimit.js';
 import { generateId } from '../utils/crypto.js';
+import { runBatched } from '../utils/d1.js';
+import { readJsonBody } from '../utils/http.js';
 
 export const devicesRouter = Router({ base: '/api/devices' });
 
 /** Maximum number of devices in ('active','pending') per account. */
 export const MAX_ACTIVE_DEVICES = 5;
 
+/** Upper bound on stored unconsumed one-time pre-keys per device. */
+export const MAX_STORED_PREKEYS = 500;
+
+const MAX_KEY_CHARS = 4096;
+
 const preKeySchema = z.object({
   keyId: z.number().int().positive(),
-  publicKey: z.string().min(1),
+  publicKey: z.string().min(1).max(MAX_KEY_CHARS),
 });
 
 const registerDeviceSchema = z.object({
   installationId: z.string().min(1).max(128),
-  identityKey: z.string().min(1),
+  identityKey: z.string().min(1).max(MAX_KEY_CHARS),
   registrationId: z.number().int().positive(),
   signedPreKey: z.object({
     keyId: z.number().int().positive(),
-    publicKey: z.string().min(1),
-    signature: z.string().min(1),
+    publicKey: z.string().min(1).max(MAX_KEY_CHARS),
+    signature: z.string().min(1).max(MAX_KEY_CHARS),
   }),
   preKeys: z.array(preKeySchema).min(1).max(200),
   activate: z.boolean().optional(),
@@ -74,12 +81,9 @@ devicesRouter.post(
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
 
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return json({ error: 'Invalid JSON body' }, 400);
-    }
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) return bodyResult.response;
+    const body = bodyResult.body;
 
     const parsed = registerDeviceSchema.safeParse(body);
     if (!parsed.success) {
@@ -100,13 +104,18 @@ devicesRouter.post(
 
     if (existing) {
       // Safe reactivation of a known installation: refresh its keys and return
-      // it to the requested status. No new device slot is consumed.
-      await env.DB.prepare(
+      // it to the requested status. Re-registering an installation that is
+      // currently counted (active/pending) consumes no new slot; reactivating
+      // a disabled/logged-out one must still respect the account limit.
+      const updated = await env.DB.prepare(
         `UPDATE devices
          SET registration_id = ?, identity_key = ?, signed_pre_key_id = ?,
              signed_pre_key_public = ?, signed_pre_key_signature = ?,
              status = ?, revoked_at = NULL, last_seen_at = ?
-         WHERE id = ?`,
+         WHERE id = ? AND user_id = ?
+           AND (? IN ('active', 'pending')
+                OR (SELECT COUNT(*) FROM devices
+                    WHERE user_id = ? AND status IN ('active', 'pending')) < ?)`,
       )
         .bind(
           registrationId,
@@ -117,8 +126,23 @@ devicesRouter.post(
           status,
           now,
           existing.id,
+          userId,
+          existing.status,
+          userId,
+          MAX_ACTIVE_DEVICES,
         )
         .run();
+
+      if (updated.meta.changes === 0) {
+        return json(
+          {
+            error: 'device_limit_reached',
+            message: `An account may have at most ${MAX_ACTIVE_DEVICES} active devices`,
+            limit: MAX_ACTIVE_DEVICES,
+          },
+          409,
+        );
+      }
       deviceId = existing.id;
     } else {
       // Single-statement conditional insert: atomic under D1 (which has no
@@ -175,7 +199,7 @@ devicesRouter.post(
          VALUES (?, ?, ?, ?, ?)`,
       ).bind(generateId(), deviceId, pk.keyId, pk.publicKey, now),
     );
-    await env.DB.batch(preKeyInserts);
+    await runBatched(env.DB, preKeyInserts);
 
     return json({ deviceId, installationId, status }, 201);
   },
@@ -236,15 +260,17 @@ devicesRouter.post(
     if (!device) return json({ error: 'Device not found' }, 404);
 
     // Conditional update: slot check and status flip happen in ONE statement,
-    // so concurrent enables cannot overshoot the limit.
+    // so concurrent enables cannot overshoot the limit. Flipping an already
+    // counted device (pending → active) consumes no additional slot.
     const result = await env.DB.prepare(
       `UPDATE devices
        SET status = 'active', revoked_at = NULL, last_seen_at = ?
        WHERE id = ? AND user_id = ? AND status <> 'active'
-         AND (
-           SELECT COUNT(*) FROM devices
-           WHERE user_id = ? AND status IN ('active', 'pending')
-         ) < ?`,
+         AND (status = 'pending'
+              OR (
+                SELECT COUNT(*) FROM devices
+                WHERE user_id = ? AND status IN ('active', 'pending')
+              ) < ?)`,
     )
       .bind(Math.floor(Date.now() / 1000), device.id, userId, userId, MAX_ACTIVE_DEVICES)
       .run();
@@ -423,12 +449,9 @@ devicesRouter.post(
   async (request: IRequest, env: Env): Promise<Response> => {
     const userId = (request as unknown as AuthenticatedRequest).user.sub;
 
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return json({ error: 'Invalid JSON body' }, 400);
-    }
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) return bodyResult.response;
+    const body = bodyResult.body;
 
     const parsed = replenishPreKeysSchema.safeParse(body);
     if (!parsed.success) {
@@ -451,20 +474,53 @@ devicesRouter.post(
       return json({ error: 'Unknown or inactive installation for this account' }, 404);
     }
 
+    const allowed = await checkRateLimitDistributed(
+      env,
+      `prekeys:${userId}:${installationId}`,
+      { limit: 30, windowMs: 60_000 },
+    );
+    if (!allowed) {
+      return json({ error: 'Too many requests. Please slow down.' }, 429);
+    }
+
+    const current = await env.DB.prepare(
+      `SELECT COUNT(*) as count FROM pre_keys WHERE device_id = ? AND consumed_at IS NULL`,
+    )
+      .bind(device.id)
+      .first<{ count: number }>();
+    const remainingBefore = current?.count ?? 0;
+
+    // The cap is evaluated inside each insert, so a concurrent replenish cannot
+    // both read the same remaining capacity and overshoot the limit.
     const stmts = preKeys.map((pk) =>
       env.DB.prepare(
         `INSERT OR IGNORE INTO pre_keys (id, device_id, key_id, public_key, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
-      ).bind(generateId(), device!.id, pk.keyId, pk.publicKey, now),
+         SELECT ?, ?, ?, ?, ?
+         WHERE (SELECT COUNT(*) FROM pre_keys
+                WHERE device_id = ? AND consumed_at IS NULL) < ?`,
+      ).bind(
+        generateId(),
+        device!.id,
+        pk.keyId,
+        pk.publicKey,
+        now,
+        device!.id,
+        MAX_STORED_PREKEYS,
+      ),
     );
-    await env.DB.batch(stmts);
+    if (stmts.length > 0) await runBatched(env.DB, stmts);
 
     const remaining = await env.DB.prepare(
       `SELECT COUNT(*) as count FROM pre_keys WHERE device_id = ? AND consumed_at IS NULL`,
     )
       .bind(device.id)
       .first<{ count: number }>();
+    const remainingAfter = remaining?.count ?? 0;
 
-    return json({ added: preKeys.length, deviceId: device.id, remaining: remaining?.count ?? 0 });
+    return json({
+      added: Math.max(0, remainingAfter - remainingBefore),
+      deviceId: device.id,
+      remaining: remainingAfter,
+    });
   },
 );

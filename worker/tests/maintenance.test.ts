@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { cleanExpiredMessages } from '../src/services/expiry.js';
+import { pruneOperationalData } from '../src/services/maintenance.js';
 import { purgeExpiredMedia } from '../src/services/media_purge.js';
 import {
   countRows,
@@ -123,6 +124,70 @@ describe('purgeExpiredMedia', () => {
 
     expect(await countRows('SELECT COUNT(*) AS n FROM daily_usage WHERE day = ?', oldDay)).toBe(0);
     expect(await countRows('SELECT COUNT(*) AS n FROM daily_usage WHERE day = ?', recentDay)).toBe(1);
+  });
+});
+
+describe('pruneOperationalData', () => {
+  it('removes expired auth bookkeeping while keeping live rows', async () => {
+    const nowSeconds = now();
+    const staleBucket = Date.now() - 2 * 60 * 60 * 1000;
+    const recentBucket = Date.now() - 60 * 1000;
+
+    await db.batch([
+      db
+        .prepare('INSERT INTO token_revocations (jti, user_id, expires_at) VALUES (?, ?, ?)')
+        .bind('expired-jti', ALICE, nowSeconds - 60),
+      db
+        .prepare('INSERT INTO token_revocations (jti, user_id, expires_at) VALUES (?, ?, ?)')
+        .bind('live-jti', ALICE, nowSeconds + 3_600),
+      db
+        .prepare('INSERT INTO rate_limit_buckets (key, window_start, count) VALUES (?, ?, 1)')
+        .bind('stale-bucket', staleBucket),
+      db
+        .prepare('INSERT INTO rate_limit_buckets (key, window_start, count) VALUES (?, ?, 1)')
+        .bind('recent-bucket', recentBucket),
+      db
+        .prepare(
+          `INSERT INTO email_verification_codes (id, user_id, email, code_hash, expires_at)
+           VALUES (?, ?, ?, 'hash', ?)`,
+        )
+        .bind(crypto.randomUUID(), ALICE, 'alice@example.com', nowSeconds - 60),
+      db
+        .prepare(
+          `INSERT INTO email_verification_codes (id, user_id, email, code_hash, expires_at)
+           VALUES (?, ?, ?, 'hash', ?)`,
+        )
+        .bind(crypto.randomUUID(), BOB, 'bob@example.com', nowSeconds + 600),
+    ]);
+
+    await pruneOperationalData(testEnv);
+
+    expect(
+      await countRows("SELECT COUNT(*) AS n FROM token_revocations WHERE jti = 'expired-jti'"),
+    ).toBe(0);
+    expect(
+      await countRows("SELECT COUNT(*) AS n FROM token_revocations WHERE jti = 'live-jti'"),
+    ).toBe(1);
+    expect(
+      await countRows(
+        "SELECT COUNT(*) AS n FROM rate_limit_buckets WHERE key = 'stale-bucket'",
+      ),
+    ).toBe(0);
+    expect(
+      await countRows(
+        "SELECT COUNT(*) AS n FROM rate_limit_buckets WHERE key = 'recent-bucket'",
+      ),
+    ).toBe(1);
+    expect(
+      await countRows(
+        "SELECT COUNT(*) AS n FROM email_verification_codes WHERE email = 'alice@example.com'",
+      ),
+    ).toBe(0);
+    expect(
+      await countRows(
+        "SELECT COUNT(*) AS n FROM email_verification_codes WHERE email = 'bob@example.com'",
+      ),
+    ).toBe(1);
   });
 });
 

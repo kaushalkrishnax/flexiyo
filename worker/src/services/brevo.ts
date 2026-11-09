@@ -37,8 +37,9 @@ interface EmailVerificationRow {
 export async function sendEmail({ env, to, subject, html, text }: SendEmailArgs): Promise<boolean> {
   const apiKey = env.BREVO_API_KEY;
   if (!apiKey) {
-    // Dev/no-secret environments: don't fail the flow, just surface it.
-    console.warn('[brevo] BREVO_API_KEY not configured — skipping send', { to, subject });
+    // Dev/no-secret environments: don't fail the flow, just surface it. The
+    // recipient address and subject (which contains the code) stay out of logs.
+    console.warn('[brevo] BREVO_API_KEY not configured — skipping send');
     return false;
   }
 
@@ -74,10 +75,47 @@ export async function sendEmail({ env, to, subject, html, text }: SendEmailArgs)
 
 const CODE_DIGITS = 6;
 const HASH_ALGORITHM = 'SHA-256';
+const HASH_CONTEXT = 'flexiyo-email-code:';
 
-async function hashCode(code: string): Promise<string> {
-  const digest = await crypto.subtle.digest(HASH_ALGORITHM, new TextEncoder().encode(code));
-  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+function generateVerificationCode(): string {
+  const max = 10 ** CODE_DIGITS;
+  // Rejection sampling avoids modulo bias in the 32-bit range.
+  const cutoff = Math.floor(0x1_0000_0000 / max) * max;
+  const buffer = new Uint32Array(1);
+  do {
+    crypto.getRandomValues(buffer);
+  } while (buffer[0] >= cutoff);
+  return String(buffer[0] % max).padStart(CODE_DIGITS, '0');
+}
+
+/**
+ * Keyed hash: an unsalted SHA-256 of a six-digit code is reversible by
+ * enumerating a million candidates if the database leaks. HMAC with the
+ * Worker secret makes that offline search impossible without the secret.
+ */
+async function hashCode(env: Env, code: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(env.JWT_SECRET),
+    { name: 'HMAC', hash: HASH_ALGORITHM },
+    false,
+    ['sign'],
+  );
+  const signature = await crypto.subtle.sign(
+    'HMAC',
+    key,
+    new TextEncoder().encode(`${HASH_CONTEXT}${code}`),
+  );
+  return Array.from(new Uint8Array(signature), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function constantTimeEqual(left: string, right: string): boolean {
+  if (left.length !== right.length) return false;
+  let diff = 0;
+  for (let i = 0; i < left.length; i += 1) {
+    diff |= left.charCodeAt(i) ^ right.charCodeAt(i);
+  }
+  return diff === 0;
 }
 
 /**
@@ -92,7 +130,7 @@ export async function issueEmailVerificationCode(
   userId: string,
   email: string,
 ): Promise<{ sent: boolean; capped?: boolean; code?: string }> {
-  const code = String(Math.floor(Math.random() * 10 ** CODE_DIGITS)).padStart(CODE_DIGITS, '0');
+  const code = generateVerificationCode();
   const now = Math.floor(Date.now() / 1000);
   const expiresAt = now + CODE_TTL_SECONDS;
 
@@ -134,13 +172,13 @@ export async function issueEmailVerificationCode(
       crypto.randomUUID(),
       userId,
       email,
-      await hashCode(code),
+      await hashCode(env, code),
       expiresAt,
       now,
       now, // INSERT window start
-      now, now, now, // reset window
-      now, // reset window (second CASE)
-      now, now, // WHERE gate
+      now, // daily_count reset
+      now, now, // window_started_at reset
+      now, // WHERE gate
     )
     .run();
 
@@ -162,8 +200,7 @@ export async function issueEmailVerificationCode(
     </div>`,
   });
 
-  // Dev convenience: when no key is configured Surface the code in logs only.
-  if (!sent) console.info('[brevo] dev verification code', { userId, code });
+  // Delivery failure is surfaced to the caller; the code is never logged.
   return { sent, code: sent ? undefined : code };
 }
 
@@ -191,7 +228,7 @@ export async function verifyEmailCode(
     return false;
   }
 
-  const matches = (await hashCode(code)) === row.code_hash;
+  const matches = constantTimeEqual(await hashCode(env, code), row.code_hash);
 
   if (matches) {
     await env.DB.prepare('DELETE FROM email_verification_codes WHERE user_id = ?')

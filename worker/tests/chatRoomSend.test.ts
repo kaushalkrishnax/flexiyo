@@ -8,6 +8,7 @@ import {
   seedBlock,
   seedConversation,
   seedDevice,
+  seedMedia,
   seedMessage,
   seedUser,
 } from './support.js';
@@ -451,7 +452,7 @@ describe('send_message', () => {
   });
 
   it('rolls back every write and reports send_failed when the insert fails', async () => {
-    const { ack } = await send(message({ mediaId: 'missing-media-id' }));
+    const { ack } = await send(message({ replyToId: 'missing-reply-id' }));
 
     expect(ack).toMatchObject({ type: 'error', code: 'send_failed' });
     expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(0);
@@ -461,5 +462,52 @@ describe('send_message', () => {
       .bind(CONVERSATION)
       .first<{ last_message_at: number | null }>();
     expect(conversation?.last_message_at).toBeNull();
+  });
+
+  describe('media ownership', () => {
+    it('accepts media that belongs to the sender and conversation', async () => {
+      const mediaId = crypto.randomUUID();
+      await seedMedia(mediaId, CONVERSATION, ALICE);
+
+      const { ack } = await send(message({ mediaId }));
+
+      expect(ack).toMatchObject({ status: 'sent' });
+      const stored = await db
+        .prepare('SELECT media_id FROM messages WHERE id = ?')
+        .bind((message() as { id: string }).id)
+        .first<{ media_id: string | null }>();
+      expect(stored?.media_id).toBe(mediaId);
+    });
+
+    it('rejects media owned by another user', async () => {
+      const mediaId = crypto.randomUUID();
+      await seedMedia(mediaId, CONVERSATION, BOB);
+
+      const { ack } = await send(message({ mediaId }));
+
+      expect(ack).toMatchObject({ type: 'error', code: 'invalid_media' });
+      expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(0);
+    });
+
+    it('rejects media from another conversation', async () => {
+      await seedConversation(OTHER_CONVERSATION, ALICE, CAROL);
+      const mediaId = crypto.randomUUID();
+      await seedMedia(mediaId, OTHER_CONVERSATION, ALICE);
+
+      const { ack } = await send(message({ mediaId }));
+
+      expect(ack).toMatchObject({ type: 'error', code: 'invalid_media' });
+      expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(0);
+    });
+
+    it('rejects already consumed media', async () => {
+      const mediaId = crypto.randomUUID();
+      await seedMedia(mediaId, CONVERSATION, ALICE, { consumed: true });
+
+      const { ack } = await send(message({ mediaId }));
+
+      expect(ack).toMatchObject({ type: 'error', code: 'invalid_media' });
+      expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(0);
+    });
   });
 });

@@ -124,6 +124,30 @@ export async function seedPushToken(userId: string, token: string): Promise<void
     .run();
 }
 
+export async function seedMedia(
+  id: string,
+  conversationId: string,
+  senderId: string,
+  options: { consumed?: boolean; viewPolicy?: 'once' | 'twice' | 'unlimited'; r2Key?: string } = {},
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO media
+         (id, conversation_id, sender_id, kind, view_policy, size, mime_type,
+          r2_key, created_at, expires_at, consumed)
+       VALUES (?, ?, ?, 'image', ?, 10, 'image/png', ?, 0, 9999999999, ?)`,
+    )
+    .bind(
+      id,
+      conversationId,
+      senderId,
+      options.viewPolicy ?? 'unlimited',
+      options.r2Key ?? `media/${id}`,
+      options.consumed ? 1 : 0,
+    )
+    .run();
+}
+
 /** Access token for a user, signed with the test runtime's JWT secret. */
 export function tokenFor(userId: string, jti: string = crypto.randomUUID()): Promise<string> {
   return signJWT({ sub: userId, username: `user-${userId}`, jti }, testEnv.JWT_SECRET);

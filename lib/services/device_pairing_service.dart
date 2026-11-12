@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 import 'package:flexiyo/services/api_service.dart';
 import 'package:flexiyo/services/conversation_crypto_service.dart';
+import 'package:flexiyo/services/pairing_qr_code.dart';
 import 'package:flexiyo/storage/local_conversation_key_store.dart';
 
 class DevicePairingService {
@@ -81,13 +82,21 @@ class DevicePairingService {
       Uint8List.fromList(privateSeed),
     );
     await _store.savePairingSecret(sessionId, pairingSecret);
+    await _store.savePairingPayload(
+      sessionId,
+      {
+        'sessionId': sessionId,
+        'initiatorEphemeralPublic': base64Encode(publicKey.bytes),
+        'pairingSecret': base64Encode(pairingSecret),
+        'expiresAt': response['expiresAt'],
+      },
+    );
+    await _store.savePendingPairingSession(userId, sessionId);
 
     return {
       'type': 'flexiyo-pairing-v2',
       'sessionId': sessionId,
       'initiatorEphemeralPublic': base64Encode(publicKey.bytes),
-      // This secret exists only in the QR payload and the initiating device's
-      // secure store. It is never sent to the Worker or stored in D1.
       'pairingSecret': base64Encode(pairingSecret),
       'expiresAt': response['expiresAt'],
     };
@@ -266,5 +275,37 @@ class DevicePairingService {
     await _api.cancelPairingSession(sessionId);
     await _store.deletePairingPrivateSeed(sessionId);
     await _store.deletePairingSecret(sessionId);
+    await _store.deletePairingPayload(sessionId);
+  }
+
+  Future<void> deletePairingPayload(String sessionId) =>
+      _store.deletePairingPayload(sessionId);
+
+  Future<void> savePendingPairingSession(String userId, String sessionId) =>
+      _store.savePendingPairingSession(userId, sessionId);
+
+  Future<String?> readPendingPairingSession(String userId) =>
+      _store.readPendingPairingSession(userId);
+
+  Future<void> clearPendingPairingSession(String userId) =>
+      _store.clearPendingPairingSession(userId);
+
+  /// Reuses an existing unexpired pending session instead of reissuing
+  Future<PairingQrCode?> reusableSession({required String userId}) async {
+    final sessionId = await readPendingPairingSession(userId);
+    if (sessionId == null) return null;
+    final payload = await _store.readPairingPayload(sessionId);
+    if (payload == null) return null;
+    try {
+      final qr = PairingQrCode.fromPayload(payload);
+      if (qr.isExpiredAt(DateTime.now())) {
+        await clearPendingPairingSession(userId);
+        await deletePairingPayload(sessionId);
+        return null;
+      }
+      return qr;
+    } on FormatException {
+      return null;
+    }
   }
 }

@@ -19,6 +19,7 @@ import 'package:flexiyo/widgets/conversation/skeleton.dart';
 import 'package:flexiyo/widgets/conversation/typing_indicator.dart';
 import 'package:flexiyo/widgets/media/voice_recorder_bar.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -236,9 +237,12 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
 
   bool _onScrollMetricsChanged(ScrollMetricsNotification notification) {
     if (!_atBottom || !_scrollController.hasClients) return false;
+    final position = _scrollController.position;
+    
+    if (position.userScrollDirection != ScrollDirection.idle) return false;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_atBottom || !_scrollController.hasClients) return;
-      final position = _scrollController.position;
+      if (position.userScrollDirection != ScrollDirection.idle) return;
       if (position.hasContentDimensions &&
           (position.pixels - position.maxScrollExtent).abs() > 1) {
         position.jumpTo(position.maxScrollExtent);
@@ -555,6 +559,16 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
         .where((m) => !m.isLocallyDeleted && !m.isExpired && !m.isUnsent)
         .toList();
 
+    final showFirstMessagePrompt =
+        messages.isEmpty &&
+        !conversationState.isLoading &&
+        conv != null &&
+        widget.browseMode == null &&
+        !widget.isMessageRequest &&
+        (conv.requestStatus == 'accepted' || conv.requestStatus.isEmpty) &&
+        !conversationState.isSelectionMode &&
+        !_recordingVoice;
+
     // Banner title for the message being replied to: matches the reference
     // wording, e.g. "Replying to yourself" / "Replying to <username>".
     final replyTo = conversationState.replyTo;
@@ -577,6 +591,17 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                     const Positioned.fill(
                       child: ConversationSkeleton(),
                     ),
+                  if (showFirstMessagePrompt)
+                    Positioned(
+                      top: 20,
+                      left: 0,
+                      right: 0,
+                      child: Center(
+                        child: _FirstMessageState(
+                          otherUsername: conv.otherUsername,
+                        ),
+                      ),
+                    ),
                   GestureDetector(
                     onTap: () {
                       if (conversationState.isSelectionMode) {
@@ -596,6 +621,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                       onNotification: _onScrollMetricsChanged,
                       child: ListView.builder(
                       controller: _scrollController,
+                      dragStartBehavior: DragStartBehavior.down,
                       scrollCacheExtent: ScrollCacheExtent.pixels(240),
                       padding: const EdgeInsets.symmetric(
                         horizontal: 12,
@@ -1542,6 +1568,40 @@ class _SelectionBar extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Empty-state prompt: other user's avatar and name with a first-message invite, shown at top center.
+class _FirstMessageState extends StatelessWidget {
+  const _FirstMessageState({required this.otherUsername});
+
+  final String otherUsername;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        UserAvatar(username: otherUsername, radius: 40),
+        const SizedBox(height: 14),
+        Text(
+          otherUsername,
+          style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                fontWeight: FontWeight.w700,
+                letterSpacing: -0.3,
+              ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          'Say hi — this is your first message.',
+          textAlign: TextAlign.center,
+          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: cs.onSurfaceVariant,
+              ),
+        ),
+      ],
     );
   }
 }

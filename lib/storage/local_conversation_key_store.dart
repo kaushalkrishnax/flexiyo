@@ -129,4 +129,34 @@ class LocalConversationKeyStore {
 
   Future<void> deletePairingSecret(String sessionId) =>
       _storage.deleteString('flexiyo.v2.pairing.secret.$sessionId');
+
+  Future<void> savePairingPayload(
+          String sessionId, Map<String, dynamic> payload) =>
+      _storage.saveString(
+        'flexiyo.v2.pairing.payload.$sessionId',
+        jsonEncode(payload),
+      );
+
+  Future<Map<String, dynamic>?> readPairingPayload(String sessionId) async {
+    final value = await _storage.readString(
+      'flexiyo.v2.pairing.payload.$sessionId',
+    );
+    if (value == null) return null;
+    return jsonDecode(value) as Map<String, dynamic>;
+  }
+
+  Future<void> deletePairingPayload(String sessionId) =>
+      _storage.deleteString('flexiyo.v2.pairing.payload.$sessionId');
+
+  Future<void> savePendingPairingSession(String userId, String sessionId) =>
+      _storage.saveString(
+        'flexiyo.v2.pairing.pending.$userId',
+        sessionId,
+      );
+
+  Future<String?> readPendingPairingSession(String userId) =>
+      _storage.readString('flexiyo.v2.pairing.pending.$userId');
+
+  Future<void> clearPendingPairingSession(String userId) =>
+      _storage.deleteString('flexiyo.v2.pairing.pending.$userId');
 }

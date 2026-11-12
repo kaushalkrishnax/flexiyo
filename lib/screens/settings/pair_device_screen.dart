@@ -14,8 +14,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 
 enum _PairingPhase { creating, waiting, verifying, approved, expired, failed }
 
-/// Shows a one-time QR code that an already-linked device can scan. The code
-/// carries the pairing secret and must never be uploaded or logged.
+/// Shows a one-time QR code that an already-linked device can scan.
 class PairDeviceScreen extends ConsumerStatefulWidget {
   const PairDeviceScreen({super.key});
 
@@ -42,21 +41,55 @@ class _PairDeviceScreenState extends ConsumerState<PairDeviceScreen> {
   void initState() {
     super.initState();
     _pairing = ref.read(devicePairingProvider);
-    _start();
+    _startOrReuse();
   }
 
   @override
   void dispose() {
     _ticker?.cancel();
     _poller?.cancel();
-    final sessionId = _sessionId;
-    // Leaving the screen abandons a waiting code; approved sessions stay.
-    if (sessionId != null &&
-        _phase != _PairingPhase.approved &&
-        _phase != _PairingPhase.verifying) {
-      unawaited(_pairing.cancelPairing(sessionId).catchError((_) {}));
-    }
+    // Don't cancel an unexpired session on leave; it is reused on return.
     super.dispose();
+  }
+
+  Future<void> _startOrReuse() async {
+    final userId = _userId;
+    if (userId == null) {
+      if (!mounted) return;
+      setState(() {
+        _phase = _PairingPhase.failed;
+        _error = 'Sign in to pair a device.';
+      });
+      return;
+    }
+
+    try {
+      final reused = await _pairing.reusableSession(userId: userId);
+      if (!mounted) return;
+      if (reused != null) {
+        _adoptQr(reused);
+        return;
+      }
+    } catch (_) {
+      // Fall through to issuing a fresh session.
+    }
+    await _start();
+  }
+
+  void _adoptQr(PairingQrCode qr) {
+    final expiry = qr.expiry!;
+    setState(() {
+      _qr = qr;
+      _sessionId = qr.sessionId;
+      _phase = _PairingPhase.waiting;
+      _expiresAt = expiry;
+      _remaining = expiry.difference(DateTime.now());
+    });
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
+    _poller = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => unawaited(_poll()),
+    );
   }
 
   Future<void> _start() async {
@@ -206,13 +239,13 @@ class _PairDeviceScreenState extends ConsumerState<PairDeviceScreen> {
   Future<void> _copyCode() async {
     final qr = _qr;
     if (qr == null) return;
-    await Clipboard.setData(ClipboardData(text: qr.encode()));
+    await Clipboard.setData(ClipboardData(text: qr.shortCode));
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
         content: Text(
-          'Pairing code copied. Treat it like a password and paste it only on '
-          'a device you control.',
+          'Pairing code copied. Treat it like a password and share it only '
+          'with a device you control.',
         ),
       ),
     );
@@ -322,6 +355,33 @@ class _PairDeviceScreenState extends ConsumerState<PairDeviceScreen> {
                 ],
                 const SizedBox(height: 20),
                 if (_phase != _PairingPhase.verifying) ...[
+                  const SizedBox(height: 16),
+                  Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 20,
+                        vertical: 12,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: Theme.of(context).colorScheme.outlineVariant,
+                          width: 1,
+                        ),
+                      ),
+                      child: Text(
+                        _qr!.shortCode,
+                        style: const TextStyle(
+                          fontSize: 30,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 2,
+                          fontFamily: 'monospace',
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
                   OutlinedButton.icon(
                     onPressed: _copyCode,
                     icon: const HugeIcon(
@@ -377,7 +437,7 @@ class _Instructions extends StatelessWidget {
           Text(
             '1. Sign in to the same Flexiyo account.\n'
             '2. Open Settings → Linked devices → Link this device.\n'
-            '3. Scan the code above (or paste the copied code).\n'
+            '3. Scan the QR code above.\n'
             '4. Confirm the approval here.',
             style: theme.textTheme.bodySmall?.copyWith(color: muted, height: 1.5),
           ),

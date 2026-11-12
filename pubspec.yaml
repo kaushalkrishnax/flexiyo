@@ -81,6 +81,9 @@ dev_dependencies:
   riverpod_generator: ^4.0.9
   stream_channel: ^2.1.4
 
+dependency_overrides:
+  record_android: 2.2.0
+
 flutter:
   uses-material-design: true
   assets:

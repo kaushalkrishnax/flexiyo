@@ -14,6 +14,7 @@ import { sendMessagePush } from '../services/push.js';
 import { getConversationAccess, getConversationForMember } from './conversations.js';
 import { readJsonBody } from '../utils/http.js';
 import { runBatched } from '../utils/d1.js';
+import { validateConversationEnvelope } from '../services/conversationKeys.js';
 
 export const messagesRouter = Router({ base: '/api/conversations' });
 
@@ -41,6 +42,27 @@ const editMessageSchema = z
     messageType: z.enum(['signal', 'prekey']),
   });
 
+const conversationKeyMessageSchema = z.object({
+  encryptionVersion: z.literal(2),
+  id: z.string().uuid(),
+  ciphertext: z.string().min(1).max(MAX_CIPHERTEXT_CHARS),
+  nonce: z.string().min(1).max(128),
+  authTag: z.string().min(1).max(128),
+  keyEpoch: z.number().int().positive(),
+  recipientId: z.string().uuid(),
+  mediaId: z.string().uuid().nullable().optional(),
+  replyToId: z.string().uuid().nullable().optional(),
+});
+
+const conversationKeyEditSchema = z.object({
+  encryptionVersion: z.literal(2),
+  ciphertext: z.string().min(1).max(MAX_CIPHERTEXT_CHARS),
+  nonce: z.string().min(1).max(128),
+  authTag: z.string().min(1).max(128),
+  keyEpoch: z.number().int().positive(),
+  version: z.number().int().positive(),
+});
+
 const deleteForMeSchema = z.object({
   messageIds: z.array(z.string().uuid()).min(1).max(100),
 });
@@ -51,7 +73,12 @@ function rowToResponse(row: MessageRow) {
     conversationId: row.conversation_id,
     senderId: row.sender_id,
     senderDeviceId: row.sender_device_id ?? null,
-    encryptedPayload: row.device_payload,
+    encryptedPayload: row.encryption_version === 2 ? row.ciphertext ?? null : row.device_payload,
+    encryptionVersion: row.encryption_version ?? 1,
+    ciphertext: row.ciphertext ?? null,
+    nonce: row.nonce ?? null,
+    authTag: row.auth_tag ?? null,
+    keyEpoch: row.key_epoch ?? null,
     messageType: row.device_message_type ?? row.message_type,
     replyToId: row.reply_to_id,
     version: row.version,
@@ -85,6 +112,13 @@ messagesRouter.get(
 
     const url = new URL(request.url);
     const before = url.searchParams.get('before');
+    const beforeCreatedAtRaw = url.searchParams.get('beforeCreatedAt');
+    const beforeCreatedAtValue = beforeCreatedAtRaw == null
+      ? null
+      : Number.parseInt(beforeCreatedAtRaw, 10);
+    const beforeCreatedAt = Number.isFinite(beforeCreatedAtValue)
+      ? beforeCreatedAtValue
+      : null;
     const afterRaw = url.searchParams.get('after');
     const afterValue = afterRaw == null ? null : Number.parseInt(afterRaw, 10);
     const after = Number.isFinite(afterValue) ? afterValue : null;
@@ -106,26 +140,39 @@ messagesRouter.get(
     let rows: D1Result<MessageRow>;
 
     if (before) {
-      // Cursor-based pagination: get messages older than the cursor message
+      // Cursor-based pagination: get messages older than the cursor message.
+      // The cursor row may have expired or been deleted since the client
+      // loaded it, so accept the client's copy of its timestamp as a fallback.
       const cursorMsg = await env.DB.prepare(
         'SELECT created_at, id FROM messages WHERE id = ? AND conversation_id = ?',
       )
         .bind(before, conversationId)
         .first<{ created_at: number; id: string }>();
 
-      if (!cursorMsg) {
+      if (!cursorMsg && beforeCreatedAt == null) {
         return new Response(JSON.stringify({ error: 'Cursor message not found' }), {
           status: 404,
           headers: { 'Content-Type': 'application/json' },
         });
       }
 
+      const cursorCreatedAt = cursorMsg?.created_at ?? beforeCreatedAt!;
+      const cursorId = cursorMsg?.id ?? before;
+      // Without the row, the id tie-break could skip same-second messages whose
+      // id sorts after the deleted cursor. Prefer overlapping the boundary (the
+      // client de-duplicates by id) over leaving a permanent gap.
+      const includeCursorSecond = cursorMsg == null ? 1 : 0;
+
       rows = await env.DB.prepare(
           `SELECT m.*,
-            (SELECT MIN(delivered_at) FROM message_deliveries
-             WHERE message_id = m.id) AS delivered_at,
-            (SELECT MAX(read_at) FROM message_deliveries
-             WHERE message_id = m.id) AS read_at,
+            COALESCE(m.delivered_at, (
+              SELECT MIN(md.delivered_at) FROM message_deliveries md
+              WHERE md.message_id = m.id
+            )) AS delivered_at,
+            COALESCE(m.read_at, (
+              SELECT MAX(md.read_at) FROM message_deliveries md
+              WHERE md.message_id = m.id
+            )) AS read_at,
             myd.payload AS device_payload,
             myd.message_type AS device_message_type,
             (m.sender_id = ?) AS is_sent_by_me
@@ -140,7 +187,7 @@ messagesRouter.get(
            AND m.message_type != 'system'
            AND (m.expires_at IS NULL OR m.expires_at > ?)
            AND (? IS NULL OR m.created_at >= ?)
-           AND (m.created_at < ? OR (m.created_at = ? AND m.id < ?))
+           AND (m.created_at < ? OR (m.created_at = ? AND m.id < ?) OR (m.created_at = ? AND ? = 1))
          ORDER BY m.created_at DESC, m.id DESC
          LIMIT ?`,
       )
@@ -152,19 +199,25 @@ messagesRouter.get(
           now,
           after,
           after,
-          cursorMsg.created_at,
-          cursorMsg.created_at,
-          cursorMsg.id,
+          cursorCreatedAt,
+          cursorCreatedAt,
+          cursorId,
+          cursorCreatedAt,
+          includeCursorSecond,
           limit,
         )
         .all<MessageRow>();
     } else {
       rows = await env.DB.prepare(
           `SELECT m.*,
-            (SELECT MIN(delivered_at) FROM message_deliveries
-             WHERE message_id = m.id) AS delivered_at,
-            (SELECT MAX(read_at) FROM message_deliveries
-             WHERE message_id = m.id) AS read_at,
+            COALESCE(m.delivered_at, (
+              SELECT MIN(md.delivered_at) FROM message_deliveries md
+              WHERE md.message_id = m.id
+            )) AS delivered_at,
+            COALESCE(m.read_at, (
+              SELECT MAX(md.read_at) FROM message_deliveries md
+              WHERE md.message_id = m.id
+            )) AS read_at,
             myd.payload AS device_payload,
             myd.message_type AS device_message_type,
             (m.sender_id = ?) AS is_sent_by_me
@@ -257,6 +310,223 @@ messagesRouter.post(
     if (!bodyResult.ok) return bodyResult.response;
     const body = bodyResult.body;
 
+    if (typeof body === 'object' && body !== null &&
+        (body as Record<string, unknown>).encryptionVersion === 2) {
+      const v2Parsed = conversationKeyMessageSchema.safeParse(body);
+      if (!v2Parsed.success) {
+        return new Response(
+          JSON.stringify({ error: 'Validation failed', details: v2Parsed.error.flatten() }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      const envelope = validateConversationEnvelope(v2Parsed.data as unknown as Record<string, unknown>);
+      if (!envelope.ok) return new Response(JSON.stringify({ error: envelope.error }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      const v2 = v2Parsed.data;
+      if (v2.recipientId !== expectedRecipient) {
+        return new Response(JSON.stringify({ error: 'Invalid recipientId' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      const device = await resolveRequestDevice(request, env, userId);
+      if (!device || device.status !== 'active' || device.encryption_version !== 2 ||
+          !device.identity_public_key) {
+        return new Response(JSON.stringify({ error: 'Active conversation-key device required' }), {
+          status: 403,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      const [existingResult, mediaResult, coverageResult] = await env.DB.batch([
+        env.DB.prepare(
+          'SELECT id, sender_id, conversation_id FROM messages WHERE id = ?',
+        ).bind(v2.id),
+        v2.mediaId
+          ? env.DB.prepare(
+              `SELECT id FROM media
+               WHERE id = ? AND conversation_id = ? AND sender_id = ? AND consumed = 0`,
+            ).bind(v2.mediaId, conversationId, userId)
+          : env.DB.prepare('SELECT NULL AS id WHERE 0'),
+        env.DB.prepare(
+          `SELECT
+             (SELECT COUNT(*) FROM devices
+              WHERE user_id IN (?, ?) AND status = 'active' AND encryption_version = 2) AS active_count,
+             (SELECT COUNT(*) FROM devices
+              WHERE user_id = ? AND status = 'active' AND encryption_version = 2) AS sender_count,
+             (SELECT COUNT(*) FROM devices
+              WHERE user_id = ? AND status = 'active' AND encryption_version = 2) AS recipient_count,
+             (SELECT COUNT(*) FROM device_key_envelopes e
+              JOIN devices d ON d.id = e.recipient_device_id
+              WHERE e.conversation_id = ? AND e.epoch = ?
+                AND d.user_id IN (?, ?) AND d.status = 'active'
+                AND d.encryption_version = 2) AS envelope_count`,
+        ).bind(
+          userId, expectedRecipient, userId, expectedRecipient,
+          conversationId, v2.keyEpoch, userId, expectedRecipient,
+        ),
+      ]);
+
+      const existingMessage = existingResult.results?.[0] as
+        { id: string; sender_id: string; conversation_id: string } | undefined;
+      if (existingMessage) {
+        if (existingMessage.sender_id !== userId || existingMessage.conversation_id !== conversationId) {
+          return new Response(JSON.stringify({ error: 'Message id conflict' }), {
+            status: 409,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ id: v2.id, status: 'already_committed' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (v2.mediaId && !mediaResult.results?.length) {
+        return new Response(JSON.stringify({ error: 'Invalid mediaId' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (conv.key_rotation_required === 1) {
+        return new Response(JSON.stringify({ error: 'key_rotation_required' }), {
+          status: 409,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (v2.keyEpoch !== conv.key_epoch || conv.key_epoch < 1) {
+        return new Response(JSON.stringify({
+          error: 'key_epoch_conflict',
+          currentEpoch: conv.key_epoch,
+        }), { status: 409, headers: { 'Content-Type': 'application/json' } });
+      }
+
+      const coverage = coverageResult.results?.[0] as
+        { active_count: number; sender_count: number; recipient_count: number; envelope_count: number } | undefined;
+      if (!coverage || coverage.sender_count < 1 || coverage.recipient_count < 1 ||
+          coverage.active_count !== coverage.envelope_count) {
+        return new Response(JSON.stringify({ error: 'conversation_keys_not_provisioned' }), {
+          status: 409,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      // Disappearing timers start when the recipient reads the message, matching
+      // the legacy v1 path. The read endpoint stamps expires_at below.
+      const expiresAt = null;
+      try {
+        await env.DB.batch([
+          env.DB.prepare(
+            `INSERT INTO messages
+               (id, conversation_id, sender_id, sender_device_id, message_type,
+                reply_to_id, media_id, version, is_unsent, created_at, expires_at,
+                ciphertext, nonce, auth_tag, key_epoch, encryption_version)
+             VALUES (?, ?, ?, ?, 'signal', ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, 2)`,
+          ).bind(
+            v2.id,
+            conversationId,
+            userId,
+            device.id,
+            v2.replyToId ?? null,
+            v2.mediaId ?? null,
+            now,
+            expiresAt,
+            v2.ciphertext,
+            v2.nonce,
+            v2.authTag,
+            v2.keyEpoch,
+          ),
+          env.DB.prepare(
+            'UPDATE conversations SET last_message_at = ? WHERE id = ?',
+          ).bind(now, conversationId),
+          ...(v2.mediaId ? [
+            env.DB.prepare(
+              'UPDATE media SET consumed = 1 WHERE id = ? AND conversation_id = ? AND sender_id = ?',
+            ).bind(v2.mediaId, conversationId, userId),
+          ] : []),
+        ]);
+      } catch {
+        const duplicate = await env.DB.prepare(
+          'SELECT sender_id, conversation_id FROM messages WHERE id = ?',
+        ).bind(v2.id).first<{ sender_id: string; conversation_id: string }>();
+        if (duplicate?.sender_id === userId && duplicate.conversation_id === conversationId) {
+          return new Response(JSON.stringify({ id: v2.id, status: 'already_committed' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ error: 'Message persistence failed' }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      const event = {
+        type: 'new_message' as const,
+        messageId: v2.id,
+        conversationId,
+        senderId: userId,
+        senderDeviceId: device.id,
+        recipients: [userId, expectedRecipient],
+        encryptionVersion: 2,
+        ciphertext: v2.ciphertext,
+        nonce: v2.nonce,
+        authTag: v2.authTag,
+        keyEpoch: v2.keyEpoch,
+        messageType: 'signal',
+        replyToId: v2.replyToId ?? null,
+        createdAt: now,
+        expiresAt,
+      };
+      const stub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(conversationId));
+      await stub.fetch(new Request('https://internal/broadcast', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ events: [event] }),
+      }));
+
+      const activeUsers = await notifyInboxes(env, [userId, expectedRecipient], (targetUserId) => [{
+        type: 'inbox_message',
+        conversationId,
+        senderId: userId,
+        preview: 'New message',
+        lastMessageAt: now,
+        isIncoming: targetUserId !== userId,
+      }]);
+      await sendMessagePush(env, {
+        senderId: userId,
+        recipientId: expectedRecipient,
+        conversationId,
+        recipientHasActiveSocket: activeUsers.has(expectedRecipient),
+      });
+
+      return new Response(JSON.stringify({
+        id: v2.id,
+        conversationId,
+        senderId: userId,
+        senderDeviceId: device.id,
+        encryptedPayload: v2.ciphertext,
+        ciphertext: v2.ciphertext,
+        nonce: v2.nonce,
+        authTag: v2.authTag,
+        encryptionVersion: 2,
+        keyEpoch: v2.keyEpoch,
+        messageType: 'signal',
+        replyToId: v2.replyToId ?? null,
+        version: 1,
+        isUnsent: false,
+        createdAt: now,
+        expiresAt,
+        editedAt: null,
+        systemData: null,
+        deliveredAt: null,
+        readAt: null,
+        isSentByMe: true,
+      }), { status: 201, headers: { 'Content-Type': 'application/json' } });
+    }
+
     const parsed = sendMessageSchema.safeParse(body);
     if (!parsed.success) {
       return new Response(
@@ -297,8 +567,8 @@ messagesRouter.post(
       installationId
         ? env.DB.prepare(
             `SELECT id, user_id FROM devices
-             WHERE (user_id = ? AND installation_id = ?)
-                OR (user_id = ? AND status = 'active')
+             WHERE (user_id = ? AND installation_id = ? AND encryption_version = 1)
+                OR (user_id = ? AND status = 'active' AND encryption_version = 1)
              ORDER BY id`,
           )
             .bind(userId, installationId, recipientId)
@@ -581,19 +851,20 @@ messagesRouter.post(
 
     // Batched so the newly-read id set comes from the pre-update state and the
     // flip commits in the same round trip.
-    const [unreadMessages] = await env.DB.batch<{ id: string }>([
+    const [legacyUnread, v2Unread] = await env.DB.batch<{ id: string }>([
       env.DB.prepare(
         `SELECT DISTINCT m.id
          FROM messages m
          JOIN message_deliveries md ON md.message_id = m.id
          WHERE m.conversation_id = ? AND m.sender_id != ? AND m.is_unsent = 0
-           AND md.read_at IS NULL
+           AND m.encryption_version = 1 AND md.read_at IS NULL
            AND md.recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)`,
-      )
-        .bind(conversationId, userId, userId),
-
-      // Reading is an ACCOUNT-level action: mark read (and implied delivered)
-      // for every device of this account so sibling devices stay in sync.
+      ).bind(conversationId, userId, userId),
+      env.DB.prepare(
+        `SELECT id FROM messages
+         WHERE conversation_id = ? AND sender_id != ? AND is_unsent = 0
+           AND encryption_version = 2 AND read_at IS NULL`,
+      ).bind(conversationId, userId),
       env.DB.prepare(
         `UPDATE message_deliveries
          SET delivered_at = COALESCE(delivered_at, ?), read_at = ?
@@ -602,11 +873,20 @@ messagesRouter.post(
            AND message_id IN (
              SELECT id FROM messages
              WHERE conversation_id = ? AND sender_id != ? AND is_unsent = 0
+               AND encryption_version = 1
            )`,
       ).bind(now, now, userId, conversationId, userId),
+      env.DB.prepare(
+        `UPDATE messages SET delivered_at = COALESCE(delivered_at, ?), read_at = ?
+         WHERE conversation_id = ? AND sender_id != ? AND is_unsent = 0
+           AND encryption_version = 2 AND read_at IS NULL`,
+      ).bind(now, now, conversationId, userId),
     ]);
 
-    const newlyReadMessageIds = (unreadMessages.results ?? []).map((row) => row.id);
+    const newlyReadMessageIds = [
+      ...(legacyUnread.results ?? []).map((row) => row.id),
+      ...(v2Unread.results ?? []).map((row) => row.id),
+    ];
 
     if (newlyReadMessageIds.length > 0) {
       const stub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(conversationId));
@@ -712,6 +992,128 @@ messagesRouter.patch(
     const bodyResult = await readJsonBody(request);
     if (!bodyResult.ok) return bodyResult.response;
     const body = bodyResult.body;
+
+    if (typeof body === 'object' && body !== null &&
+        (body as Record<string, unknown>).encryptionVersion === 2) {
+      const parsedV2 = conversationKeyEditSchema.safeParse(body);
+      if (!parsedV2.success) {
+        return new Response(
+          JSON.stringify({ error: 'Validation failed', details: parsedV2.error.flatten() }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (message.encryption_version !== 2) {
+        return new Response(JSON.stringify({ error: 'Cannot change encryption version of an existing message' }), {
+          status: 409,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      const envelope = validateConversationEnvelope(parsedV2.data as unknown as Record<string, unknown>);
+      if (!envelope.ok) {
+        return new Response(JSON.stringify({ error: envelope.error }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (message.version !== parsedV2.data.version) {
+        return new Response(JSON.stringify({
+          error: 'Conflict: message has been modified. Fetch latest and retry.',
+          currentVersion: message.version,
+        }), { status: 409, headers: { 'Content-Type': 'application/json' } });
+      }
+      const device = await resolveRequestDevice(request, env, userId);
+      if (!device || device.status !== 'active' || device.encryption_version !== 2) {
+        return new Response(JSON.stringify({ error: 'Active conversation-key device required' }), {
+          status: 403,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (conv.key_rotation_required === 1) {
+        return new Response(JSON.stringify({ error: 'key_rotation_required' }), {
+          status: 409,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (parsedV2.data.keyEpoch !== conv.key_epoch || parsedV2.data.keyEpoch < 1) {
+        return new Response(JSON.stringify({
+          error: 'key_epoch_conflict',
+          currentEpoch: conv.key_epoch,
+        }), { status: 409, headers: { 'Content-Type': 'application/json' } });
+      }
+
+      const nextVersion = parsedV2.data.version + 1;
+      const updated = await env.DB.prepare(
+        `UPDATE messages
+         SET ciphertext = ?, nonce = ?, auth_tag = ?, key_epoch = ?,
+             version = ?, edited_at = ?
+         WHERE id = ? AND conversation_id = ? AND sender_id = ?
+           AND encryption_version = 2 AND version = ?`,
+      ).bind(
+        parsedV2.data.ciphertext,
+        parsedV2.data.nonce,
+        parsedV2.data.authTag,
+        parsedV2.data.keyEpoch,
+        nextVersion,
+        now,
+        messageId,
+        conversationId,
+        userId,
+        parsedV2.data.version,
+      ).run();
+      if ((updated.meta.changes ?? 0) !== 1) {
+        return new Response(JSON.stringify({ error: 'message_version_conflict' }), {
+          status: 409,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      const recipientId = conv.user_a_id === userId ? conv.user_b_id : conv.user_a_id;
+      const stub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(conversationId));
+      await stub.fetch(new Request('https://internal/broadcast', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          events: [{
+            type: 'message_edited',
+            messageId,
+            conversationId,
+            recipients: [userId, recipientId],
+            encryptionVersion: 2,
+            ciphertext: parsedV2.data.ciphertext,
+            nonce: parsedV2.data.nonce,
+            authTag: parsedV2.data.authTag,
+            keyEpoch: parsedV2.data.keyEpoch,
+            messageType: 'signal',
+            version: nextVersion,
+            editedAt: now,
+          }],
+        }),
+      }));
+
+      return new Response(JSON.stringify({
+        id: messageId,
+        conversationId,
+        senderId: userId,
+        senderDeviceId: message.sender_device_id,
+        encryptedPayload: parsedV2.data.ciphertext,
+        ciphertext: parsedV2.data.ciphertext,
+        nonce: parsedV2.data.nonce,
+        authTag: parsedV2.data.authTag,
+        encryptionVersion: 2,
+        keyEpoch: parsedV2.data.keyEpoch,
+        messageType: 'signal',
+        version: nextVersion,
+        editedAt: now,
+        isSentByMe: true,
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    if (message.encryption_version === 2) {
+      return new Response(JSON.stringify({ error: 'A version 2 encrypted edit is required' }), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
 
     const parsed = editMessageSchema.safeParse(body);
     if (!parsed.success) {

@@ -3,6 +3,8 @@ import { authRouter } from './routes/auth.js';
 import { conversationsRouter } from './routes/conversations.js';
 import { devicesRouter } from './routes/devices.js';
 import { messagesRouter } from './routes/messages.js';
+import { keysRouter } from './routes/keys.js';
+import { pairingRouter } from './routes/pairing.js';
 import { mediaRouter } from './routes/media.js';
 import { usersRouter } from './routes/users.js';
 import { updateRouter } from './routes/update.js';
@@ -27,7 +29,7 @@ router.get('/api/health', () => new Response(JSON.stringify({ ok: true }), {
   headers: { 'Content-Type': 'application/json' },
 }));
 
-const routers = [authRouter, usersRouter, conversationsRouter, messagesRouter, mediaRouter, devicesRouter, updateRouter, pushRouter];
+const routers = [authRouter, usersRouter, conversationsRouter, messagesRouter, keysRouter, pairingRouter, mediaRouter, devicesRouter, updateRouter, pushRouter];
 
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {

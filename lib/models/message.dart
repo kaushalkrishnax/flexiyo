@@ -21,6 +21,10 @@ class Message {
     required this.status,
     this.decryptedText,
     this.encryptedPayload,
+    this.encryptionVersion = 1,
+    this.nonce,
+    this.authTag,
+    this.keyEpoch,
     this.isUnsent = false,
     this.isLocallyDeleted = false,
     this.isEdited = false,
@@ -38,6 +42,10 @@ class Message {
 
   final String? decryptedText;
   final String? encryptedPayload;
+  final int encryptionVersion;
+  final String? nonce;
+  final String? authTag;
+  final int? keyEpoch;
 
   final MessageType messageType;
   final int version;
@@ -93,7 +101,11 @@ class Message {
       conversationId: json['conversationId'] as String? ?? '',
       senderId: json['senderId'] as String? ?? '',
       senderDeviceId: json['senderDeviceId'] as int?,
-      encryptedPayload: json['encryptedPayload'] as String?,
+      encryptedPayload: (json['ciphertext'] as String?) ?? json['encryptedPayload'] as String?,
+      encryptionVersion: (json['encryptionVersion'] as num?)?.toInt() ?? 1,
+      nonce: json['nonce'] as String?,
+      authTag: json['authTag'] as String?,
+      keyEpoch: (json['keyEpoch'] as num?)?.toInt(),
       messageType: MessageType.values.firstWhere(
         (e) => e.name == ((json['messageType'] as String?) ?? 'signal'),
         orElse: () => MessageType.signal,
@@ -125,6 +137,10 @@ class Message {
       senderDeviceId: json['sender_device_id'] as int?,
       decryptedText: json['decrypted_text'] as String?,
       encryptedPayload: json['encrypted_payload'] as String?,
+      encryptionVersion: (json['encryption_version'] as int?) ?? 1,
+      nonce: json['nonce'] as String?,
+      authTag: json['auth_tag'] as String?,
+      keyEpoch: json['key_epoch'] as int?,
       messageType: MessageType.values.firstWhere(
         (e) => e.name == (json['message_type'] as String? ?? 'signal'),
         orElse: () => MessageType.signal,
@@ -167,6 +183,10 @@ class Message {
         if (senderDeviceId != null) 'sender_device_id': senderDeviceId,
         if (decryptedText != null) 'decrypted_text': decryptedText,
         if (encryptedPayload != null) 'encrypted_payload': encryptedPayload,
+        'encryption_version': encryptionVersion,
+        if (nonce != null) 'nonce': nonce,
+        if (authTag != null) 'auth_tag': authTag,
+        if (keyEpoch != null) 'key_epoch': keyEpoch,
         'message_type': messageType.name,
         'version': version,
         'is_unsent': isUnsent ? 1 : 0,
@@ -188,6 +208,10 @@ class Message {
     int? senderDeviceId,
     String? decryptedText,
     String? encryptedPayload,
+    int? encryptionVersion,
+    String? nonce,
+    String? authTag,
+    int? keyEpoch,
     MessageType? messageType,
     int? version,
     bool? isUnsent,
@@ -213,6 +237,10 @@ class Message {
       decryptedText:
           clearDecryptedText ? null : (decryptedText ?? this.decryptedText),
       encryptedPayload: encryptedPayload ?? this.encryptedPayload,
+      encryptionVersion: encryptionVersion ?? this.encryptionVersion,
+      nonce: nonce ?? this.nonce,
+      authTag: authTag ?? this.authTag,
+      keyEpoch: keyEpoch ?? this.keyEpoch,
       messageType: messageType ?? this.messageType,
       version: version ?? this.version,
       isUnsent: isUnsent ?? this.isUnsent,

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -5,6 +6,7 @@ import 'package:flexiyo/models/message.dart';
 import 'package:flexiyo/screens/media/media_viewer_screen.dart';
 import 'package:flexiyo/services/media/media_service.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hugeicons/hugeicons.dart';
 
@@ -27,36 +29,103 @@ class _MediaImageBubbleState extends ConsumerState<MediaImageBubble> {
   Uint8List? _bytes;
   bool _loading = false;
   bool _expired = false;
+  bool _loadStarted = false;
+  ScrollPosition? _scrollPosition;
 
   MediaRef get _ref => widget.message.mediaRef!;
   bool get _locked => !widget.isMine && _ref.policy != ViewPolicy.unlimited;
 
   @override
-  void initState() {
-    super.initState();
-    _load();
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final nextPosition = Scrollable.maybeOf(context)?.position;
+    // A null position means there is no enclosing scrollable; still schedule a
+    // visibility check so the bubble loads instead of waiting forever.
+    if (nextPosition != null && identical(nextPosition, _scrollPosition)) {
+      return;
+    }
+    _scrollPosition?.removeListener(_onScrollPositionChanged);
+    _scrollPosition = nextPosition;
+    _scrollPosition?.addListener(_onScrollPositionChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _maybeLoadWhenVisible();
+    });
   }
 
-  Future<void> _load({bool force = false}) async {
-    if (_loading) return;
+  @override
+  void didUpdateWidget(covariant MediaImageBubble oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.message.id == widget.message.id) return;
+    _bytes = null;
+    _loading = false;
+    _expired = false;
+    _loadStarted = false;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _maybeLoadWhenVisible();
+    });
+  }
 
-    // View-limited recipient media stays locked until tapped.
-    if (_locked && !force) return;
+  @override
+  void dispose() {
+    _scrollPosition?.removeListener(_onScrollPositionChanged);
+    super.dispose();
+  }
 
-    final service = ref.read(mediaServiceProvider);
+  void _onScrollPositionChanged() => _maybeLoadWhenVisible();
 
-    // A cache hit renders without consuming a view.
-    final cached = await service.cachedBytes(_ref);
-    if (cached != null && mounted) {
-      setState(() {
-        _bytes = cached;
-        _expired = false;
-      });
+  void _maybeLoadWhenVisible() {
+    if (!mounted || _locked || _loadStarted || _loading || _bytes != null) {
       return;
     }
 
+    final position = _scrollPosition;
+    if (position == null) {
+      unawaited(_load());
+      return;
+    }
+
+    final renderObject = context.findRenderObject();
+    if (renderObject is! RenderBox ||
+        !renderObject.attached ||
+        !renderObject.hasSize) {
+      return;
+    }
+
+    final viewport = RenderAbstractViewport.maybeOf(renderObject);
+    if (viewport == null) return;
+
+    final leading = viewport.getOffsetToReveal(renderObject, 0).offset;
+    final trailing = leading + renderObject.size.height;
+    final visibleLeading = position.pixels;
+    final visibleTrailing = visibleLeading + position.viewportDimension;
+    if (trailing >= visibleLeading - 80 &&
+        leading <= visibleTrailing + 80) {
+      unawaited(_load());
+    }
+  }
+
+  Future<void> _load({bool force = false}) async {
+    if (_loading || (_loadStarted && !force)) return;
+
+    // View-limited recipient media stays locked until explicitly opened.
+    if (_locked && !force) return;
+
+    _loadStarted = true;
     if (mounted) setState(() => _loading = true);
+    final service = ref.read(mediaServiceProvider);
+
     try {
+      // A cache hit renders without consuming a view.
+      final cached = await service.cachedBytes(_ref);
+      if (cached != null && mounted) {
+        setState(() {
+          _bytes = cached;
+          _expired = false;
+          _loading = false;
+        });
+        return;
+      }
+
       final bytes = await service.fetchAndDecrypt(_ref);
       if (mounted) {
         setState(() {
@@ -116,6 +185,7 @@ class _MediaImageBubbleState extends ConsumerState<MediaImageBubble> {
             child: Image.memory(
               _bytes!,
               fit: BoxFit.cover,
+              cacheWidth: 750,
               gaplessPlayback: true,
             ),
           ),

@@ -5,6 +5,9 @@ import 'package:flexiyo/screens/chats/chats_screen.dart';
 import 'package:flexiyo/screens/chats/chat_state_lists_screen.dart';
 import 'package:flexiyo/screens/chats/message_requests_screen.dart';
 import 'package:flexiyo/screens/conversation/conversation_screen.dart';
+import 'package:flexiyo/screens/settings/linked_devices_screen.dart';
+import 'package:flexiyo/screens/settings/pair_device_screen.dart';
+import 'package:flexiyo/screens/settings/scan_pairing_screen.dart';
 import 'package:flexiyo/screens/settings/settings_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -182,6 +185,25 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/settings',
         name: 'settings',
         builder: (context, state) => const SettingsScreen(),
+        routes: [
+          GoRoute(
+            path: 'devices',
+            name: 'linked-devices',
+            builder: (context, state) => const LinkedDevicesScreen(),
+            routes: [
+              GoRoute(
+                path: 'pair',
+                name: 'pair-device',
+                builder: (context, state) => const PairDeviceScreen(),
+              ),
+              GoRoute(
+                path: 'scan',
+                name: 'scan-pairing',
+                builder: (context, state) => const ScanPairingScreen(),
+              ),
+            ],
+          ),
+        ],
       ),
     ],
     errorBuilder: (context, state) => Scaffold(

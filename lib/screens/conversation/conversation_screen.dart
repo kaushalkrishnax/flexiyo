@@ -6,6 +6,7 @@ import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/providers/chat/chat_provider.dart';
 import 'package:flexiyo/providers/chat/conversation_provider.dart';
 import 'package:flexiyo/screens/media/camera_screen.dart';
+import 'package:flexiyo/screens/conversation/scroll_metrics.dart';
 import 'package:flexiyo/services/api_service.dart';
 import 'package:flexiyo/services/media/media_service.dart';
 import 'package:flexiyo/widgets/conversation/avatar.dart';
@@ -13,10 +14,12 @@ import 'package:flexiyo/widgets/conversation/app_popup_menu.dart';
 import 'package:flexiyo/widgets/conversation/date_separator.dart';
 import 'package:flexiyo/widgets/media/media_gallery_sheet.dart';
 import 'package:flexiyo/widgets/conversation/message_bubble.dart';
+import 'package:flexiyo/widgets/conversation/new_messages_indicator.dart';
 import 'package:flexiyo/widgets/conversation/skeleton.dart';
 import 'package:flexiyo/widgets/conversation/typing_indicator.dart';
 import 'package:flexiyo/widgets/media/voice_recorder_bar.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/rendering.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -46,6 +49,8 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
   final _scrollController = ScrollController();
   bool _atBottom = true;
   bool _recordingVoice = false;
+  final Set<String> _unseenMessageIds = <String>{};
+  bool _loadingOlderFromTop = false;
   late final ChatsNotifier _chatsNotifier;
 
   /// Distance (logical px) a bubble slides at full swipe travel.
@@ -200,26 +205,120 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
   }
 
   void _onScroll() {
+    if (!_scrollController.hasClients) return;
     final pos = _scrollController.position;
-    final isAtBottom = pos.pixels >= pos.maxScrollExtent - 80;
-    if (_atBottom != isAtBottom) {
-      setState(() => _atBottom = isAtBottom);
+    final nowAtBottom = isAtBottom(
+      pixels: pos.pixels,
+      maxScrollExtent: pos.maxScrollExtent,
+    );
+    if (_atBottom != nowAtBottom) {
+      setState(() {
+        _atBottom = nowAtBottom;
+        if (nowAtBottom) _unseenMessageIds.clear();
+      });
+      if (nowAtBottom) {
+        unawaited(
+          ref
+              .read(conversationProvider(widget.conversationId).notifier)
+              .markLatestMessagesRead(),
+        );
+      }
+    }
+
+    if (shouldLoadOlder(
+          pixels: pos.pixels,
+          minScrollExtent: pos.minScrollExtent,
+        ) &&
+        !_loadingOlderFromTop) {
+      unawaited(_loadOlderMessagesPreservingPosition());
+    }
+  }
+
+  bool _onScrollMetricsChanged(ScrollMetricsNotification notification) {
+    if (!_atBottom || !_scrollController.hasClients) return false;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_atBottom || !_scrollController.hasClients) return;
+      final position = _scrollController.position;
+      if (position.hasContentDimensions &&
+          (position.pixels - position.maxScrollExtent).abs() > 1) {
+        position.jumpTo(position.maxScrollExtent);
+      }
+    });
+    return false;
+  }
+
+  Future<void> _loadOlderMessagesPreservingPosition() async {
+    if (_loadingOlderFromTop || !_scrollController.hasClients) return;
+    final pageState = ref.read(conversationProvider(widget.conversationId));
+    if (!pageState.hasMoreMessages ||
+        pageState.isLoadingOlderMessages ||
+        pageState.messages.isEmpty) {
+      return;
+    }
+
+    _loadingOlderFromTop = true;
+    final position = _scrollController.position;
+    final previousPixels = position.pixels;
+    final previousExtent = position.maxScrollExtent;
+
+    try {
+      await ref
+          .read(conversationProvider(widget.conversationId).notifier)
+          .loadOlderMessages();
+      await WidgetsBinding.instance.endOfFrame;
+      if (!_scrollController.hasClients) return;
+
+      final updatedPosition = _scrollController.position;
+      final addedExtent = updatedPosition.maxScrollExtent - previousExtent;
+      final target = preservedOffsetAfterInsert(
+        previousPixels: previousPixels,
+        addedExtent: addedExtent,
+        minScrollExtent: updatedPosition.minScrollExtent,
+        maxScrollExtent: updatedPosition.maxScrollExtent,
+      );
+      updatedPosition.jumpTo(target);
+    } finally {
+      _loadingOlderFromTop = false;
     }
   }
 
   void _scrollToBottom({bool animate = true}) {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scrollController.hasClients) return;
-      if (animate) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
-      } else {
-        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
-      }
-    });
+    unawaited(_scrollToLatest(animate: animate));
+  }
+
+  Future<void> _scrollToLatest({required bool animate}) async {
+    await WidgetsBinding.instance.endOfFrame;
+    await WidgetsBinding.instance.endOfFrame;
+    if (!_scrollController.hasClients) return;
+
+    final firstTarget = _scrollController.position.maxScrollExtent;
+    if (animate && _scrollController.position.pixels != firstTarget) {
+      await _scrollController.animateTo(
+        firstTarget,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOut,
+      );
+    } else {
+      _scrollController.jumpTo(firstTarget);
+    }
+
+    await WidgetsBinding.instance.endOfFrame;
+    if (!_scrollController.hasClients) return;
+    final settledTarget = _scrollController.position.maxScrollExtent;
+    if ((_scrollController.position.pixels - settledTarget).abs() > 1) {
+      _scrollController.jumpTo(settledTarget);
+    }
+
+    if (mounted) {
+      setState(() {
+        _atBottom = true;
+        _unseenMessageIds.clear();
+      });
+      final notifier =
+          ref.read(conversationProvider(widget.conversationId).notifier);
+      notifier.resetNewIncomingMessages();
+      await notifier.markLatestMessagesRead();
+    }
   }
 
   @override
@@ -424,12 +523,29 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
     final myUserId = authState.user?.id ?? '';
     final colorScheme = Theme.of(context).colorScheme;
 
-    ref.listen(
-      conversationProvider(widget.conversationId)
-          .select((s) => s.messages.length),
-      (prev, next) {
-        if (_atBottom && next > (prev ?? 0)) {
+    ref.listen<List<Message>>(
+      conversationProvider(widget.conversationId).select((s) => s.messages),
+      (previous, next) {
+        if (previous == null || next.length <= previous.length) return;
+        final previousIds = previous.map((message) => message.id).toSet();
+        final previousLatest = previous.isEmpty ? null : previous.last;
+        final incoming = next.where((message) {
+          if (previousIds.contains(message.id) || message.senderId == myUserId) {
+            return false;
+          }
+          if (previousLatest == null) return false;
+          final order = message.createdAt.compareTo(previousLatest.createdAt);
+          return order > 0 ||
+              (order == 0 && message.id.compareTo(previousLatest.id) > 0);
+        }).toList();
+
+        if (incoming.isEmpty) return;
+        if (_atBottom) {
           _scrollToBottom();
+        } else if (mounted) {
+          setState(() {
+            _unseenMessageIds.addAll(incoming.map((message) => message.id));
+          });
         }
       },
     );
@@ -476,8 +592,11 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                     onHorizontalDragUpdate: _onTimesDragUpdate,
                     onHorizontalDragEnd: (_) => _springBackTimes(),
                     onHorizontalDragCancel: _springBackTimes,
-                    child: ListView.builder(
+                    child: NotificationListener<ScrollMetricsNotification>(
+                      onNotification: _onScrollMetricsChanged,
+                      child: ListView.builder(
                       controller: _scrollController,
+                      scrollCacheExtent: ScrollCacheExtent.pixels(240),
                       padding: const EdgeInsets.symmetric(
                         horizontal: 12,
                         vertical: 8,
@@ -660,19 +779,52 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen>
                         );
                       },
                     ),
+                    ),
                   ),
-                  if (!_atBottom)
+                  if (conversationState.isLoadingOlderMessages)
                     Positioned(
-                      bottom: 12,
-                      right: 12,
-                      child: AnimatedScale(
-                        scale: _atBottom ? 0 : 1,
-                        duration: const Duration(milliseconds: 200),
-                        child: FloatingActionButton.small(
-                          onPressed: _scrollToBottom,
-                          elevation: 2,
-                          child: const HugeIcon(
-                              icon: HugeIcons.strokeRoundedArrowDown01),
+                      top: 10,
+                      left: 0,
+                      right: 0,
+                      child: IgnorePointer(
+                        child: Center(
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              color: colorScheme.surfaceContainerHighest,
+                              shape: BoxShape.circle,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.12),
+                                  blurRadius: 8,
+                                  offset: const Offset(0, 2),
+                                ),
+                              ],
+                            ),
+                            child: Padding(
+                              padding: const EdgeInsets.all(7),
+                              child: SizedBox(
+                                width: 17,
+                                height: 17,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: colorScheme.primary,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  if (_unseenMessageIds.isNotEmpty && conv != null)
+                    Positioned(
+                      bottom: 8,
+                      left: 0,
+                      right: 0,
+                      child: Center(
+                        child: NewMessagesIndicator(
+                          username: conv.otherUsername,
+                          count: _unseenMessageIds.length,
+                          onTap: _scrollToBottom,
                         ),
                       ),
                     ),

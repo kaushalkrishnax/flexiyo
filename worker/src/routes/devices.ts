@@ -2,10 +2,12 @@ import { IRequest, Router } from 'itty-router';
 import { z } from 'zod';
 import type { Env, AuthenticatedRequest, DeviceRow, DeviceStatus } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { resolveRequestDevice } from '../middleware/device.js';
 import { checkRateLimitDistributed } from '../middleware/rateLimit.js';
 import { generateId } from '../utils/crypto.js';
 import { runBatched } from '../utils/d1.js';
 import { readJsonBody } from '../utils/http.js';
+import { validatePublicKey } from '../services/conversationKeys.js';
 
 export const devicesRouter = Router({ base: '/api/devices' });
 
@@ -57,6 +59,7 @@ function deviceToJson(d: DeviceRow) {
     createdAt: d.created_at,
     lastSeenAt: d.last_seen_at,
     revokedAt: d.revoked_at,
+    encryptionVersion: d.encryption_version,
   };
 }
 
@@ -206,6 +209,178 @@ devicesRouter.post(
 );
 
 // ---------------------------------------------------------------------------
+// Conversation-key v2 bootstrap. Existing accounts must approve additional
+// installations through the QR pairing flow.
+devicesRouter.post(
+  '/v2/register',
+  (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
+  async (request: IRequest, env: Env): Promise<Response> => {
+    const userId = (request as unknown as AuthenticatedRequest).user.sub;
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) return bodyResult.response;
+    const body = bodyResult.body as Record<string, unknown>;
+    const installationId = body.installationId;
+    const identityPublicKey = validatePublicKey(body.identityPublicKey);
+    if (typeof installationId !== 'string' || installationId.length < 1 ||
+        installationId.length > 128 || !identityPublicKey) {
+      return json({ error: 'Invalid installation or identity key' }, 400);
+    }
+
+    const existing = await env.DB.prepare(
+      `SELECT id, status, encryption_version, identity_public_key
+       FROM devices WHERE user_id = ? AND installation_id = ?`,
+    ).bind(userId, installationId).first<{
+      id: number;
+      status: DeviceStatus;
+      encryption_version: number;
+      identity_public_key: string | null;
+    }>();
+    if (existing) {
+      if (existing.encryption_version === 2 &&
+          existing.status === 'active' &&
+          existing.identity_public_key === identityPublicKey) {
+        return json({ deviceId: existing.id, status: existing.status, encryptionVersion: 2 });
+      }
+      return json({ error: 'installation_already_registered' }, 409);
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const inserted = await env.DB.prepare(
+      `INSERT INTO devices
+         (user_id, installation_id, registration_id, identity_key,
+          signed_pre_key_id, signed_pre_key_public, signed_pre_key_signature,
+          status, created_at, last_seen_at, encryption_version, identity_public_key)
+       SELECT ?, ?, 1, 'conversation-key-v2', 1, 'conversation-key-v2',
+              'conversation-key-v2', 'active', ?, ?, 2, ?
+       WHERE NOT EXISTS (
+         SELECT 1 FROM devices WHERE user_id = ? AND status = 'active'
+       )
+       RETURNING id`,
+    ).bind(userId, installationId, now, now, identityPublicKey, userId)
+      .first<{ id: number }>();
+
+    if (!inserted) {
+      return json({
+        error: 'pairing_required',
+        message: 'An existing active device must approve this installation.',
+      }, 409);
+    }
+    return json({ deviceId: inserted.id, status: 'active', encryptionVersion: 2 }, 201);
+  },
+);
+
+devicesRouter.post(
+  '/v2/upgrade',
+  (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
+  async (request: IRequest, env: Env): Promise<Response> => {
+    const userId = (request as unknown as AuthenticatedRequest).user.sub;
+    const device = await resolveRequestDevice(request, env, userId);
+    if (!device || device.status !== 'active') {
+      return json({ error: 'Active registered installation required' }, 403);
+    }
+
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) return bodyResult.response;
+    const body = bodyResult.body as Record<string, unknown>;
+    const identityPublicKey = validatePublicKey(body.identityPublicKey);
+    if (!identityPublicKey) return json({ error: 'Invalid identity public key' }, 400);
+
+    if (device.encryption_version === 2) {
+      if (device.identity_public_key !== identityPublicKey) {
+        return json({ error: 'Device identity key mismatch' }, 409);
+      }
+      return json({ deviceId: device.id, encryptionVersion: 2 });
+    }
+
+    // A v1 installation may self-upgrade only while the account has no
+    // conversation-key device at all: there is no v2 device that could approve
+    // it yet. Once a v2 device exists, extra installations must pair.
+    const activeV2 = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM devices
+       WHERE user_id = ? AND status = 'active' AND encryption_version = 2`,
+    ).bind(userId).first<{ n: number }>();
+    if ((activeV2?.n ?? 0) > 0) {
+      return json({
+        error: 'pairing_required',
+        message: 'An existing conversation-key device must approve this installation.',
+      }, 409);
+    }
+
+    const updated = await env.DB.prepare(
+      `UPDATE devices SET encryption_version = 2, identity_public_key = ?
+       WHERE id = ? AND user_id = ? AND status = 'active' AND encryption_version = 1`,
+    ).bind(identityPublicKey, device.id, userId).run();
+    if ((updated.meta.changes ?? 0) !== 1) {
+      return json({ error: 'device_upgrade_conflict' }, 409);
+    }
+    return json({ deviceId: device.id, encryptionVersion: 2 });
+  },
+);
+
+devicesRouter.get(
+  '/identity-keys/:userId',
+  (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
+  async (request: IRequest, env: Env): Promise<Response> => {
+    const requesterId = (request as unknown as AuthenticatedRequest).user.sub;
+    const { userId } = request.params as { userId: string };
+    const blocked = await env.DB.prepare(
+      `SELECT 1 FROM user_blocks
+       WHERE (blocker_id = ? AND blocked_id = ?)
+          OR (blocker_id = ? AND blocked_id = ?) LIMIT 1`,
+    ).bind(userId, requesterId, requesterId, userId).first();
+    if (blocked) return json({ error: 'Cannot retrieve device keys for this account' }, 403);
+
+    const rows = await env.DB.prepare(
+      `SELECT id, installation_id, identity_public_key
+       FROM devices
+       WHERE user_id = ? AND status = 'active'
+         AND encryption_version = 2 AND identity_public_key IS NOT NULL
+       ORDER BY id`,
+    ).bind(userId).all<{
+      id: number;
+      installation_id: string;
+      identity_public_key: string;
+    }>();
+    return json({
+      userId,
+      devices: (rows.results ?? []).map((row) => ({
+        deviceId: row.id,
+        installationId: row.installation_id,
+        identityPublicKey: row.identity_public_key,
+      })),
+    });
+  },
+);
+
+async function closeRevokedDeviceSockets(
+  env: Env,
+  userId: string,
+  deviceId: number,
+): Promise<void> {
+  const rooms = await env.DB.prepare(
+    `SELECT id FROM conversations WHERE user_a_id = ? OR user_b_id = ?`,
+  ).bind(userId, userId).all<{ id: string }>();
+
+  await env.DB.prepare(
+    `UPDATE conversations SET key_rotation_required = 1
+     WHERE key_epoch > 0 AND id IN (
+       SELECT conversation_id FROM device_key_envelopes WHERE recipient_device_id = ?
+     )`,
+  ).bind(deviceId).run();
+  await env.DB.prepare(
+    'DELETE FROM device_key_envelopes WHERE recipient_device_id = ?',
+  ).bind(deviceId).run();
+
+  await Promise.all((rooms.results ?? []).map(async ({ id }) => {
+    const stub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(id));
+    await stub.fetch(new Request('https://internal/disconnect-device', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, deviceId }),
+    }));
+  }));
+}
+
 // Device lifecycle: disable / enable / revoke (owner-scoped by device id)
 // ---------------------------------------------------------------------------
 
@@ -238,6 +413,7 @@ devicesRouter.post(
     // Disabled devices stop being served in key bundles immediately (pre-key
     // invalidation) and free their device-limit slot. Rows are retained for
     // auditability and can be re-enabled.
+    await closeRevokedDeviceSockets(env, userId, device.id);
     await env.DB.prepare(
       `UPDATE devices SET status = 'disabled', last_seen_at = ? WHERE id = ?`,
     )
@@ -306,6 +482,7 @@ devicesRouter.delete(
     // its recipient-side delivery rows; sender attribution on other devices'
     // delivery rows degrades to NULL (ON DELETE SET NULL) instead of deleting
     // their receipts.
+    await closeRevokedDeviceSockets(env, userId, device.id);
     await env.DB.prepare(`DELETE FROM devices WHERE id = ? AND user_id = ?`)
       .bind(device.id, userId)
       .run();
@@ -404,7 +581,7 @@ devicesRouter.get(
     if (!target) return json({ error: 'User not found' }, 404);
 
     const devices = await env.DB.prepare(
-      `SELECT * FROM devices WHERE user_id = ? AND status = 'active' ORDER BY id ASC`,
+      `SELECT * FROM devices WHERE user_id = ? AND status = 'active' AND encryption_version = 1 ORDER BY id ASC`,
     )
       .bind(userId)
       .all<DeviceRow>();

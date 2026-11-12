@@ -12,7 +12,7 @@ These are distinct, complementary protections:
 
 | Layer | What it protects |
 |---|---|
-| **E2EE (Signal Protocol)** | Message plaintext from the server and network attackers |
+| **E2EE (conversation keys + legacy Signal)** | Message plaintext from the server and network attackers |
 | **HTTPS / TLS** | Message payloads in transit from passive eavesdroppers |
 | **Password hashing (PBKDF2)** | Passwords from database-level attackers |
 | **JWT authentication** | API endpoints from unauthorized access |
@@ -32,9 +32,9 @@ Even with E2EE, the Cloudflare Worker has visibility into:
 - Message sizes (approximate)
 - Whether a message was edited or unsent
 - Expiry timestamps
-- Public cryptographic key material (identity keys, signed pre-keys, one-time pre-keys)
-- Delivery state (whether a message was received)
-- Device registration times
+- Public cryptographic key material (identity keys, signed pre-keys, one-time pre-keys, conversation-key envelope metadata)
+- Delivery state (whether a message was delivered or read)
+- Device registration times, device status, and key-epoch numbers
 
 The Worker cannot see:
 - Message plaintext
@@ -51,7 +51,8 @@ The Worker cannot see:
 - Read message content in transit (HTTPS + E2EE)
 - Impersonate a user's private key
 - Inject messages that pass decryption verification (authenticated encryption)
-- Silently deliver messages to unauthorized parties (session keys are per-pair)
+- Substitute pairing keys without failing the client-side AEAD proof check
+- Deliver conversation keys to revoked devices (revocation forces a new epoch)
 
 ---
 
@@ -80,9 +81,11 @@ The Worker cannot see:
 | Compromised endpoint device | If the device is compromised, all local decrypted messages are accessible |
 | Recipient screenshots / copies | Cannot be prevented; unsend is best-effort |
 | Metadata analysis | Conversation graph and timing are visible to the server |
-| Key-substitution attacks (TOFU) | Trust-on-first-use; no out-of-band verification UI in initial release |
-| Multi-device sync | Single device per user in initial release |
-| Forward secrecy after local key theft | Double Ratchet provides forward secrecy; if current ratchet key is stolen, recent messages may be exposed |
+| Key-substitution attacks (TOFU) | Trust-on-first-use; no out-of-band safety-number UI. Pairing verifies the joining device with an AEAD proof, but the user must scan a QR code generated on their own device. |
+| Compromised authorized installation | A device holding a conversation key can read every message in that epoch |
+| Replay of a pending QR code | QR payloads are single-use and expire after 180 seconds; proof verification still gates approval |
+| Denial of service during pairing | The Worker can refuse to relay pairing messages; it cannot approve a device on its own |
+| Forward secrecy after local key theft | Conversation keys are static per epoch (v2); a stolen epoch key exposes every message in it. legacy v1 uses the Double Ratchet. |
 | Flash storage forensics | Deleted data on SSD/eMMC may persist in wear-leveling blocks |
 | OS-level memory inspection | Decrypted plaintext exists in process memory during display |
 | Cloudflare as infrastructure provider | Cloudflare can observe metadata and timing; they cannot decrypt payloads |

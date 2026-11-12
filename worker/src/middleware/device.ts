@@ -34,7 +34,8 @@ export async function pairedActiveDeviceIds(
   const rows = await db
     .prepare(
       `SELECT id, user_id FROM devices
-       WHERE status = 'active' AND (user_id = ? OR user_id = ?)
+       WHERE status = 'active' AND encryption_version = 1
+         AND (user_id = ? OR user_id = ?)
        ORDER BY id`,
     )
     .bind(userId, peerId)

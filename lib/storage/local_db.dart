@@ -42,7 +42,7 @@ class LocalDb {
 
     final database = await openDatabase(
       path,
-      version: 8,
+      version: 9,
       onCreate: _createSchema,
       onUpgrade: _onUpgrade,
     );
@@ -63,6 +63,10 @@ class LocalDb {
         sender_id TEXT NOT NULL,
         sender_device_id INTEGER,
         encrypted_payload TEXT,
+        encryption_version INTEGER NOT NULL DEFAULT 1,
+        nonce TEXT,
+        auth_tag TEXT,
+        key_epoch INTEGER,
         decrypted_text TEXT,
         message_type TEXT NOT NULL DEFAULT 'signal',
         version INTEGER NOT NULL DEFAULT 1,
@@ -224,6 +228,18 @@ class LocalDb {
         );
       } catch (_) {}
     }
+    if (oldVersion < 9) {
+      for (final statement in [
+        'ALTER TABLE messages ADD COLUMN encryption_version INTEGER NOT NULL DEFAULT 1;',
+        'ALTER TABLE messages ADD COLUMN nonce TEXT;',
+        'ALTER TABLE messages ADD COLUMN auth_tag TEXT;',
+        'ALTER TABLE messages ADD COLUMN key_epoch INTEGER;',
+      ]) {
+        try {
+          await database.execute(statement);
+        } catch (_) {}
+      }
+    }
   }
 
   Future<void> upsertMessage(Map<String, dynamic> row) async {
@@ -237,27 +253,39 @@ class LocalDb {
 
   Future<List<Map<String, dynamic>>> getMessages(
     String conversationId, {
-    int limit = 60,
+    int limit = 10,
+    String? beforeMessageId,
     int? beforeCreatedAt,
   }) async {
     final database = await db;
     final nowMs = DateTime.now().millisecondsSinceEpoch;
-    final String where = beforeCreatedAt != null
-        ? 'conversation_id = ? AND is_locally_deleted = 0 AND is_unsent = 0 '
-            "AND message_type != 'system' "
-            'AND (expires_at IS NULL OR expires_at > ?) AND created_at < ?'
-        : 'conversation_id = ? AND is_locally_deleted = 0 AND is_unsent = 0 '
-            "AND message_type != 'system' "
-            'AND (expires_at IS NULL OR expires_at > ?)';
-    final List<Object?> args = beforeCreatedAt != null
-        ? [conversationId, nowMs, beforeCreatedAt]
-        : [conversationId, nowMs];
+    var where = 'conversation_id = ? AND is_locally_deleted = 0 AND is_unsent = 0 '
+        "AND message_type != 'system' "
+        'AND (expires_at IS NULL OR expires_at > ?)';
+    final args = <Object?>[conversationId, nowMs];
+
+    if (beforeMessageId != null) {
+      final cursor = await database.query(
+        'messages',
+        columns: ['created_at', 'id'],
+        where: 'conversation_id = ? AND id = ?',
+        whereArgs: [conversationId, beforeMessageId],
+        limit: 1,
+      );
+      if (cursor.isEmpty) return [];
+      final createdAt = cursor.first['created_at'] as int;
+      where += ' AND (created_at < ? OR (created_at = ? AND id < ?))';
+      args.addAll([createdAt, createdAt, beforeMessageId]);
+    } else if (beforeCreatedAt != null) {
+      where += ' AND created_at < ?';
+      args.add(beforeCreatedAt);
+    }
 
     return database.query(
       'messages',
       where: where,
       whereArgs: args,
-      orderBy: 'created_at DESC',
+      orderBy: 'created_at DESC, id DESC',
       limit: limit,
     );
   }

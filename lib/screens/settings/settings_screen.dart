@@ -44,6 +44,13 @@ class SettingsScreen extends ConsumerWidget {
               subtitle: Text('End-to-end encryption is enabled by the client.'),
             ),
             ListTile(
+              leading: const HugeIcon(
+                  icon: HugeIcons.strokeRoundedComputerPhoneSync),
+              title: const Text('Linked devices'),
+              subtitle: const Text('Pair a device or revoke access'),
+              onTap: () => context.push('/settings/devices'),
+            ),
+            ListTile(
               leading: const HugeIcon(icon: HugeIcons.strokeRoundedMoon02),
               title: const Text('Appearance'),
               subtitle: Text(

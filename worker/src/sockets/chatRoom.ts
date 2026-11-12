@@ -4,6 +4,7 @@ import { notifyInboxes } from '../services/inbox.js';
 import { sendMessagePush } from '../services/push.js';
 import { pairedActiveDeviceIds } from '../middleware/device.js';
 import type { JWTPayload } from '../types.js';
+import { validateConversationEnvelope } from '../services/conversationKeys.js';
 
 /**
  * Per-socket state. Kept serialized on the WebSocket itself so identity,
@@ -14,6 +15,7 @@ interface SessionState {
   sessionId: string;
   userId: string;
   deviceId: number | null;
+  encryptionVersion: number | null;
   connectedAt: number;
   typingCount: number;
   typingWindowStart: number;
@@ -31,6 +33,9 @@ interface ConversationGateRow {
   is_blocked: number;
   message_exists: number;
   message_owned: number;
+  key_epoch: number;
+  key_rotation_required: number;
+  disappearing_timer: number;
 }
 
 const MAX_FRAME_BYTES = 64 * 1024;
@@ -58,6 +63,9 @@ const CONVERSATION_GATE_SQL = `
     c.user_b_id,
     c.request_status,
     c.initiated_by_id,
+    c.key_epoch,
+    c.key_rotation_required,
+    c.disappearing_timer,
     EXISTS (
       SELECT 1 FROM user_blocks ub
       WHERE (ub.blocker_id = ? AND ub.blocked_id =
@@ -97,7 +105,32 @@ export class ChatRoom {
       return this.handleBroadcast(request);
     }
 
+    if (url.pathname === '/disconnect-device' && request.method === 'POST') {
+      return this.handleDisconnectDevice(request);
+    }
+
     return new Response('Not found', { status: 404 });
+  }
+
+  private async handleDisconnectDevice(request: Request): Promise<Response> {
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return new Response('Invalid JSON', { status: 400 });
+    }
+    const data = body as { userId?: unknown; deviceId?: unknown };
+    if (typeof data.userId !== 'string' || !Number.isInteger(data.deviceId) || (data.deviceId as number) <= 0) {
+      return new Response('Invalid device target', { status: 400 });
+    }
+    let closed = 0;
+    for (const ws of this.state.getWebSockets(data.userId)) {
+      const meta = this.readMeta(ws);
+      if (meta?.deviceId !== data.deviceId) continue;
+      this.closeSocket(ws, 4001, 'Device revoked');
+      closed++;
+    }
+    return Response.json({ closed });
   }
 
   private async handleWebSocket(request: Request): Promise<Response> {
@@ -149,6 +182,7 @@ export class ChatRoom {
     const userId = jwtPayload.sub;
 
     let deviceId: number | null = null;
+    let encryptionVersion: number | null = null;
     const deviceIdParam = url.searchParams.get('deviceId');
     if (deviceIdParam) {
       const parsedDeviceId = Number(deviceIdParam);
@@ -156,14 +190,15 @@ export class ChatRoom {
         return new Response(JSON.stringify({ error: 'Invalid device' }), { status: 400 });
       }
       const row = await this.env.DB.prepare(
-        `SELECT id FROM devices WHERE id = ? AND user_id = ? AND status = 'active'`,
+        `SELECT id, encryption_version FROM devices WHERE id = ? AND user_id = ? AND status = 'active'`,
       )
         .bind(parsedDeviceId, userId)
-        .first<{ id: number }>();
+        .first<{ id: number; encryption_version: number }>();
       if (!row) {
         return new Response(JSON.stringify({ error: 'Unknown or inactive device' }), { status: 403 });
       }
       deviceId = row.id;
+      encryptionVersion = row.encryption_version;
     }
 
     // Cap concurrent sessions per user to prevent connection leaks. Counting
@@ -182,6 +217,7 @@ export class ChatRoom {
       sessionId: crypto.randomUUID(),
       userId,
       deviceId,
+      encryptionVersion,
       connectedAt: now,
       typingCount: 0,
       typingWindowStart: now,
@@ -238,6 +274,7 @@ export class ChatRoom {
       sessionId: meta.sessionId,
       userId: meta.userId,
       deviceId: typeof meta.deviceId === 'number' ? meta.deviceId : null,
+      encryptionVersion: typeof meta.encryptionVersion === 'number' ? meta.encryptionVersion : null,
       connectedAt: typeof meta.connectedAt === 'number' ? meta.connectedAt : 0,
       typingCount: typeof meta.typingCount === 'number' ? meta.typingCount : 0,
       typingWindowStart: typeof meta.typingWindowStart === 'number' ? meta.typingWindowStart : 0,
@@ -261,6 +298,7 @@ export class ChatRoom {
         sessionId: session.sessionId,
         userId: session.userId,
         deviceId: session.deviceId,
+        encryptionVersion: session.encryptionVersion,
         connectedAt: session.connectedAt,
         typingCount: session.typingCount,
         typingWindowStart: session.typingWindowStart,
@@ -334,6 +372,7 @@ export class ChatRoom {
     const payloads = (event as {
       payloads?: Array<{ deviceId: number; payload: string | null; messageType: string }>;
     }).payloads;
+    const recipients = (event as { recipients?: string[] }).recipients;
     const legacyFrame = payloads ? null : JSON.stringify(event);
     const frames = new Map<string, string>();
 
@@ -341,6 +380,9 @@ export class ChatRoom {
     for (const ws of this.state.getWebSockets()) {
       const meta = this.readMeta(ws);
       if (!meta) continue;
+      if (recipients && !recipients.includes(meta.userId)) continue;
+      if ((event as { encryptionVersion?: number }).encryptionVersion === 2 &&
+          (meta.deviceId === null || meta.encryptionVersion !== 2)) continue;
 
       let frame = legacyFrame;
       if (frame === null) {
@@ -384,7 +426,7 @@ export class ChatRoom {
 
     // Bound frame already enforced; validate event type.
     if (msg.type === 'delivery_ack' && typeof msg.messageId === 'string' && msg.messageId.length <= 128) {
-      await this.handleDeliveryAck(session.userId, msg.messageId);
+      await this.handleDeliveryAck(session.userId, msg.messageId, session.deviceId);
       if (requestId) {
         this.sendFrame(session.ws, JSON.stringify({ type: 'ack', requestId, ok: true }));
       }
@@ -433,33 +475,49 @@ export class ChatRoom {
     }));
   }
 
-  private async handleDeliveryAck(recipientId: string, messageId: string): Promise<void> {
+  private async handleDeliveryAck(
+    recipientId: string,
+    messageId: string,
+    deviceId: number | null,
+  ): Promise<void> {
     const now = Math.floor(Date.now() / 1000);
     try {
-      // Batched so the guard read and the write share one round trip.
-      const [messageResult, updateResult] = await this.env.DB.batch<{ sender_id: string }>([
-        this.env.DB.prepare('SELECT sender_id FROM messages WHERE id = ?').bind(messageId),
+      const [messageResult, legacyResult, v2Result] = await this.env.DB.batch<{
+        sender_id: string;
+        encryption_version: number;
+      }>([
+        this.env.DB.prepare(
+          'SELECT sender_id, encryption_version FROM messages WHERE id = ?',
+        ).bind(messageId),
         this.env.DB.prepare(
           `UPDATE message_deliveries
            SET delivered_at = COALESCE(delivered_at, ?)
-           WHERE message_id = ?
-             AND delivered_at IS NULL
+           WHERE message_id = ? AND delivered_at IS NULL
              AND recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)
              AND EXISTS (
                SELECT 1 FROM messages
-               WHERE id = ? AND sender_id <> ?
+               WHERE id = ? AND sender_id <> ? AND encryption_version = 1
              )`,
         ).bind(now, messageId, recipientId, messageId, recipientId),
+        this.env.DB.prepare(
+          `UPDATE messages SET delivered_at = COALESCE(delivered_at, ?)
+           WHERE id = ? AND encryption_version = 2
+             AND sender_id <> ? AND delivered_at IS NULL`,
+        ).bind(now, messageId, recipientId),
       ]);
 
       const message = messageResult.results?.[0];
       if (!message || message.sender_id === recipientId) return;
-      if ((updateResult.meta?.changes ?? 0) === 0) return;
+      const changed = message.encryption_version === 2
+        ? (v2Result.meta?.changes ?? 0)
+        : (legacyResult.meta?.changes ?? 0);
+      if (changed === 0) return;
 
       this.sendToUser(message.sender_id, {
         type: 'message_delivered',
         messageId,
         recipientId,
+        ...(deviceId == null ? {} : { recipientDeviceId: deviceId }),
         deliveredAt: now,
       });
     } catch (error) {
@@ -577,6 +635,163 @@ export class ChatRoom {
       sendAck({ type: 'ack', ok: true, messageId: msgId, status: 'already_committed' });
       return;
     }
+
+    if (msg.encryptionVersion === 2) {
+      const ciphertext = msg.ciphertext;
+      const nonce = msg.nonce;
+      const authTag = msg.authTag;
+      const keyEpoch = msg.keyEpoch;
+      if (typeof msgId !== 'string' || !/^[0-9a-f-]{36}$/i.test(msgId) ||
+          typeof recipientId !== 'string' ||
+          typeof ciphertext !== 'string' || typeof nonce !== 'string' ||
+          typeof authTag !== 'string' || typeof keyEpoch !== 'number') {
+        sendAck({ type: 'error', code: 'invalid_v2_payload' });
+        return;
+      }
+      const envelope = validateConversationEnvelope({ ciphertext, nonce, authTag, keyEpoch });
+      if (!envelope.ok) {
+        sendAck({ type: 'error', code: envelope.error });
+        return;
+      }
+      if (conv.key_rotation_required === 1) {
+        sendAck({ type: 'error', code: 'key_rotation_required' });
+        return;
+      }
+      if (keyEpoch !== conv.key_epoch || conv.key_epoch < 1) {
+        sendAck({ type: 'error', code: 'key_epoch_conflict', currentEpoch: conv.key_epoch });
+        return;
+      }
+
+      const [deviceResult, mediaResult, coverageResult] = await this.env.DB.batch([
+        this.env.DB.prepare(
+          `SELECT id FROM devices
+           WHERE id = ? AND user_id = ? AND status = 'active'
+             AND encryption_version = 2 AND identity_public_key IS NOT NULL`,
+        ).bind(deviceId, userId),
+        mediaId
+          ? this.env.DB.prepare(
+              `SELECT id FROM media
+               WHERE id = ? AND conversation_id = ? AND sender_id = ? AND consumed = 0`,
+            ).bind(mediaId, targetConversationId, userId)
+          : this.env.DB.prepare('SELECT NULL AS id WHERE 0'),
+        this.env.DB.prepare(
+          `SELECT
+             (SELECT COUNT(*) FROM devices
+              WHERE user_id IN (?, ?) AND status = 'active' AND encryption_version = 2) AS active_count,
+             (SELECT COUNT(*) FROM devices
+              WHERE user_id = ? AND status = 'active' AND encryption_version = 2) AS sender_count,
+             (SELECT COUNT(*) FROM devices
+              WHERE user_id = ? AND status = 'active' AND encryption_version = 2) AS recipient_count,
+             (SELECT COUNT(*) FROM device_key_envelopes e
+              JOIN devices d ON d.id = e.recipient_device_id
+              WHERE e.conversation_id = ? AND e.epoch = ?
+                AND d.user_id IN (?, ?) AND d.status = 'active'
+                AND d.encryption_version = 2) AS envelope_count`,
+        ).bind(
+          userId, expectedRecipient, userId, expectedRecipient,
+          targetConversationId, keyEpoch, userId, expectedRecipient,
+        ),
+      ]);
+
+      if (!deviceResult.results?.length) {
+        sendAck({ type: 'error', code: 'device_required' });
+        return;
+      }
+      if (mediaId && !mediaResult.results?.length) {
+        sendAck({ type: 'error', code: 'invalid_media' });
+        return;
+      }
+      const coverage = coverageResult.results?.[0] as
+        { active_count: number; sender_count: number; recipient_count: number; envelope_count: number } | undefined;
+      if (!coverage || coverage.sender_count < 1 || coverage.recipient_count < 1 ||
+          coverage.active_count !== coverage.envelope_count) {
+        sendAck({ type: 'error', code: 'conversation_keys_not_provisioned' });
+        return;
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      // Disappearing timers start on read, same as the legacy path.
+      const expiresAt = null;
+      try {
+        await this.env.DB.batch([
+          this.env.DB.prepare(
+            `INSERT INTO messages
+               (id, conversation_id, sender_id, sender_device_id, message_type,
+                reply_to_id, media_id, version, is_unsent, created_at, expires_at,
+                ciphertext, nonce, auth_tag, key_epoch, encryption_version)
+             VALUES (?, ?, ?, ?, 'signal', ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, 2)`,
+          ).bind(
+            msgId,
+            targetConversationId,
+            userId,
+            deviceId,
+            replyToId,
+            mediaId,
+            now,
+            expiresAt,
+            ciphertext,
+            nonce,
+            authTag,
+            keyEpoch,
+          ),
+          this.env.DB.prepare(
+            'UPDATE conversations SET last_message_at = ? WHERE id = ?',
+          ).bind(now, targetConversationId),
+          ...(mediaId ? [
+            this.env.DB.prepare(
+              'UPDATE media SET consumed = 1 WHERE id = ? AND conversation_id = ? AND sender_id = ?',
+            ).bind(mediaId, targetConversationId, userId),
+          ] : []),
+        ]);
+      } catch (error) {
+        console.error('Conversation-key message persistence failed', error);
+        sendAck({ type: 'error', code: 'send_failed', message: 'Message could not be stored' });
+        return;
+      }
+
+      const event: DOEvent = {
+        type: 'new_message',
+        messageId: msgId,
+        conversationId: targetConversationId,
+        senderId: userId,
+        senderDeviceId: deviceId,
+        recipients: [userId, expectedRecipient],
+        encryptionVersion: 2,
+        ciphertext,
+        nonce,
+        authTag,
+        keyEpoch,
+        messageType: 'signal',
+        replyToId,
+        createdAt: now,
+        expiresAt,
+      };
+      this.broadcast(event);
+
+      let activeUsers = new Set<string>();
+      try {
+        activeUsers = await notifyInboxes(this.env, [userId, expectedRecipient], (targetUserId) => [{
+          type: 'inbox_message',
+          conversationId: targetConversationId,
+          senderId: userId,
+          preview: 'New message',
+          lastMessageAt: now,
+          isIncoming: targetUserId !== userId,
+        }]);
+      } catch {
+        // The conversation is repairable through inbox resynchronization.
+      }
+
+      sendAck({ type: 'ack', ok: true, messageId: msgId, status: 'sent' });
+      await sendMessagePush(this.env, {
+        senderId: userId,
+        recipientId: expectedRecipient,
+        conversationId: targetConversationId,
+        recipientHasActiveSocket: activeUsers.has(expectedRecipient),
+      });
+      return;
+    }
+
 
     if (payloads.length > MAX_PAYLOADS) {
       sendAck({ type: 'error', code: 'invalid_payloads', message: 'Too many device payloads' });

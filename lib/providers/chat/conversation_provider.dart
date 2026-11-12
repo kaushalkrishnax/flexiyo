@@ -5,8 +5,11 @@ import 'package:flexiyo/models/message.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/providers/chat/chat_provider.dart';
+import 'package:flexiyo/providers/chat/conversation_pagination.dart';
+import 'package:flexiyo/providers/conversation_crypto_provider.dart';
 import 'package:flexiyo/providers/signal_crypto_provider.dart';
 import 'package:flexiyo/services/api_service.dart';
+import 'package:flexiyo/services/conversation_crypto_service.dart';
 import 'package:flexiyo/services/media/media_service.dart';
 import 'package:flexiyo/services/signal/signal_crypto_service.dart';
 import 'package:flexiyo/services/ws_service.dart';
@@ -26,6 +29,9 @@ class ConversationState {
     this.conversation,
     this.messages = const [],
     this.isLoading = false,
+    this.isLoadingOlderMessages = false,
+    this.hasMoreMessages = true,
+    this.newIncomingMessages = 0,
     this.isSending = false,
     this.error,
     this.isTyping = false,
@@ -38,27 +44,24 @@ class ConversationState {
   final Conversation? conversation;
   final List<Message> messages;
   final bool isLoading;
+  final bool isLoadingOlderMessages;
+  final bool hasMoreMessages;
+  final int newIncomingMessages;
   final bool isSending;
   final String? error;
-
-  /// True when the remote peer is typing.
   final bool isTyping;
-
-  /// Message the user wants to reply to.
   final Message? replyTo;
-
-  /// Non-null when the user is editing a sent message.
   final EditDraft? editDraft;
-
-  /// IDs of messages selected in multi-select mode.
   final Set<String> selectedMessageIds;
-
   final bool isSelectionMode;
 
   ConversationState copyWith({
     Conversation? conversation,
     List<Message>? messages,
     bool? isLoading,
+    bool? isLoadingOlderMessages,
+    bool? hasMoreMessages,
+    int? newIncomingMessages,
     bool? isSending,
     String? error,
     bool clearError = false,
@@ -74,6 +77,10 @@ class ConversationState {
       conversation: conversation ?? this.conversation,
       messages: messages ?? this.messages,
       isLoading: isLoading ?? this.isLoading,
+      isLoadingOlderMessages:
+          isLoadingOlderMessages ?? this.isLoadingOlderMessages,
+      hasMoreMessages: hasMoreMessages ?? this.hasMoreMessages,
+      newIncomingMessages: newIncomingMessages ?? this.newIncomingMessages,
       isSending: isSending ?? this.isSending,
       error: clearError ? null : (error ?? this.error),
       isTyping: isTyping ?? this.isTyping,
@@ -138,12 +145,15 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       await LocalDb.instance.purgeExpiredMessages(conversationId);
     } catch (_) {}
 
+    var hasMoreMessages = false;
+
     // Load from local cache first for instant display
     try {
-      final cachedRows = await LocalDb.instance.getMessages(conversationId);
+      final cachedRows = await LocalDb.instance.getMessages(conversationId, limit: 10);
       final cached = cachedRows.reversed.map(Message.fromDbJson).toList();
       if (cached.isNotEmpty) {
         state = state.copyWith(messages: cached);
+        hasMoreMessages = hasOlderPage(fetched: cachedRows.length);
       }
     } catch (_) {}
 
@@ -163,20 +173,18 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         throw Exception('Conversation not found');
       }
 
-      final latestCached = state.messages.isEmpty
-          ? null
-          : state.messages.reduce(
-              (a, b) => a.createdAt.isAfter(b.createdAt) ? a : b,
-            );
       final messages = await _api.getMessages(
         conversationId,
-        limit: 60,
-        after: latestCached == null
-            ? null
-            : latestCached.createdAt.millisecondsSinceEpoch ~/ 1000,
-      )
-        ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-      final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
+        limit: 10,
+      )..sort(_compareMessages);
+      hasMoreMessages = hasMoreMessages || hasOlderPage(fetched: messages.length);
+      final crypto = _ref.read(conversationCryptoProvider);
+      SignalCryptoService? legacyCrypto;
+      if (messages.any((message) => message.encryptionVersion != 2)) {
+        try {
+          legacyCrypto = await _ref.read(signalCryptoProvider(_myUserId).future);
+        } catch (_) {}
+      }
       final cachedById = {
         for (final message in state.messages) message.id: message
       };
@@ -185,7 +193,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       for (final msg in messages) {
         Message hydrated;
         try {
-          hydrated = await _hydrateFromServer(msg, crypto, cachedById);
+          hydrated = await _hydrateFromServer(msg, legacyCrypto, crypto, cachedById);
         } catch (_) {
           // One bad row must never discard the rest of the batch.
           hydrated = msg;
@@ -201,13 +209,14 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         await _cacheMessage(hydrated);
       }
 
-      hydratedMessages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      hydratedMessages.sort(_compareMessages);
 
       if (mounted) {
         state = state.copyWith(
           conversation: conv,
           messages: hydratedMessages,
           isLoading: false,
+          hasMoreMessages: hasMoreMessages,
         );
 
         // Mark as read only if accepted
@@ -225,6 +234,95 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
     // Connect WebSocket
     await _connectWs();
+  }
+
+  Future<void> loadOlderMessages() async {
+    final currentMessages = state.messages;
+    if (!mounted ||
+        state.isLoadingOlderMessages ||
+        !state.hasMoreMessages ||
+        currentMessages.isEmpty) {
+      return;
+    }
+
+    final cursorMessage = currentMessages.first;
+    state = state.copyWith(isLoadingOlderMessages: true);
+
+    var localRows = <Map<String, dynamic>>[];
+    var remoteMessages = <Message>[];
+    var remoteFetchSucceeded = false;
+
+    try {
+      localRows = await LocalDb.instance.getMessages(
+        conversationId,
+        limit: 10,
+        beforeMessageId: cursorMessage.id,
+      );
+    } catch (_) {}
+
+    try {
+      remoteMessages = await _api.getMessages(
+        conversationId,
+        limit: 10,
+        before: cursorMessage.id,
+        beforeCreatedAt: cursorMessage.createdAt,
+      )..sort(_compareMessages);
+      remoteFetchSucceeded = true;
+    } catch (_) {}
+
+    try {
+      final olderById = <String, Message>{
+        for (final row in localRows.reversed)
+          (row['id'] as String): Message.fromDbJson(row),
+      };
+      final cachedById = <String, Message>{
+        for (final message in state.messages) message.id: message,
+        ...olderById,
+      };
+
+      SignalCryptoService? legacyCrypto;
+      if (remoteMessages.any((message) => message.encryptionVersion != 2)) {
+        try {
+          legacyCrypto = await _ref.read(signalCryptoProvider(_myUserId).future);
+        } catch (_) {}
+      }
+      final crypto = _ref.read(conversationCryptoProvider);
+
+      for (final message in remoteMessages) {
+        final hydrated = await _hydrateFromServer(
+          message,
+          legacyCrypto,
+          crypto,
+          cachedById,
+        );
+        olderById[message.id] = hydrated;
+        await _cacheMessage(hydrated);
+      }
+
+      final merged = mergeOlderPage(
+        older: olderById.values,
+        current: state.messages,
+      );
+
+      if (mounted) {
+        state = state.copyWith(
+          messages: merged,
+          hasMoreMessages: remoteFetchSucceeded
+              ? hasOlderPage(fetched: remoteMessages.length) ||
+                  hasOlderPage(fetched: localRows.length)
+              : hasOlderPage(fetched: localRows.length) ||
+                  state.hasMoreMessages,
+          isLoadingOlderMessages: false,
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        state = state.copyWith(
+          isLoadingOlderMessages: false,
+          error: error.toString(),
+        );
+      }
+    }
   }
 
   Future<bool> _isRestricted() async {
@@ -245,32 +343,55 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   /// when available, otherwise a fresh decrypt.
   Future<Message> _hydrateFromServer(
     Message msg,
-    SignalCryptoService crypto,
+    SignalCryptoService? legacyCrypto,
+    ConversationCryptoService crypto,
     Map<String, Message> cachedById,
   ) async {
     if (msg.isUnsent) return msg;
 
-    // The server keeps no ciphertext for messages I sent, so fall back to the
-    // locally stored text instead of clobbering it.
-    if (msg.encryptedPayload == null) {
-      final localText = cachedById[msg.id]?.decryptedText ??
-          await crypto.getLocalMessageText(msg.id);
-      return localText == null ? msg : msg.copyWith(decryptedText: localText);
+    final cachedText = cachedById[msg.id]?.decryptedText;
+    if (cachedText != null) return msg.copyWith(decryptedText: cachedText);
+
+    if (msg.encryptionVersion == 2) {
+      if (msg.encryptedPayload == null ||
+          msg.nonce == null ||
+          msg.authTag == null ||
+          msg.keyEpoch == null) {
+        return msg;
+      }
+      try {
+        final plaintext = await crypto.decryptMessage(
+          userId: _myUserId,
+          conversationId: msg.conversationId,
+          messageId: msg.id,
+          keyEpoch: msg.keyEpoch!,
+          ciphertext: msg.encryptedPayload!,
+          nonce: msg.nonce!,
+          authTag: msg.authTag!,
+        );
+        return msg.copyWith(decryptedText: plaintext);
+      } catch (_) {
+        return msg;
+      }
     }
 
-    final localText = cachedById[msg.id]?.decryptedText ??
-        await crypto.getLocalMessageText(msg.id);
+    if (legacyCrypto == null) return msg;
+    if (msg.encryptedPayload == null) {
+      final localText = await legacyCrypto.getLocalMessageText(msg.id);
+      return localText == null ? msg : msg.copyWith(decryptedText: localText);
+    }
+    final localText = await legacyCrypto.getLocalMessageText(msg.id);
     if (localText != null) return msg.copyWith(decryptedText: localText);
     if (msg.senderId == _myUserId) return msg;
 
     try {
-      final plaintext = await crypto.decryptFromUser(
+      final plaintext = await legacyCrypto.decryptFromUser(
         senderId: msg.senderId,
         senderDeviceId: msg.senderDeviceId!,
         payload: msg.encryptedPayload!,
         messageType: msg.messageType.name,
       );
-      await crypto.saveLocalMessageText(msg.id, plaintext);
+      await legacyCrypto.saveLocalMessageText(msg.id, plaintext);
       return msg.copyWith(decryptedText: plaintext);
     } catch (_) {
       return msg;
@@ -282,11 +403,9 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       final wsUrl = await _api.buildWsUrl(conversationId);
       String finalUrl = wsUrl;
       try {
-        final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
-        final deviceId = await crypto.getDeviceId();
-        if (deviceId != null) {
-          finalUrl = '$wsUrl&deviceId=$deviceId';
-        }
+        final crypto = _ref.read(conversationCryptoProvider);
+        final deviceId = await crypto.ensureDeviceRegistered(userId: _myUserId);
+        finalUrl = '$wsUrl&deviceId=$deviceId';
       } catch (_) {}
       _ws = WsService(conversationId: conversationId, wsUrl: finalUrl);
       _wsSub = _ws!.events.listen((event) => _handleWsEvent(event));
@@ -349,78 +468,101 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
   Future<void> _onRemoteNewMessage(Map<String, dynamic> event) async {
     final msgId = event['messageId'] as String?;
-    if (msgId == null) return;
+    if (msgId == null || state.messages.any((m) => m.id == msgId)) return;
 
     final senderId = event['senderId'] as String? ?? '';
-    final payloads = event['payloads'] as List<dynamic>? ?? const [];
-    final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
-    final myDeviceId = await crypto.getDeviceId();
-    Map<String, dynamic>? target;
-    if (myDeviceId != null) {
-      for (final p in payloads) {
-        if (p is Map<String, dynamic> && p['deviceId'] == myDeviceId) {
-          target = p;
-          break;
-        }
-      }
-    }
-    final senderDeviceId = event['senderDeviceId'] as int?;
-    final encryptedPayload = target?['payload'] as String? ?? '';
-    final messageType = target?['messageType'] as String? ?? 'signal';
+    final encryptionVersion = (event['encryptionVersion'] as num?)?.toInt() ?? 1;
+    final senderDeviceId = (event['senderDeviceId'] as num?)?.toInt();
     final replyToId = event['replyToId'] as String?;
     final createdAtRaw = event['createdAt'];
     final expiresAtRaw = event['expiresAt'];
 
-    DateTime createdAt;
+    DateTime createdAt = DateTime.now();
     if (createdAtRaw is int) {
-      final ts = createdAtRaw > 1e12 ? createdAtRaw : createdAtRaw * 1000;
-      createdAt = DateTime.fromMillisecondsSinceEpoch(ts.toInt());
-    } else {
-      createdAt = DateTime.now();
+      final timestamp = createdAtRaw > 1e12 ? createdAtRaw : createdAtRaw * 1000;
+      createdAt = DateTime.fromMillisecondsSinceEpoch(timestamp);
     }
-
     DateTime? expiresAt;
     if (expiresAtRaw is int) {
-      final ts = expiresAtRaw > 1e12 ? expiresAtRaw : expiresAtRaw * 1000;
-      expiresAt = DateTime.fromMillisecondsSinceEpoch(ts.toInt());
+      final timestamp = expiresAtRaw > 1e12 ? expiresAtRaw : expiresAtRaw * 1000;
+      expiresAt = DateTime.fromMillisecondsSinceEpoch(timestamp);
     }
 
-    // Deduplicate
-    if (state.messages.any((m) => m.id == msgId)) return;
-
+    String? encryptedPayload;
+    String? nonce;
+    String? authTag;
+    int? keyEpoch;
+    String messageType = 'signal';
     String? plaintext;
-    if (senderId == _myUserId) {
+
+    if (encryptionVersion == 2) {
+      encryptedPayload = event['ciphertext'] as String?;
+      nonce = event['nonce'] as String?;
+      authTag = event['authTag'] as String?;
+      keyEpoch = (event['keyEpoch'] as num?)?.toInt();
+      if (encryptedPayload != null && nonce != null &&
+          authTag != null && keyEpoch != null) {
+        try {
+          plaintext = await _ref.read(conversationCryptoProvider).decryptMessage(
+            userId: _myUserId,
+            conversationId: conversationId,
+            messageId: msgId,
+            keyEpoch: keyEpoch,
+            ciphertext: encryptedPayload,
+            nonce: nonce,
+            authTag: authTag,
+          );
+        } catch (_) {
+          plaintext = null;
+        }
+      }
+    } else {
+      final payloads = event['payloads'] as List<dynamic>? ?? const [];
       try {
-        final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
-        final local = await crypto.getLocalMessageText(msgId);
-        if (local != null) plaintext = local;
-      } catch (_) {}
-    } else if (encryptedPayload.isNotEmpty && senderDeviceId != null) {
-      try {
-        final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
-        plaintext = await crypto.decryptFromUser(
-          senderId: senderId,
-          senderDeviceId: senderDeviceId,
-          payload: encryptedPayload,
-          messageType: messageType,
-        );
-        await crypto.saveLocalMessageText(msgId, plaintext);
+        final legacyCrypto =
+            await _ref.read(signalCryptoProvider(_myUserId).future);
+        final myDeviceId = await legacyCrypto.getDeviceId();
+        Map<String, dynamic>? target;
+        if (myDeviceId != null) {
+          for (final payload in payloads) {
+            if (payload is Map<String, dynamic> &&
+                payload['deviceId'] == myDeviceId) {
+              target = payload;
+              break;
+            }
+          }
+        }
+        encryptedPayload = target?['payload'] as String?;
+        messageType = target?['messageType'] as String? ?? 'signal';
+        if (senderId == _myUserId) {
+          plaintext = await legacyCrypto.getLocalMessageText(msgId);
+        } else if (encryptedPayload != null && senderDeviceId != null) {
+          plaintext = await legacyCrypto.decryptFromUser(
+            senderId: senderId,
+            senderDeviceId: senderDeviceId,
+            payload: encryptedPayload,
+            messageType: messageType,
+          );
+          await legacyCrypto.saveLocalMessageText(msgId, plaintext);
+        }
       } catch (_) {
-        // Never surface ciphertext as message text. Leave plaintext null so the
-        // bubble renders a neutral decryption-failed state.
         plaintext = null;
       }
     }
 
-    final msg = Message(
+    final message = Message(
       id: msgId,
       conversationId: conversationId,
       senderId: senderId,
       senderDeviceId: senderDeviceId,
       encryptedPayload: encryptedPayload,
+      encryptionVersion: encryptionVersion,
+      nonce: nonce,
+      authTag: authTag,
+      keyEpoch: keyEpoch,
       decryptedText: plaintext,
       messageType: MessageType.values.firstWhere(
-        (e) => e.name == messageType,
+        (value) => value.name == messageType,
         orElse: () => MessageType.signal,
       ),
       version: 1,
@@ -430,36 +572,28 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       replyToId: replyToId,
     );
 
-    _upsertMessage(msg);
-    await _cacheMessage(msg);
+    _upsertMessage(message);
+    await _cacheMessage(message);
     _scheduleExpiryPurge();
 
-    // Only acknowledge delivery once the payload is durably stored and, for
-    // incoming messages, successfully decrypted.
-    final decryptionOk = senderId == _myUserId || plaintext != null;
-    if (decryptionOk) {
-      _ws?.sendDeliveryAck(msgId);
-    }
+    if (plaintext != null) _ws?.sendDeliveryAck(msgId);
 
     final isIncoming = senderId != _myUserId;
-    if (isIncoming &&
-        state.conversation?.requestStatus == 'accepted' &&
-        !(await _isRestricted())) {
-      unawaited(_markConversationRead());
+
+    if (isIncoming) {
+      state = state.copyWith(newIncomingMessages: state.newIncomingMessages + 1);
     }
 
-    // Media envelopes render as a friendly label in the chat list.
     final mediaPreview = plaintext != null ? MediaRef.parse(plaintext) : null;
     _ref.read(chatsProvider.notifier).onNewMessage(
-          conversationId: conversationId,
-          preview: mediaPreview?.label ?? (plaintext ?? 'Message'),
-          lastMessageAt: createdAt,
-          isIncoming: isIncoming,
-        );
+      conversationId: conversationId,
+      preview: mediaPreview?.label ?? (plaintext ?? 'Message'),
+      lastMessageAt: createdAt,
+      isIncoming: isIncoming,
+    );
   }
 
-  /// The disappearing timer is shared: whichever side changes it, both open
-  /// chats follow immediately.
+
   void _onDisappearingTimerChanged(Map<String, dynamic> event) {
     final timer = event['timer'];
     final current = state.conversation;
@@ -515,6 +649,19 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     _purgeExpiredMessages();
 
     _ref.read(chatsProvider.notifier).markPeerSeen(conversationId, readAt);
+  }
+
+  void resetNewIncomingMessages() {
+    if (state.newIncomingMessages == 0) return;
+    state = state.copyWith(newIncomingMessages: 0);
+  }
+
+  Future<void> markLatestMessagesRead() async {
+    if (state.conversation?.requestStatus != 'accepted' ||
+        await _isRestricted()) {
+      return;
+    }
+    await _markConversationRead();
   }
 
   Future<void> _markConversationRead() async {
@@ -582,7 +729,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         clearReplyTo: expiredIds.contains(state.replyTo?.id),
       );
       for (final message in expired) {
-        unawaited(_deleteSecureMessageText(message.id));
+        unawaited(_deleteSecureMessageText(message.id, encryptionVersion: message.encryptionVersion));
         unawaited(LocalDb.instance.deleteMessage(message.id));
         final mediaId = message.mediaRef?.id;
         if (mediaId != null) {
@@ -594,87 +741,103 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   }
 
   Future<void> _onRemoteMessageEdited(Map<String, dynamic> event) async {
-    final msgId = event['messageId'] as String?;
-    if (msgId == null) return;
-
-    final payloads = event['payloads'] as List<dynamic>? ?? const [];
-    final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
-    final myDeviceId = await crypto.getDeviceId();
-    Map<String, dynamic>? target;
-    if (myDeviceId != null) {
-      for (final p in payloads) {
-        if (p is Map<String, dynamic> && p['deviceId'] == myDeviceId) {
-          target = p;
-          break;
-        }
-      }
-    }
-    final senderDeviceId = event['senderDeviceId'] as int?;
-    final encryptedPayload = target?['payload'] as String? ?? '';
-    final messageType = target?['messageType'] as String? ?? 'signal';
-    final version = (event['version'] as int?) ?? 1;
-    final editedAtRaw = event['editedAt'];
-    DateTime? editedAt;
-    if (editedAtRaw is int) {
-      final ts = editedAtRaw > 1e12 ? editedAtRaw : editedAtRaw * 1000;
-      editedAt = DateTime.fromMillisecondsSinceEpoch(ts.toInt());
-    }
-
-    final original = state.messages.where((m) => m.id == msgId).firstOrNull;
+    final messageId = event['messageId'] as String?;
+    if (messageId == null) return;
+    final original = state.messages.where((message) => message.id == messageId).firstOrNull;
     if (original == null) return;
 
+    final encryptionVersion =
+        (event['encryptionVersion'] as num?)?.toInt() ?? original.encryptionVersion;
+    final version = (event['version'] as num?)?.toInt() ?? original.version;
+    final editedAtRaw = event['editedAt'];
+    final editedAt = editedAtRaw is int
+        ? DateTime.fromMillisecondsSinceEpoch(
+            editedAtRaw > 1e12 ? editedAtRaw : editedAtRaw * 1000,
+          )
+        : DateTime.now();
+
     String? plaintext;
-    if (original.senderId == _myUserId) {
-      plaintext =
-          await crypto.getLocalMessageText(msgId) ?? original.decryptedText;
+    String? ciphertext;
+    String? nonce;
+    String? authTag;
+    int? keyEpoch;
+    String messageType = 'signal';
+
+    if (encryptionVersion == 2) {
+      ciphertext = event['ciphertext'] as String?;
+      nonce = event['nonce'] as String?;
+      authTag = event['authTag'] as String?;
+      keyEpoch = (event['keyEpoch'] as num?)?.toInt();
+      if (ciphertext != null && nonce != null &&
+          authTag != null && keyEpoch != null) {
+        try {
+          plaintext = await _ref.read(conversationCryptoProvider).decryptMessage(
+            userId: _myUserId,
+            conversationId: conversationId,
+            messageId: messageId,
+            keyEpoch: keyEpoch,
+            ciphertext: ciphertext,
+            nonce: nonce,
+            authTag: authTag,
+          );
+        } catch (_) {
+          plaintext = null;
+        }
+      }
     } else {
+      final payloads = event['payloads'] as List<dynamic>? ?? const [];
       try {
-        plaintext = await crypto.decryptFromUser(
-          senderId: original.senderId,
-          senderDeviceId: senderDeviceId ?? original.senderDeviceId!,
-          payload: encryptedPayload,
-          messageType: messageType,
-        );
+        final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
+        final deviceId = await crypto.getDeviceId();
+        Map<String, dynamic>? target;
+        if (deviceId != null) {
+          for (final payload in payloads) {
+            if (payload is Map<String, dynamic> &&
+                payload['deviceId'] == deviceId) {
+              target = payload;
+              break;
+            }
+          }
+        }
+        ciphertext = target?['payload'] as String?;
+        messageType = target?['messageType'] as String? ?? 'signal';
+        if (original.senderId == _myUserId) {
+          plaintext = await crypto.getLocalMessageText(messageId) ??
+              original.decryptedText;
+        } else if (ciphertext != null) {
+          plaintext = await crypto.decryptFromUser(
+            senderId: original.senderId,
+            senderDeviceId: (event['senderDeviceId'] as num?)?.toInt() ??
+                original.senderDeviceId!,
+            payload: ciphertext,
+            messageType: messageType,
+          );
+          await crypto.saveLocalMessageText(messageId, plaintext);
+        }
       } catch (_) {
         plaintext = null;
       }
     }
-    if (plaintext != null && original.senderId != _myUserId) {
-      try {
-        await crypto.saveLocalMessageText(msgId, plaintext);
-      } catch (_) {}
-    }
 
-    final updated = state.messages.map((m) {
-      if (m.id == msgId) {
-        return m.copyWith(
-          encryptedPayload: encryptedPayload,
-          messageType:
-              messageType == 'prekey' ? MessageType.prekey : MessageType.signal,
-          decryptedText: plaintext,
-          version: version,
-          isEdited: true,
-          editedAt: editedAt,
-          status: MessageStatus.sent,
-        );
-      }
-      return m;
-    }).toList();
-
-    state = state.copyWith(messages: updated);
-    if (plaintext != null) {
-      await crypto.saveLocalMessageText(msgId, plaintext);
-    }
-
-    if (editedAt != null) {
-      LocalDb.instance.updateMessageEdited(
-        msgId,
-        encryptedPayload: encryptedPayload,
-        version: version,
-        editedAt: editedAt.millisecondsSinceEpoch,
-      );
-    }
+    final updated = original.copyWith(
+      encryptedPayload: ciphertext,
+      encryptionVersion: encryptionVersion,
+      nonce: nonce,
+      authTag: authTag,
+      keyEpoch: keyEpoch,
+      messageType: messageType == 'prekey'
+          ? MessageType.prekey
+          : MessageType.signal,
+      decryptedText: plaintext,
+      version: version,
+      isEdited: true,
+      editedAt: editedAt,
+      status: MessageStatus.sent,
+    );
+    _upsertMessage(updated);
+    await _cacheMessage(updated);
   }
+
 
   void _onRemoteMessageDeleted(Map<String, dynamic> event) {
     final msgId = event['messageId'] as String?;
@@ -685,11 +848,12 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         ?.mediaRef
         ?.id;
 
+    final deletedMessage = state.messages.where((message) => message.id == msgId).firstOrNull;
     state = state.copyWith(
       messages: state.messages.where((message) => message.id != msgId).toList(),
       clearReplyTo: state.replyTo?.id == msgId,
     );
-    unawaited(_deleteSecureMessageText(msgId));
+    unawaited(_deleteSecureMessageText(msgId, encryptionVersion: deletedMessage?.encryptionVersion ?? 1));
     unawaited(LocalDb.instance.deleteMessage(msgId));
     if (mediaId != null) {
       unawaited(_ref.read(mediaServiceProvider).purgeLocal(mediaId));
@@ -740,25 +904,18 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     }
     if (text.isEmpty || conv == null || state.isSending) return;
     if (await _isRestricted()) {
-      if (mounted) {
-        state = state.copyWith(error: 'Unrestrict this chat to send messages');
-      }
+      if (mounted) state = state.copyWith(error: 'Unrestrict this chat to send messages');
       return;
     }
-    if (conv.requestStatus == 'pending' && conv.initiatedById != _myUserId) {
-      return;
-    }
+    if (conv.requestStatus == 'pending' && conv.initiatedById != _myUserId) return;
     if (conv.requestStatus == 'pending' &&
-        state.messages
-            .any((m) => !m.isUnsent && m.status != MessageStatus.failed)) {
+        state.messages.any((message) => !message.isUnsent && message.status != MessageStatus.failed)) {
       return;
     }
 
     final msgId = messageId ?? _uuid.v4();
     final now = DateTime.now();
     final replyToId = state.replyTo?.id;
-
-    // Optimistic message
     final optimistic = Message(
       id: msgId,
       conversationId: conversationId,
@@ -769,79 +926,74 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       createdAt: now,
       status: MessageStatus.sending,
       replyToId: replyToId,
+      encryptionVersion: 2,
     );
 
     _upsertMessage(optimistic);
     await _cacheMessage(optimistic);
     state = state.copyWith(clearReplyTo: true);
-
-    // Update chats list preview.
     final optimisticPreview = MediaRef.parse(text);
     _ref.read(chatsProvider.notifier).onNewMessage(
-          conversationId: conversationId,
-          preview: optimisticPreview?.label ?? text,
-          lastMessageAt: now,
-        );
-
+      conversationId: conversationId,
+      preview: optimisticPreview?.label ?? text,
+      lastMessageAt: now,
+    );
     state = state.copyWith(isSending: true);
 
     try {
-      final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
-      final encrypted = await crypto.encryptForUser(conv.otherUserId, text);
-      await crypto.saveLocalMessageText(msgId, text);
-      final myDeviceId = await crypto.getDeviceId();
+      final crypto = _ref.read(conversationCryptoProvider);
+      final encrypted = await crypto.encryptMessage(
+        conversationId: conversationId,
+        messageId: msgId,
+        myUserId: _myUserId,
+        peerUserId: conv.otherUserId,
+        plaintext: text,
+      );
+      final deviceId = await crypto.ensureDeviceRegistered(userId: _myUserId);
       if (_ws == null) await _connectWs();
       final ws = _ws;
       if (ws == null) throw StateError('WebSocket unavailable');
       await ws.ensureConnected();
+
       final ack = await ws.request({
         'type': 'send_message',
         'conversationId': conversationId,
         'id': msgId,
         'recipientId': conv.otherUserId,
-        'payloads': encrypted.payloads
-            .map((p) => {
-                  'deviceId': p.recipientDeviceId,
-                  'ciphertext': p.payload,
-                  'messageType': p.messageType,
-                })
-            .toList(),
-        'messageType': encrypted.messageType,
+        ...encrypted,
         'mediaId': MediaRef.parse(text)?.id,
         'replyToId': replyToId,
       });
-
       if (ack['ok'] != true && ack['type'] != 'ack') {
-        throw StateError(ack['message']?.toString() ?? 'Send rejected');
+        final code = ack['code']?.toString() ?? 'send_rejected';
+        if (code == 'key_rotation_required' ||
+            code == 'key_epoch_conflict' ||
+            code == 'conversation_keys_not_provisioned') {
+          throw StateError('$code: reopen the conversation to synchronize encryption keys');
+        }
+        throw StateError(ack['message']?.toString() ?? code);
       }
 
-      // Confirm as sent
-      _updateMessageStatus(msgId, MessageStatus.sent);
       final sent = optimistic.copyWith(
-        encryptedPayload: null,
-        senderDeviceId: myDeviceId,
-        messageType: encrypted.messageType == 'prekey'
-            ? MessageType.prekey
-            : MessageType.signal,
+        senderDeviceId: deviceId,
+        encryptedPayload: encrypted['ciphertext'] as String,
+        encryptionVersion: 2,
+        nonce: encrypted['nonce'] as String,
+        authTag: encrypted['authTag'] as String,
+        keyEpoch: encrypted['keyEpoch'] as int,
         status: MessageStatus.sent,
       );
       _upsertMessage(sent);
-      try {
-        final row = sent.toJson();
-        await LocalDb.instance.upsertMessage(row);
-      } catch (_) {}
-    } catch (e, st) {
-      debugPrint('[SEND] failed: $e\n$st');
+      await _cacheMessage(sent);
+    } catch (error, stackTrace) {
+      debugPrint('[SEND] failed: $error\n$stackTrace');
       _updateMessageStatus(msgId, MessageStatus.failed);
-      final errorStr = e.toString();
-      final userFriendlyError = errorStr.contains('No device registered')
-          ? "Recipient hasn't registered encryption keys yet."
-          : 'Send failed: $e';
-      if (mounted) state = state.copyWith(error: userFriendlyError);
+      if (mounted) state = state.copyWith(error: 'Send failed: $error');
     } finally {
       if (mounted) state = state.copyWith(isSending: false);
     }
   }
+
 
   Future<void> retryFailedMessage(String messageId) async {
     final msg = state.messages.firstWhere(
@@ -864,62 +1016,92 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
   Future<void> editMessage(String messageId, String newText) async {
     final original = state.messages.firstWhere(
-      (m) => m.id == messageId,
+      (message) => message.id == messageId,
       orElse: () => throw StateError('Message not found'),
     );
+    if (original.senderId != _myUserId || !original.isEditEligible) return;
 
-    if (original.senderId != _myUserId) return;
-    if (!original.isEditEligible) return;
-
-    // Optimistic update
-    final now = DateTime.now();
     final conversation = state.conversation;
     if (conversation == null) return;
-
-    final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
-    final encrypted =
-        await crypto.encryptForUser(conversation.otherUserId, newText);
-    await crypto.saveLocalMessageText(messageId, newText);
-    final myDeviceId = await crypto.getDeviceId();
-    _upsertMessage(
-      original.copyWith(
-        decryptedText: newText,
-        senderDeviceId: myDeviceId ?? original.senderDeviceId,
-        isEdited: true,
-        editedAt: now,
-        version: original.version + 1,
-      ),
-    );
-
-    state = state.copyWith(clearEditDraft: true);
+    final now = DateTime.now();
 
     try {
-      await _api.editMessage(
-        conversationId,
-        messageId,
-        payloads: encrypted.payloads
-            .map((p) => {
-                  'deviceId': p.recipientDeviceId,
-                  'ciphertext': p.payload,
-                  'messageType': p.messageType,
-                })
-            .toList(),
-        version: original.version,
-        messageType: encrypted.messageType,
-      );
-    } catch (e) {
-      // Rollback
+      if (original.encryptionVersion == 2) {
+        final crypto = _ref.read(conversationCryptoProvider);
+        final encrypted = await crypto.encryptMessage(
+          conversationId: conversationId,
+          messageId: messageId,
+          myUserId: _myUserId,
+          peerUserId: conversation.otherUserId,
+          plaintext: newText,
+        );
+        final deviceId = await crypto.ensureDeviceRegistered(userId: _myUserId);
+        final updated = original.copyWith(
+          decryptedText: newText,
+          senderDeviceId: deviceId,
+          encryptedPayload: encrypted['ciphertext'] as String,
+          encryptionVersion: 2,
+          nonce: encrypted['nonce'] as String,
+          authTag: encrypted['authTag'] as String,
+          keyEpoch: encrypted['keyEpoch'] as int,
+          isEdited: true,
+          editedAt: now,
+          version: original.version + 1,
+        );
+        _upsertMessage(updated);
+        await _cacheMessage(updated);
+        state = state.copyWith(clearEditDraft: true);
+
+        await _api.editMessageV2(
+          conversationId,
+          messageId,
+          ciphertext: encrypted['ciphertext'] as String,
+          nonce: encrypted['nonce'] as String,
+          authTag: encrypted['authTag'] as String,
+          keyEpoch: encrypted['keyEpoch'] as int,
+          version: original.version,
+        );
+      } else {
+        final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
+        final encrypted = await crypto.encryptForUser(conversation.otherUserId, newText);
+        await crypto.saveLocalMessageText(messageId, newText);
+        final deviceId = await crypto.getDeviceId();
+        final updated = original.copyWith(
+          decryptedText: newText,
+          senderDeviceId: deviceId ?? original.senderDeviceId,
+          isEdited: true,
+          editedAt: now,
+          version: original.version + 1,
+        );
+        _upsertMessage(updated);
+        await _cacheMessage(updated);
+        state = state.copyWith(clearEditDraft: true);
+
+        await _api.editMessage(
+          conversationId,
+          messageId,
+          payloads: encrypted.payloads.map((payload) => {
+            'deviceId': payload.recipientDeviceId,
+            'ciphertext': payload.payload,
+            'messageType': payload.messageType,
+          }).toList(),
+          version: original.version,
+          messageType: encrypted.messageType,
+        );
+      }
+    } catch (error) {
       _upsertMessage(original);
-      if (original.decryptedText != null) {
+      await _cacheMessage(original);
+      if (original.encryptionVersion == 1 && original.decryptedText != null) {
         try {
-          final crypto =
-              await _ref.read(signalCryptoProvider(_myUserId).future);
-          await crypto.saveLocalMessageText(messageId, original.decryptedText!);
+          final legacy = await _ref.read(signalCryptoProvider(_myUserId).future);
+          await legacy.saveLocalMessageText(messageId, original.decryptedText!);
         } catch (_) {}
       }
-      if (mounted) state = state.copyWith(error: 'Edit failed: $e');
+      if (mounted) state = state.copyWith(error: 'Edit failed: $error');
     }
   }
+
 
   Future<void> unsendMessage(String messageId) async {
     final msg = state.messages.firstWhere(
@@ -1019,20 +1201,31 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       await LocalDb.instance.markLocallyDeleted(id);
     }
 
-    try {
-      final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
-      for (final id in ids) {
-        await crypto.deleteLocalMessageText(id);
-      }
-    } catch (_) {}
+    final legacyMessageIds = originals
+        .where((message) => message.encryptionVersion == 1)
+        .map((message) => message.id)
+        .toList();
+    if (legacyMessageIds.isNotEmpty) {
+      try {
+        final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
+        for (final id in legacyMessageIds) {
+          await crypto.deleteLocalMessageText(id);
+        }
+      } catch (_) {}
+    }
   }
 
-  Future<void> _deleteSecureMessageText(String messageId) async {
+  Future<void> _deleteSecureMessageText(
+    String messageId, {
+    int encryptionVersion = 1,
+  }) async {
+    if (encryptionVersion == 2) return;
     try {
       final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
       await crypto.deleteLocalMessageText(messageId);
     } catch (_) {}
   }
+
 
   // Typing indicator (outgoing)
 
@@ -1108,6 +1301,8 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     );
   }
 
+  int _compareMessages(Message a, Message b) => compareMessages(a, b);
+
   void _upsertMessage(Message msg) {
     final list = [...state.messages];
     final idx = list.indexWhere((m) => m.id == msg.id);
@@ -1115,8 +1310,9 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       list[idx] = msg;
     } else {
       // Insert in chronological order
-      final insertAt =
-          list.indexWhere((m) => m.createdAt.isAfter(msg.createdAt));
+      final insertAt = list.indexWhere(
+        (message) => _compareMessages(message, msg) > 0,
+      );
       if (insertAt == -1) {
         list.add(msg);
       } else {

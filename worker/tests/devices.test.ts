@@ -4,6 +4,7 @@ import {
   countRows,
   db,
   resetDatabase,
+  seedConversationKeyDevice,
   seedDevice,
   seedUser,
   tokenFor,
@@ -188,5 +189,95 @@ describe('one-time pre-key inventory', () => {
     );
 
     expect(response.status).toBe(400);
+  });
+});
+
+describe('conversation-key device upgrade', () => {
+  const IDENTITY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+
+  beforeEach(async () => {
+    await resetDatabase();
+    await seedUser(ALICE);
+  });
+
+  it('upgrades the only v1 installation while no v2 device exists', async () => {
+    const deviceId = await seedDevice(ALICE, 'install-alice');
+
+    const response = await api(
+      'POST',
+      '/api/devices/v2/upgrade',
+      { identityPublicKey: IDENTITY },
+      'install-alice',
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ deviceId, encryptionVersion: 2 });
+    const row = await db
+      .prepare('SELECT encryption_version, identity_public_key FROM devices WHERE id = ?')
+      .bind(deviceId)
+      .first<{ encryption_version: number; identity_public_key: string }>();
+    expect(row).toMatchObject({
+      encryption_version: 2,
+      identity_public_key: IDENTITY,
+    });
+  });
+
+  it('rejects a silent upgrade once the account has a v2 device', async () => {
+    await seedConversationKeyDevice(ALICE, 'v2-alice', IDENTITY);
+    await seedDevice(ALICE, 'install-extra');
+
+    const response = await api(
+      'POST',
+      '/api/devices/v2/upgrade',
+      { identityPublicKey: IDENTITY },
+      'install-extra',
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: 'pairing_required' });
+    const row = await db
+      .prepare("SELECT encryption_version FROM devices WHERE installation_id = 'install-extra'")
+      .first<{ encryption_version: number }>();
+    expect(row?.encryption_version).toBe(1);
+  });
+
+  it('is idempotent for an already-upgraded device and rejects a changed key', async () => {
+    const deviceId = await seedDevice(ALICE, 'install-alice');
+    await api('POST', '/api/devices/v2/upgrade', { identityPublicKey: IDENTITY }, 'install-alice');
+
+    const again = await api(
+      'POST',
+      '/api/devices/v2/upgrade',
+      { identityPublicKey: IDENTITY },
+      'install-alice',
+    );
+    expect(again.status).toBe(200);
+    expect(await again.json()).toMatchObject({ deviceId, encryptionVersion: 2 });
+
+    const mismatch = await api(
+      'POST',
+      '/api/devices/v2/upgrade',
+      { identityPublicKey: 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=' },
+      'install-alice',
+    );
+    expect(mismatch.status).toBe(409);
+    expect(await mismatch.json()).toMatchObject({ error: 'Device identity key mismatch' });
+  });
+
+  it('lists devices with their encryption version', async () => {
+    await seedConversationKeyDevice(ALICE, 'v2-alice', IDENTITY);
+    await seedDevice(ALICE, 'legacy');
+
+    const response = await api('GET', '/api/devices');
+    expect(response.status).toBe(200);
+    const body = await response.json() as {
+      devices: Array<{ installationId: string; encryptionVersion: number }>;
+    };
+    expect(body.devices).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ installationId: 'v2-alice', encryptionVersion: 2 }),
+        expect.objectContaining({ installationId: 'legacy', encryptionVersion: 1 }),
+      ]),
+    );
   });
 });

@@ -87,7 +87,7 @@ export interface TokenRevocationRow {
 }
 
 export interface DeviceRow {
-  /** Server-assigned Signal device id (integer, never reused). */
+  /** Server-assigned device id (integer, never reused). */
   id: number;
   user_id: string;
   /** Stable client-generated installation identifier. */
@@ -102,6 +102,10 @@ export interface DeviceRow {
   created_at: number;
   last_seen_at: number | null;
   revoked_at: number | null;
+  /** 1 = Signal bundle, 2 = conversation-key envelope. */
+  encryption_version: number;
+  /** X25519 public key used to seal conversation-key envelopes (v2 only). */
+  identity_public_key: string | null;
 }
 
 export type DeviceStatus = 'active' | 'pending' | 'disabled' | 'logged_out';
@@ -124,6 +128,9 @@ export interface ConversationRow {
   disappearing_timer: number;
   created_at: number;
   last_message_at: number | null;
+  /** Highest published conversation-key epoch. 0 = none published yet. */
+  key_epoch: number;
+  key_rotation_required: number;
 }
 
 export interface MessageRow {
@@ -140,12 +147,17 @@ export interface MessageRow {
   edited_at: number | null;
   system_data: string | null;
   reaction?: string | null;
-  // Computed by list queries (not stored columns):
-  /** Aggregated across the recipient account's devices (MIN of non-NULL). */
+  /** Conversation-key envelope (encryption_version 2). */
+  ciphertext?: string | null;
+  nonce?: string | null;
+  auth_tag?: string | null;
+  key_epoch?: number | null;
+  encryption_version?: number;
+  /** Message-level receipts (v2). Legacy rows use message_deliveries. */
   delivered_at?: number | null;
-  /** Aggregated across the recipient account's devices (MAX of non-NULL). */
   read_at?: number | null;
-  /** Ciphertext addressed to the requesting device (message_deliveries.payload). */
+  // Computed by list queries (not stored columns):
+  /** Ciphertext for the requesting device on legacy (v1) rows. */
   device_payload?: string | null;
   /** message_type of the requesting device's delivery row. */
   device_message_type?: string | null;
@@ -222,10 +234,58 @@ export interface SendMessageBody {
   replyToId?: string | null;
 }
 
+/** Versioned conversation-key envelope sent by the active Flutter client. */
+export interface ConversationKeyMessageBody {
+  id: string;
+  encryptionVersion: 2;
+  ciphertext: string;
+  nonce: string;
+  authTag: string;
+  keyEpoch: number;
+  recipientId: string;
+  mediaId?: string | null;
+  replyToId?: string | null;
+}
+
 export interface EditMessageBody {
   payloads: DevicePayload[];
   messageType: 'signal' | 'prekey';
   version: number;
+}
+
+export interface ConversationKeyEditBody {
+  encryptionVersion: 2;
+  ciphertext: string;
+  nonce: string;
+  authTag: string;
+  keyEpoch: number;
+  version: number;
+}
+
+export interface KeyEnvelopeBody {
+  recipientDeviceId: number;
+  ephemeralPublicKey: string;
+  nonce: string;
+  ciphertext: string;
+  mac: string;
+}
+
+export interface PairingSessionRow {
+  id: string;
+  user_id: string;
+  initiator_device_id: number;
+  initiator_ephemeral_public: string;
+  status: 'pending' | 'joined' | 'approved' | 'cancelled' | 'expired';
+  joined_installation_id: string | null;
+  joined_identity_public: string | null;
+  joined_ephemeral_public: string | null;
+  joined_nonce: string | null;
+  joined_ciphertext: string | null;
+  joined_mac: string | null;
+  approved_device_id: number | null;
+  created_at: number;
+  expires_at: number;
+  approved_at: number | null;
 }
 
 export interface RegisterDeviceBody {
@@ -288,6 +348,13 @@ export interface MessageResponse {
   editedAt: number | null;
   systemData: string | null;
   reaction?: string | null;
+  ciphertext?: string;
+  nonce?: string;
+  authTag?: string;
+  keyEpoch?: number;
+  encryptionVersion: number;
+  deliveredAt?: number;
+  readAt?: number;
 }
 
 export type DOEvent =
@@ -300,11 +367,16 @@ export type DOEvent =
       /** User ids that should be notified (both participants). */
       recipients: string[];
       /**
-       * Per-device ciphertexts. Online sessions whose device id matches an
-       * entry receive it as `encryptedPayload`; other sessions receive a
-       * metadata-only event (encryptedPayload: null) and must refetch.
+       * Legacy v1 per-device ciphertexts. Only present on archived Signal
+       * traffic; every socket is filtered to its own device.
        */
-      payloads: Array<{ deviceId: number; payload: string | null; messageType: string }>;
+      payloads?: Array<{ deviceId: number; payload: string | null; messageType: string }>;
+      /** v2 conversation-key envelope. Delivered byte-for-byte to every member. */
+      encryptionVersion?: number;
+      ciphertext?: string;
+      nonce?: string;
+      authTag?: string;
+      keyEpoch?: number;
       messageType: string;
       replyToId: string | null;
       createdAt: number;
@@ -315,7 +387,12 @@ export type DOEvent =
       messageId: string;
       conversationId: string;
       recipients: string[];
-      payloads: Array<{ deviceId: number; payload: string | null; messageType: string }>;
+      payloads?: Array<{ deviceId: number; payload: string | null; messageType: string }>;
+      encryptionVersion?: number;
+      ciphertext?: string;
+      nonce?: string;
+      authTag?: string;
+      keyEpoch?: number;
       messageType: string;
       version: number;
       editedAt: number;
@@ -345,7 +422,7 @@ export type DOEvent =
       type: 'message_delivered';
       messageId: string;
       recipientId: string;
-      recipientDeviceId: number;
+      recipientDeviceId?: number;
       deliveredAt: number;
     }
   | {

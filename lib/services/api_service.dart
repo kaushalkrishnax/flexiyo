@@ -40,7 +40,12 @@ class ApiService {
         },
         onError: (error, handler) {
           final status = error.response?.statusCode;
-          if (status == 401 || status == 403) {
+          // Device setup and pairing rejections are expected while an
+          // installation is being linked; they must not invalidate the JWT.
+          final path = error.requestOptions.path;
+          final deviceSetup = path.contains('/api/devices/v2/') ||
+              path.contains('/api/devices/pairing/');
+          if (status == 401 || (status == 403 && !deviceSetup)) {
             if (onServerRejected != null) {
               unawaited(onServerRejected!());
             }
@@ -140,6 +145,109 @@ class ApiService {
 
   /// Announce server-side that this client is exiting; server revokes the
   /// session so the JWT dies with it. Local storage cleanup happens in auth.
+  Future<Map<String, dynamic>> registerConversationKeyDevice({
+    required String installationId,
+    required String identityPublicKey,
+  }) =>
+      _post('/api/devices/v2/register', {
+        'installationId': installationId,
+        'identityPublicKey': identityPublicKey,
+      });
+
+  Future<Map<String, dynamic>> upgradeConversationKeyDevice(
+    String identityPublicKey,
+  ) =>
+      _post('/api/devices/v2/upgrade', {
+        'identityPublicKey': identityPublicKey,
+      });
+
+  Future<List<Map<String, dynamic>>> fetchConversationDeviceKeys(
+    String userId,
+  ) async {
+    final data = await _get('/api/devices/identity-keys/$userId')
+        as Map<String, dynamic>;
+    return ((data['devices'] as List<dynamic>?) ?? const [])
+        .cast<Map<String, dynamic>>();
+  }
+
+  Future<Map<String, dynamic>> fetchConversationKeyEpochs(
+    String conversationId,
+  ) async =>
+      await _get('/api/conversations/$conversationId/key-epochs')
+          as Map<String, dynamic>;
+
+  Future<Map<String, dynamic>> publishConversationKeyEpoch({
+    required String conversationId,
+    required int epoch,
+    required List<Map<String, dynamic>> envelopes,
+  }) =>
+      _post('/api/conversations/$conversationId/key-epochs', {
+        'epoch': epoch,
+        'envelopes': envelopes,
+      });
+
+  Future<Map<String, dynamic>> addConversationKeyEnvelopes({
+    required String conversationId,
+    required int epoch,
+    required List<Map<String, dynamic>> envelopes,
+  }) =>
+      _post('/api/conversations/$conversationId/key-envelopes', {
+        'epoch': epoch,
+        'envelopes': envelopes,
+      });
+
+  Future<Map<String, dynamic>> fetchConversationKeyEnvelopes(
+    String conversationId, {
+    int? epoch,
+  }) async =>
+      await _get(
+        '/api/conversations/$conversationId/key-envelopes',
+        params: epoch == null ? null : {'epoch': epoch},
+      ) as Map<String, dynamic>;
+
+  Future<Map<String, dynamic>> createPairingSession(
+    String initiatorEphemeralPublic,
+  ) =>
+      _post('/api/devices/pairing/create', {
+        'initiatorEphemeralPublic': initiatorEphemeralPublic,
+      });
+
+  Future<Map<String, dynamic>> joinPairingSession({
+    required String sessionId,
+    required String installationId,
+    required String identityPublicKey,
+    required String joinedEphemeralPublic,
+    required String nonce,
+    required String ciphertext,
+    required String mac,
+  }) =>
+      _post('/api/devices/pairing/$sessionId/join', {
+        'installationId': installationId,
+        'identityPublicKey': identityPublicKey,
+        'joinedEphemeralPublic': joinedEphemeralPublic,
+        'nonce': nonce,
+        'ciphertext': ciphertext,
+        'mac': mac,
+      });
+
+  Future<Map<String, dynamic>> getPairingSession(String sessionId) async =>
+      await _get('/api/devices/pairing/$sessionId') as Map<String, dynamic>;
+
+  Future<Map<String, dynamic>> approvePairingSession(String sessionId) =>
+      _post('/api/devices/pairing/$sessionId/approve', const {});
+
+  Future<void> cancelPairingSession(String sessionId) async {
+    await _post('/api/devices/pairing/$sessionId/cancel', const {});
+  }
+
+  Future<List<Map<String, dynamic>>> fetchDevices() async {
+    final data = await _get('/api/devices') as Map<String, dynamic>;
+    return ((data['devices'] as List<dynamic>?) ?? const [])
+        .cast<Map<String, dynamic>>();
+  }
+
+  Future<void> revokeDevice(int deviceId) => _delete('/api/devices/$deviceId');
+
   Future<void> logout() => _post('/api/auth/logout', const {});
 
   Future<User> getMe() async {
@@ -252,13 +360,19 @@ class ApiService {
 
   Future<List<Message>> getMessages(
     String conversationId, {
-    int limit = 60,
+    int limit = 10,
     int? after,
     String? before,
+    DateTime? beforeCreatedAt,
   }) async {
     final params = <String, dynamic>{'limit': limit};
     if (after != null) params['after'] = after;
     if (before != null) params['before'] = before;
+    if (beforeCreatedAt != null) {
+      // Lets the Worker paginate when the cursor row has since expired or been
+      // deleted server-side.
+      params['beforeCreatedAt'] = beforeCreatedAt.millisecondsSinceEpoch ~/ 1000;
+    }
     final data = await _get(
       '/api/conversations/$conversationId/messages',
       params: params,
@@ -281,6 +395,25 @@ class ApiService {
       'payloads': payloads,
       'version': version,
       'messageType': messageType,
+    });
+  }
+
+  Future<void> editMessageV2(
+    String conversationId,
+    String messageId, {
+    required String ciphertext,
+    required String nonce,
+    required String authTag,
+    required int keyEpoch,
+    required int version,
+  }) async {
+    await _patch('/api/conversations/$conversationId/messages/$messageId', {
+      'encryptionVersion': 2,
+      'ciphertext': ciphertext,
+      'nonce': nonce,
+      'authTag': authTag,
+      'keyEpoch': keyEpoch,
+      'version': version,
     });
   }
 

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChatRoom } from '../src/sockets/chatRoom.js';
 import {
   countRows,
+  db,
   openSocket,
   resetDatabase,
   roomStub,
@@ -468,5 +469,66 @@ describe('ChatRoom inbox hubs', () => {
       }));
       expect(response.status).toBe(401);
     }
+  });
+});
+
+describe('ChatRoom v2 broadcast filtering', () => {
+  it('sends one ciphertext to v2 sessions and nothing to a legacy session', async () => {
+    const IDENTITY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+    await db.prepare(
+      `UPDATE devices SET encryption_version = 2, identity_public_key = ?
+       WHERE id IN (?, ?)`,
+    ).bind(IDENTITY, aliceDevice, bobDevice).run();
+    const legacyAlice = await seedDevice(ALICE, 'install-legacy');
+
+    const aliceToken = await tokenFor(ALICE);
+    const bobSocket = await openSocket(CONVERSATION, await tokenFor(BOB), bobDevice);
+    const aliceSocket = await openSocket(CONVERSATION, aliceToken, aliceDevice);
+    const legacySocket = await openSocket(CONVERSATION, aliceToken, legacyAlice);
+    await bobSocket.next();
+    await aliceSocket.next();
+    await legacySocket.next();
+
+    const delivered = await runInDurableObject(
+      roomStub(CONVERSATION),
+      async (_instance, state) => {
+        const woken = new ChatRoom(state, testEnv as unknown as Env);
+        return woken.broadcast({
+          type: 'new_message',
+          messageId: 'msg-v2',
+          conversationId: CONVERSATION,
+          senderId: ALICE,
+          senderDeviceId: aliceDevice,
+          recipients: [ALICE, BOB],
+          encryptionVersion: 2,
+          ciphertext: 'YWJj',
+          nonce: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+          authTag: 'AAAAAAAAAAAAAAAAAAAAAA==',
+          keyEpoch: 1,
+          messageType: 'signal',
+          replyToId: null,
+          createdAt: 1,
+          expiresAt: null,
+        });
+      },
+    );
+
+    expect(delivered).toBe(2);
+    for (const socket of [bobSocket, aliceSocket]) {
+      const frame = await socket.next(
+        (value) => value.type === 'new_message' && value.messageId === 'msg-v2',
+      );
+      expect(frame).toMatchObject({
+        encryptionVersion: 2,
+        ciphertext: 'YWJj',
+        nonce: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+        authTag: 'AAAAAAAAAAAAAAAAAAAAAA==',
+        keyEpoch: 1,
+      });
+    }
+
+    await expect(legacySocket.next(undefined, 150)).rejects.toThrow(
+      /no WebSocket frame/,
+    );
   });
 });

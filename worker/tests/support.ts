@@ -1,10 +1,11 @@
 import { env, runInDurableObject } from 'cloudflare:test';
+import { AnyD1Database } from 'drizzle-orm/d1';
 import { afterEach, expect } from 'vitest';
 import { signJWT } from '../src/utils/jwt.js';
 import type { Env } from '../src/types.js';
 
 export const testEnv = env as unknown as Env;
-export const db: D1Database = testEnv.DB;
+export const db: AnyD1Database = testEnv.DB;
 
 const trackedSockets = new Set<TestSocket>();
 const trackedRooms = new Set<string>();
@@ -15,6 +16,9 @@ export async function resetDatabase(): Promise<void> {
   const tables = [
     'media_views',
     'message_reactions',
+    'device_key_envelopes',
+    'pairing_sessions',
+    'conversation_key_epochs',
     'message_deliveries',
     'local_deletions',
     'messages',
@@ -57,6 +61,55 @@ export async function seedDevice(
     .bind(userId, installationId, status)
     .run();
   return Number(result.meta.last_row_id);
+}
+
+export async function seedConversationKeyDevice(
+  userId: string,
+  installationId: string,
+  identityPublicKey = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+): Promise<number> {
+  const result = await db.prepare(
+    `INSERT INTO devices
+       (user_id, installation_id, registration_id, identity_key,
+        signed_pre_key_id, signed_pre_key_public, signed_pre_key_signature,
+        status, created_at, encryption_version, identity_public_key)
+     VALUES (?, ?, 1, 'conversation-key-v2', 1, 'conversation-key-v2',
+             'conversation-key-v2', 'active', 0, 2, ?)`,
+  ).bind(userId, installationId, identityPublicKey).run();
+  return Number(result.meta.last_row_id);
+}
+
+export async function seedConversationKeyEpoch(
+  conversationId: string,
+  epoch: number,
+  senderDeviceId: number,
+  recipientDeviceIds: number[],
+): Promise<void> {
+  await db.batch([
+    db.prepare(
+      `UPDATE conversations SET key_epoch = ?, key_rotation_required = 0 WHERE id = ?`,
+    ).bind(epoch, conversationId),
+    db.prepare(
+      `INSERT INTO conversation_key_epochs (conversation_id, epoch, created_by_device_id, created_at)
+       VALUES (?, ?, ?, 0)`,
+    ).bind(conversationId, epoch, senderDeviceId),
+    ...recipientDeviceIds.map((recipientDeviceId) => db.prepare(
+      `INSERT INTO device_key_envelopes
+         (id, conversation_id, epoch, recipient_device_id, sender_device_id,
+          ephemeral_public_key, nonce, ciphertext, mac, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+    ).bind(
+      crypto.randomUUID(),
+      conversationId,
+      epoch,
+      recipientDeviceId,
+      senderDeviceId,
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+      'AAAAAAAAAAAAAAAAAAAAAA==',
+    )),
+  ]);
 }
 
 export async function seedConversation(

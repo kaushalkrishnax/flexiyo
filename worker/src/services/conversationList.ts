@@ -44,18 +44,38 @@ const BLOCKED_WHERE = `
           CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END)
        AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.is_unsent = 0)`;
 
-const UNREAD_COUNT = `(SELECT COUNT(DISTINCT md.message_id) FROM message_deliveries md
+const UNREAD_COUNT = `(
+      SELECT COUNT(DISTINCT md.message_id)
+      FROM message_deliveries md
       JOIN messages m ON m.id = md.message_id
       WHERE md.recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)
         AND md.read_at IS NULL
         AND m.conversation_id = c.id AND m.is_unsent = 0
-        AND m.sender_id != ?)`;
+        AND m.encryption_version = 1 AND m.sender_id != ?
+    ) + (
+      SELECT COUNT(*)
+      FROM messages m
+      WHERE m.conversation_id = c.id AND m.is_unsent = 0
+        AND m.encryption_version = 2 AND m.sender_id != ? AND m.read_at IS NULL
+    )`;
 
 /// When the conversant last read a message of mine (drives "Seen …" labels).
-const PEER_SEEN_AT = `(SELECT MAX(md.read_at) FROM message_deliveries md
-      JOIN messages m ON m.id = md.message_id
-      WHERE m.conversation_id = c.id AND m.sender_id = ?
-        AND m.is_unsent = 0 AND md.read_at IS NOT NULL)`;
+const PEER_SEEN_AT = `(
+      SELECT MAX(seen_at) FROM (
+        SELECT md.read_at AS seen_at
+        FROM message_deliveries md
+        JOIN messages m ON m.id = md.message_id
+        WHERE m.conversation_id = c.id AND m.sender_id = ?
+          AND m.is_unsent = 0 AND m.encryption_version = 1
+          AND md.read_at IS NOT NULL
+        UNION ALL
+        SELECT m.read_at AS seen_at
+        FROM messages m
+        WHERE m.conversation_id = c.id AND m.sender_id = ?
+          AND m.is_unsent = 0 AND m.encryption_version = 2
+          AND m.read_at IS NOT NULL
+      )
+    )`;
 
 /// Whether the newest message is mine, so the inbox only shows a read
 /// receipt when the conversant has seen that message.
@@ -70,8 +90,8 @@ export function conversationListQuery(
   scope: Exclude<ConversationScope, 'all'>,
 ): { sql: string; binds: string[] } {
   const binds: string[] = [];
-  binds.push(userId, userId); // unread sub-query
-  binds.push(userId, userId); // peer seen + last message sender
+  binds.push(userId, userId, userId); // v1 + v2 unread sub-queries
+  binds.push(userId, userId, userId); // v1 + v2 peer seen + last message sender
   binds.push(userId, userId); // participants selectors
   binds.push(userId, userId); // participants WHERE
   if (scope === 'inbox') {

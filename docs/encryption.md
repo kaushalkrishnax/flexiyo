@@ -1,202 +1,211 @@
 # Encryption Design and Implementation
 
-## Selected Protocol
+Flexiyo currently ships two message encryption versions side by side:
 
-**Signal Protocol** — specifically the combination of:
+- **Version 2 (conversation keys)** is used for all new messages. It uses
+  per-conversation keys, XChaCha20-Poly1305 authenticated encryption, and
+  X25519-wrapped key distribution to each authorized device.
+- **Version 1 (Signal Protocol)** remains available so messages written before
+  the migration still decrypt. New messages never use this path.
 
-- **X3DH** (Extended Triple Diffie–Hellman) for initial key agreement
-- **Double Ratchet Algorithm** for ongoing message encryption
-
-This is the same protocol used by Signal, WhatsApp, and other major secure messaging applications.
+`message.encryption_version` selects the path. The Worker never sees plaintext;
+D1 stores one ciphertext per v2 message rather than one copy per device.
 
 ---
 
-## Implementation
+## Version 2: Conversation Keys
 
-**Library**: [`libsignal_protocol_dart`](https://pub.dev/packages/libsignal_protocol_dart)  
-**Version**: 0.8.2  
-**Publisher**: mixin.dev (verified publisher)  
-**Repository**: [MixinNetwork/libsignal_protocol_dart](https://github.com/MixinNetwork/libsignal_protocol_dart)  
-**Language**: Pure Dart (no native C/C++ or Rust bindings required)  
-**Platform support**: Android, iOS, Linux, macOS, Windows, Web
+### Primitives
 
-This library is a port of the Signal Protocol Java implementation to Dart. It is used in production by the Mixin Messenger ecosystem.
+| Purpose | Primitive |
+|---|---|
+| Message encryption | XChaCha20-Poly1305 (24-byte nonce, 16-byte tag) |
+| Key wrapping | X25519 + HKDF-SHA256 + XChaCha20-Poly1305 |
+| Key derivation | HKDF-SHA256, 32-byte output |
+| Randomness | `Random.secure()` for conversation keys, secrets and nonces |
+| Implementation | [`cryptography`](https://pub.dev/packages/cryptography) 2.x on the client |
+
+### Key hierarchy
+
+| Key | Lifetime | Stored where |
+|---|---|---|
+| Conversation key (32 bytes) | One key epoch | Client secure storage, once per epoch |
+| Identity private seed (32 bytes) | Installation lifetime | Client secure storage |
+| Identity public key | Installation lifetime | D1 `devices.identity_public_key` |
+| Wrapping key | One envelope | Derived on demand, never stored |
+| Pairing secret (32 bytes) | One pairing session | Initiator secure storage only |
+| Pairing ephemeral private key | One pairing session | Initiator secure storage only |
+
+The Worker stores only public keys, opaque key envelopes, and epoch numbers.
+
+### Message format
+
+One v2 message row stores:
+
+- `ciphertext` — XChaCha20-Poly1305 ciphertext (base64)
+- `nonce` — 24-byte nonce (base64)
+- `auth_tag` — 16-byte Poly1305 tag (base64)
+- `key_epoch` — the conversation epoch used to encrypt it
+- `encryption_version = 2`
+
+Associated data is the JSON array:
+
+```json
+["flexiyo-message-v2", conversationId, messageId, keyEpoch]
+```
+
+Any change to the conversation id, message id, or epoch makes decryption fail
+with an authentication error. A failed decryption never returns partial
+plaintext; the client keeps the message in its encrypted state.
+
+Each encryption call generates a fresh 24-byte nonce with the library's CSPRNG.
+A nonce is never reused with the same conversation key.
+
+### Key envelopes
+
+A conversation key is wrapped once per authorized device:
+
+1. Generate an ephemeral X25519 key pair.
+2. Compute `shared = X25519(ephemeralPrivate, recipientIdentityPublic)`.
+3. Derive `wrappingKey = HKDF-SHA256(shared, salt = nonce, info = aad)`.
+4. Encrypt the 32-byte conversation key with XChaCha20-Poly1305.
+
+Envelope associated data is the JSON array:
+
+```json
+["flexiyo-key-envelope-v2", conversationId, epoch, recipientDeviceId]
+```
+
+Binding the recipient device id prevents an envelope from being replayed to a
+different device. Envelopes are stored in `device_key_envelopes` and are only
+returned to the device they address.
+
+### Epoch lifecycle
+
+- `conversations.key_epoch` is the highest published epoch (0 = none).
+- `conversation_key_epochs` records each published epoch.
+- Publishing an epoch is a compare-and-swap: `epoch = current + 1`, and the
+  conversation row is updated only when its `key_epoch` still matches. Two
+  concurrent creators therefore cannot fork an epoch; the loser re-reads and
+  unwraps the winner's key.
+- A publish must contain exactly one envelope for every active v2 device of
+  both participants. Missing, duplicate, or foreign device ids are rejected.
+- A send is rejected with `key_epoch_conflict` when its epoch is not current.
+- When a device is revoked, `key_rotation_required` is set on every
+  conversation of that account. Sends fail with `key_rotation_required` until
+  a new epoch is published without the revoked device.
+- After rotation, remaining devices continue to read older messages through the
+  locally stored key for the old epoch.
+
+Conversation keys are cached in memory and in secure storage per
+`userId + conversationId + epoch`. A missing unwrapped key triggers an envelope
+fetch; there is no plaintext or stale-key fallback.
+
+### Device bootstrap and pairing
+
+- `POST /api/devices/v2/register` creates the first conversation-key device
+  only when the account has no active device.
+- `POST /api/devices/v2/upgrade` converts a legacy (v1) installation in place.
+  It is only accepted while the account has **no** active v2 device; after
+  that, a silent upgrade is rejected with `pairing_required`.
+- Additional installations must be approved by an existing v2 device through
+  QR pairing. See [pairing.md](pairing.md).
+
+### Device revocation
+
+`DELETE /api/devices/:id` closes the device's sockets, deletes the device row
+(and its pre-keys/envelopes through foreign keys), and marks every conversation
+of that account as rotation-required. The next send publishes a new epoch whose
+envelopes omit the revoked device. A revoked device cannot receive new
+envelopes or messages. It may still hold keys for earlier epochs and therefore
+can read messages it already had access to.
+
+### What the server can and cannot do
+
+The Worker can:
+
+- refuse to store or deliver messages (availability),
+- observe message timing, sizes, participants, and epoch numbers,
+- relay opaque envelopes and pairing proofs.
+
+The Worker cannot:
+
+- derive conversation or wrapping keys,
+- decrypt message ciphertext,
+- forge a message that authenticates under a conversation key,
+- silently substitute pairing keys: the initiator verifies an AEAD proof bound
+  to the session, installation id, and joined identity key before approval.
+
+---
+
+## Version 1: Legacy Signal Protocol
+
+The original implementation remains for rows with `encryption_version = 1`.
+It uses `libsignal_protocol_dart`:
+
+- X3DH for initial agreement.
+- Double Ratchet for subsequent messages.
+- AES-256-CBC + HMAC-SHA256 inside the ratchet.
+- One ciphertext per recipient device, stored in `message_deliveries`.
+
+V1 rows are still decrypted by `SignalCryptoService`. V1 edit, delete, and
+unsend paths remain in place. No new message is written as v1.
+
+### Compatibility rules
+
+- A row is handled as v2 only when `encryption_version == 2` **and** the
+  ciphertext, nonce, tag, and epoch fields are present.
+- Malformed v2 metadata produces a controlled "not decrypted" state, not a
+  plaintext or legacy fallback.
+- V1 rows are never passed through the v2 service, and v2 rows are never passed
+  through the Double Ratchet.
+- Local caches store the version alongside the ciphertext so offline
+  restoration picks the same path.
+
+The v1 implementation is preserved on the `archive/signal-e2ee` branch.
 
 ---
 
 ## Licence
 
-**`libsignal_protocol_dart` is licensed under GPL-3.0.**
+`libsignal_protocol_dart` is licensed under GPL-3.0. Flexiyo is distributed
+under AGPL-3.0; linking the two is permitted under GPLv3 section 13.
 
-### Obligations
+Under GPL-3.0, distributions must:
 
-Under GPL-3.0, if you distribute an application that links or incorporates this library, you must:
-
-1. Make the corresponding complete source code of the application available to recipients under the GPL-3.0 or a compatible licence.
-2. Include the GPL-3.0 licence text with the distribution.
+1. Make the corresponding complete source code available to recipients under
+   the GPL-3.0 or a compatible licence.
+2. Include the GPL-3.0 licence text.
 3. Preserve all copyright and licence notices.
 
-Flexiyo is distributed under the GNU Affero General Public License v3.0 (AGPL-3.0). Under Section 13 of GPLv3, linking with AGPL-3.0 code into a single combined work is explicitly permitted, satisfying the source-disclosure and copyleft requirements of `libsignal_protocol_dart`.
-
-The `libsignal_protocol_dart` copyright notice must be preserved and included in distributions. See the [LICENSE file](https://github.com/MixinNetwork/libsignal_protocol_dart/blob/main/LICENSE) in the upstream repository.
-
----
-
-## Key Types
-
-| Key | Description | Where stored |
-|---|---|---|
-| Identity key pair | Long-term device identity (Curve25519) | Private: flutter_secure_storage / Public: D1 |
-| Signed pre-key pair | Medium-term ephemeral key, signed by identity key | Private: flutter_secure_storage / Public: D1 |
-| One-time pre-keys | Single-use keys for X3DH (batch of 100) | Private: flutter_secure_storage / Public: D1 (consumed on use) |
-| Session state | Double Ratchet state per conversation | Encrypted in sqflite local DB |
-| Message keys | Derived per-message during ratchet | Never stored; derived and discarded |
+The `libsignal_protocol_dart` copyright notice must be preserved and included
+in distributions. See the upstream LICENSE file:
+<https://github.com/MixinNetwork/libsignal_protocol_dart/blob/main/LICENSE>.
 
 ---
 
-## Key Generation
+## Known limitations
 
-At registration time, the Flutter client generates:
+- **No per-message forward secrecy within an epoch.** Anyone who obtains a
+  conversation key can decrypt every message encrypted under that epoch.
+  Rotation limits the window but does not eliminate it.
+- **Compromised installation.** An attacker who controls an authorized
+  installation and its secure storage can read messages delivered to it. The
+  protocol does not provide post-compromise security.
+- **Revocation is forward-looking.** Revoking a device cannot erase keys or
+  plaintext it already received.
+- **Provisioning requires the initiating device.** When a new device pairs, the
+  approving device must be online to wrap the current keys for every existing
+  conversation. Conversations created after pairing are handled automatically.
+- **No independent audit.** The implementation has not been independently
+  audited. Do not treat it as a replacement for a reviewed protocol in a
+  high-risk deployment.
+- **Metadata is visible.** The server sees participants, timestamps, message
+  sizes, and epoch numbers. Message content, keys, and pairing secrets are not
+  sent to the server.
 
-```dart
-final identityKeyPair = generateIdentityKeyPair();        // Curve25519 keypair
-final registrationId = generateRegistrationId(false);     // Random 14-bit integer
-final preKeys = generatePreKeys(0, 100);                  // 100 one-time pre-keys
-final signedPreKey = generateSignedPreKey(identityKeyPair, 0); // Signed with identity key
-```
+## Related documents
 
-The private parts of all keys are stored exclusively in flutter_secure_storage. The public parts are uploaded to the server as a key bundle.
-
----
-
-## Key Storage
-
-### Private keys
-
-Stored in **flutter_secure_storage**:
-
-- iOS: Keychain Services (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`)
-- Android: Android Keystore + EncryptedSharedPreferences
-
-Private keys are never written to disk in plaintext, never logged, and never transmitted to the server.
-
-### Session state
-
-The Signal Protocol Double Ratchet maintains a session state that evolves with each message. This state is serialized and stored in a local sqflite table (`signal_sessions`). It is not end-to-end encrypted at rest beyond device encryption, but it cannot decrypt messages without the private identity key.
-
-### Server storage
-
-The server stores in D1:
-- Public identity key (base64)
-- Signed pre-key ID, public key, and identity-key signature
-- One-time pre-keys (public only; consumed on use)
-
-The server does **not** store:
-- Any private key material
-- Session state
-- Derived message keys
-
----
-
-## Session Establishment (X3DH)
-
-When Alice wants to send the first message to Bob:
-
-1. Alice fetches Bob's public key bundle from the server (`GET /api/devices/:userId/key-bundle`).
-2. The server provides Bob's identity key, signed pre-key, and one one-time pre-key (removing it from the store).
-3. Alice's client calls `sessionBuilder.processPreKeyBundle(bundle)` from libsignal_protocol_dart.
-4. This executes the X3DH handshake locally, producing a shared secret.
-5. Alice can now encrypt a message using `sessionCipher.encrypt()`.
-6. The resulting ciphertext is a `PreKeySignalMessage` (type 3) — it contains enough information for Bob to complete the handshake.
-7. Bob, on receiving this message, calls `sessionCipher.decryptPreKeyWhisperMessage()`, which completes the X3DH from his side and establishes the session.
-
-No plaintext is transmitted at any point. The server delivers the encrypted `PreKeySignalMessage` ciphertext without being able to read it.
-
----
-
-## Message Encryption (Double Ratchet)
-
-After session establishment, every message uses the Double Ratchet:
-
-1. The sender calls `sessionCipher.encrypt(utf8.encode(plaintext))`.
-2. This returns a `CiphertextMessage` (a `SignalMessage`, type 1 after the initial handshake).
-3. The ciphertext bytes are base64-encoded and sent to the server as `encryptedPayload`.
-4. The recipient fetches the message and calls `sessionCipher.decrypt(message)`.
-5. The Double Ratchet advances: forward secrecy is provided because past session states are deleted.
-
-### Authenticated encryption
-
-The Signal Protocol uses AES-256-CBC with HMAC-SHA256 (via the Double Ratchet's symmetric ratchet). Messages are authenticated; tampering causes decryption to fail.
-
----
-
-## Message Editing (E2EE)
-
-Edits are also encrypted:
-
-1. The sender re-encrypts the new plaintext with the current session cipher.
-2. The server replaces the `encrypted_payload` in D1.
-3. The recipient decrypts the new payload.
-
-Note: The session state advances with each encrypt/decrypt call. A replay of an old encrypted edit is rejected by the ratchet's message counter.
-
----
-
-## Key Rotation
-
-### One-time pre-keys
-
-The server maintains a pool of one-time pre-keys. When a session is established, one is consumed. The Flutter client monitors the remaining count (`GET /api/devices/prekeys/count`) and replenishes when low (`POST /api/devices/prekeys/replenish`).
-
-If no one-time pre-keys are available, the server returns a bundle without one (using only the signed pre-key). This is less ideal (reduces forward secrecy of the initial handshake) but is a supported fallback in the X3DH specification.
-
-### Signed pre-key rotation
-
-Signed pre-keys should be rotated periodically (e.g., weekly). The initial implementation does not automate this rotation. Future work should implement periodic signed pre-key rotation with server-side replacement.
-
-### Identity key
-
-Identity keys are long-term. Changing the identity key on a device resets all sessions. Recipients are not automatically notified of identity key changes in the initial implementation (a TOFU-trust model). Future work should implement safety number verification.
-
----
-
-## Device Management
-
-The initial release supports one device per user. The `devices` table in D1 enforces `UNIQUE(user_id, device_id)`.
-
-Multi-device sync (e.g., sending to multiple devices, sealed sender) is not implemented in the initial release and would require significant additional protocol work.
-
----
-
-## Session Recovery
-
-If session state is lost (e.g., app reinstall, local DB deletion), the client must:
-
-1. Re-register device with fresh keys (`POST /api/devices/register`).
-2. Old sessions with other users are broken — they will need to establish a new session.
-3. Messages encrypted under old sessions cannot be decrypted.
-
-This is a fundamental property of the Signal Protocol's forward secrecy: no recovery of past messages is possible after key loss.
-
----
-
-## Message Deletion and Expiration Guarantees
-
-### What is guaranteed
-
-- The server will not return expired or unsent messages through normal API calls.
-- The server will delete `encrypted_payload` from D1 for expired messages via the scheduled cleanup.
-- Connected recipients receive real-time deletion/expiry events via Durable Objects.
-- Offline recipients receive deletion/expiry state on reconnection via normal message history queries.
-- Local tombstones prevent deleted messages from reappearing after sync.
-
-### What is NOT guaranteed
-
-- **Recipient already read it**: Once a recipient has decrypted and displayed a message, the plaintext exists on their device. Unsending or expiring cannot erase it from their screen, memory, or notes.
-- **Screenshots**: Cannot be prevented or detected.
-- **Backups**: Device backups may contain the local sqflite database including decrypted message cache.
-- **Flash storage forensics**: Deleted rows in sqflite may persist in unallocated flash pages.
-- **External copies**: If the recipient copied, exported, or screen-recorded the message, those copies are outside the application's control.
-- **Offline devices**: A device that receives a message while online and then goes offline before the expiry cleanup cannot have its local copy remotely deleted. The application enforces expiry locally using the `expires_at` timestamp that was included in the message metadata.
-
-Do not rely on disappearing messages or unsend as a guarantee of permanent deletion. They are best-effort mechanisms for removing application-managed copies.
+- [pairing.md](pairing.md) — QR pairing protocol and trust assumptions
+- [security.md](security.md) — threat model
+- [architecture.md](architecture.md) — components and data flow

@@ -576,3 +576,62 @@ describe('DELETE /api/conversations/:id/messages/:messageId', () => {
     expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(1);
   });
 });
+
+describe('GET /api/conversations/:id/messages pagination', () => {
+  async function seedTimeline(count: number): Promise<string[]> {
+    const ids: string[] = [];
+    for (let i = 1; i <= count; i += 1) {
+      const id = crypto.randomUUID();
+      ids.push(id);
+      await seedMessage(id, CONVERSATION, ALICE, {
+        senderDeviceId: aliceDevice,
+        createdAt: i,
+      });
+    }
+    return ids;
+  }
+
+  it('returns the latest page and an older page without duplicates', async () => {
+    const ids = await seedTimeline(25);
+
+    const first = await api('GET', `/api/conversations/${CONVERSATION}/messages?limit=10`, {
+      installation: 'install-alice',
+    });
+    expect(first.status).toBe(200);
+    const firstPage = (await first.json()) as Array<{ id: string }>;
+    expect(firstPage.map((m) => m.id)).toEqual(ids.slice(15).reverse());
+
+    const cursor = firstPage[firstPage.length - 1].id;
+    const second = await api(
+      'GET',
+      `/api/conversations/${CONVERSATION}/messages?limit=10&before=${cursor}&beforeCreatedAt=16`,
+      { installation: 'install-alice' },
+    );
+    expect(second.status).toBe(200);
+    const secondPage = (await second.json()) as Array<{ id: string }>;
+    expect(secondPage.map((m) => m.id)).toEqual(ids.slice(5, 15).reverse());
+    expect(secondPage.some((m) => firstPage.some((p) => p.id === m.id))).toBe(false);
+  });
+
+  it('falls back to the client timestamp when the cursor row is gone', async () => {
+    const ids = await seedTimeline(25);
+    const cursor = ids[15];
+    await db.prepare('DELETE FROM messages WHERE id = ?').bind(cursor).run();
+
+    const withoutTimestamp = await api(
+      'GET',
+      `/api/conversations/${CONVERSATION}/messages?limit=10&before=${cursor}`,
+      { installation: 'install-alice' },
+    );
+    expect(withoutTimestamp.status).toBe(404);
+
+    const response = await api(
+      'GET',
+      `/api/conversations/${CONVERSATION}/messages?limit=10&before=${cursor}&beforeCreatedAt=16`,
+      { installation: 'install-alice' },
+    );
+    expect(response.status).toBe(200);
+    const page = (await response.json()) as Array<{ id: string }>;
+    expect(page.map((m) => m.id)).toEqual(ids.slice(5, 15).reverse());
+  });
+});

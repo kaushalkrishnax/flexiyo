@@ -56,13 +56,11 @@ flexiyo/
 │   ├── app/                  # App widget and router
 │   ├── core/                 # Constants, theme, exceptions
 │   ├── models/               # Data models
-│   ├── services/             # API and WebSocket services
-│   ├── repositories/         # Data access layer
+│   ├── services/             # API, WebSocket, conversation-key and Signal services
 │   ├── providers/            # Riverpod state
-│   ├── screens/              # UI screens
+│   ├── screens/              # UI screens (auth, chats, conversation, settings, media)
 │   ├── widgets/              # Reusable widgets
-│   ├── crypto/               # Signal Protocol integration
-│   ├── storage/              # Local DB and secure storage
+│   ├── storage/              # Local DB, secure storage, conversation-key store
 │   └── main.dart
 ├── worker/                   # Cloudflare Worker backend
 │   ├── src/
@@ -83,7 +81,52 @@ flexiyo/
 
 ---
 
-## Data Flow: Sending a Message
+## Data Flow: Sending a Conversation-Key (v2) Message
+
+```
+Sender device                   Worker (ChatRoom DO)          Recipient device
+     │                             │                              │
+     │ 1. Ensure current epoch     │                              │
+     │    (unwrap key envelope)    │                              │
+     │    Encrypt once with        │                              │
+     │    XChaCha20-Poly1305       │                              │
+     │    AAD = conversation/message/epoch                         │
+     │                             │                              │
+     │ 2. WSS send_message         │                              │
+     │    {requestId, id,          │                              │
+     │     encryptionVersion: 2,   │                              │
+     │     ciphertext, nonce,      │                              │
+     │     authTag, keyEpoch}      │                              │
+     │────────────────────────────►│                              │
+     │                             │ 3. Validate auth/device/     │
+     │                             │    membership/epoch/rotation │
+     │                             │    Idempotent retry check    │
+     │                             │ 4. Persist ONE message row   │
+     │                             │    to D1; no per-device rows │
+     │                             │ 5. Broadcast the SAME        │
+     │                             │    ciphertext to authorized  │
+     │                             │    v2 devices                │
+     │◄──────── 6. ack {ok,id}     │─────────────────────────────►│
+     │    (only after D1 persist)  │    {type: new_message,       │
+     │                             │     ciphertext, nonce, ...}  │
+     │                             │                              │
+     │ 7. Mark optimistic message  │              8. Receive event│
+     │    sent                     │                 Resolve epoch│
+     │                             │                 key, decrypt │
+     │                             │                 Display      │
+```
+
+The Worker never sees plaintext or conversation keys. It stores and forwards
+the ciphertext verbatim; each device obtains the conversation key from its own
+`device_key_envelopes` row. A message is marked sent only after the server
+`ack`; retries reuse the same message `id` and are idempotent.
+
+Legacy Signal delivery (below) is still used for `encryption_version = 1` rows
+written before the migration.
+
+---
+
+## Data Flow: Legacy (v1) Signal Message
 
 ```
 Sender device                   Worker (ChatRoom DO)          Recipient device
@@ -180,24 +223,66 @@ HTTP request to Worker
 
 ---
 
+## Data Flow: QR Device Pairing
+
+See [pairing.md](pairing.md) for the full protocol.
+
+```
+Existing device (A)             Worker                       New device (B)
+  │                                │                              │
+  │ 1. Generate E_A + pairingSecret│                              │
+  │ 2. POST /devices/pairing/create│                              │
+  │───────────────────────────────►│ store pending session        │
+  │◄───────────────────────────────│ expiresAt                    │
+  │ 3. Render QR (secret only in   │                              │
+  │    the QR payload)             │                              │
+  │                                │   4. Scan / paste QR         │
+  │                                │◄─────────────────────────────│
+  │                                │   5. POST .../:id/join with  │
+  │                                │      E_B + AEAD proof        │
+  │ 6. GET .../:id (poll)          │                              │
+  │───────────────────────────────►│                              │
+  │◄───────────────────────────────│ status=joined + proof        │
+  │ 7. Derive shared secret,       │                              │
+  │    verify AEAD proof locally   │                              │
+  │ 8. POST .../:id/approve        │                              │
+  │───────────────────────────────►│ create/promote device        │
+  │◄───────────────────────────────│ deviceId                     │
+  │ 9. Wrap current keys to B for  │                              │
+  │    each conversation           │                              │
+  │───────────────────────────────►│ device_key_envelopes         │
+  │                                │   10. GET .../:id (poll)     │
+  │                                │◄─────────────────────────────│
+  │                                │─────────────────────────────►│
+  │                                │      11. accept device id    │
+```
+
+The pairing secret never reaches the Worker. Approval is restricted to the
+device that created the session, and the proof binds the session id,
+installation id, and joining identity key.
+
+---
+
 ## Local Storage (Flutter)
 
 ### sqflite tables
 
 | Table | Purpose |
 |---|---|
-| `messages` | Cached message records (encrypted + decrypted) |
+| `messages` | Cached message records (encrypted + decrypted, with `encryption_version`, `nonce`, `auth_tag`, `key_epoch`) |
 | `conversations` | Cached conversation metadata |
-| `signal_sessions` | Double Ratchet session state |
+| `signal_sessions` | Double Ratchet session state (legacy v1 only) |
 
 ### flutter_secure_storage
 
 Stores:
 - JWT access token
-- Signal identity key pair (serialized)
-- Signed pre-key pair (serialized)
-- One-time pre-key pairs (serialized)
-- Registration ID
+- Installation id
+- v2 X25519 identity key seed and public key (per account)
+- v2 device id (per account)
+- Conversation keys per `conversation + epoch`
+- Pairing ephemeral seed and secret while a session is pending
+- Signal identity key pair, signed pre-key pair, and one-time pre-key pairs (legacy v1)
 
 ---
 
@@ -260,19 +345,39 @@ Flutter client:
 ## D1 Schema Summary
 
 ```sql
-users                  (id, username, password_hash, created_at)
+users                  (id, username, password_hash, email, google_id,
+                        email_verified, created_at)
 token_revocations      (jti, user_id, expires_at)
-devices                (id, user_id, device_id, registration_id, identity_key,
-                        signed_pre_key_id, signed_pre_key_public,
-                        signed_pre_key_signature, created_at)
-pre_keys               (id, user_id, key_id, public_key, used, created_at)
-conversations          (id, user_a_id, user_b_id, disappearing_timer,
-                        created_at, last_message_at)
-messages               (id, conversation_id, sender_id, encrypted_payload,
-                        message_type, version, is_unsent, created_at,
-                        expires_at, edited_at, system_data)
+devices                (id, user_id, installation_id, legacy_device_id,
+                        registration_id, identity_key, signed_pre_key_id,
+                        signed_pre_key_public, signed_pre_key_signature,
+                        status, created_at, last_seen_at, revoked_at,
+                        encryption_version, identity_public_key)
+pre_keys               (id, device_id, key_id, public_key, consumed_at,
+                        created_at)
+conversations          (id, user_a_id, user_b_id, initiated_by_id,
+                        request_status, disappearing_timer, created_at,
+                        last_message_at, key_epoch, key_rotation_required)
+messages               (id, conversation_id, sender_id, sender_device_id,
+                        ciphertext, nonce, auth_tag, key_epoch,
+                        encryption_version, message_type, reply_to_id, version,
+                        is_unsent, created_at, expires_at, edited_at,
+                        system_data, reaction, delivered_at, read_at)
+conversation_key_epochs(conversation_id, epoch, created_by_device_id,
+                        created_at)
+device_key_envelopes   (id, conversation_id, epoch, recipient_device_id,
+                        sender_device_id, ephemeral_public_key, nonce,
+                        ciphertext, mac, created_at)
+pairing_sessions       (id, user_id, initiator_device_id,
+                        initiator_ephemeral_public, status,
+                        joined_installation_id, joined_identity_public,
+                        joined_ephemeral_public, joined_nonce,
+                        joined_ciphertext, joined_mac, approved_device_id,
+                        created_at, expires_at, approved_at)
 local_deletions        (id, user_id, message_id, deleted_at)
-message_delivery       (id, message_id, recipient_id, delivered_at)
+message_deliveries     (id, message_id, recipient_device_id,
+                        sender_device_id, payload, message_type,
+                        delivered_at, read_at, created_at)  -- v1 rows only
 ```
 
 ---

@@ -2,7 +2,7 @@ import { IRequest, Router } from 'itty-router';
 import { z } from 'zod';
 import type { AuthenticatedRequest, Env } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
-import { resolveRequestDevice } from '../middleware/device.js';
+import { isActiveV2Device, resolveRequestDevice } from '../middleware/device.js';
 import { generateId } from '../utils/crypto.js';
 import { readJsonBody } from '../utils/http.js';
 import { getConversationForMember } from './conversations.js';
@@ -50,13 +50,13 @@ function parseEnvelopes(
   return { ok: true, rows: envelopes };
 }
 
-async function activeV2DeviceIds(env: Env, userIds: string[]): Promise<number[]> {
+async function activeDeviceIds(env: Env, userIds: string[]): Promise<number[]> {
   const placeholders = userIds.map(() => '?').join(', ');
   const rows = await env.DB.prepare(
     `SELECT id FROM devices
      WHERE user_id IN (${placeholders})
        AND status = 'active'
-       AND encryption_version = 2
+       AND identity_public_key IS NOT NULL
      ORDER BY id`,
   )
     .bind(...userIds)
@@ -102,7 +102,7 @@ keysRouter.post(
     }
 
     const device = await resolveRequestDevice(request, env, userId);
-    if (!device || device.status !== 'active' || device.encryption_version !== 2) {
+    if (!isActiveV2Device(device)) {
       return json({ error: 'An active conversation-key device is required' }, 403);
     }
 
@@ -131,15 +131,20 @@ keysRouter.post(
     const participantDeviceCounts = await env.DB.prepare(
       `SELECT
          (SELECT COUNT(*) FROM devices
-          WHERE user_id = ? AND status = 'active' AND encryption_version = 2) AS own_count,
+          WHERE user_id = ? AND status = 'active' AND identity_public_key IS NOT NULL) AS own_count,
          (SELECT COUNT(*) FROM devices
-          WHERE user_id = ? AND status = 'active' AND encryption_version = 2) AS peer_count`,
-    ).bind(userId, peerId).first<{ own_count: number; peer_count: number }>();
-    if (!participantDeviceCounts || participantDeviceCounts.own_count < 1 ||
-        participantDeviceCounts.peer_count < 1) {
+          WHERE user_id = ? AND status = 'active' AND identity_public_key IS NOT NULL) AS peer_count`,
+    )
+      .bind(userId, peerId)
+      .first<{ own_count: number; peer_count: number }>();
+    if (
+      !participantDeviceCounts ||
+      participantDeviceCounts.own_count < 1 ||
+      participantDeviceCounts.peer_count < 1
+    ) {
       return json({ error: 'both_participants_need_active_v2_devices' }, 409);
     }
-    const allowed = new Set(await activeV2DeviceIds(env, [userId, peerId]));
+    const allowed = new Set(await activeDeviceIds(env, [userId, peerId]));
     for (const envelope of parsedEnvelopes.rows) {
       if (!allowed.has(envelope.recipientDeviceId)) {
         return json({ error: 'unknown_device', deviceId: envelope.recipientDeviceId }, 400);
@@ -199,21 +204,28 @@ keysRouter.post(
       if ((results[0].meta.changes ?? 0) !== 1) {
         const current = await env.DB.prepare(
           'SELECT key_epoch FROM conversations WHERE id = ?',
-        ).bind(id).first<{ key_epoch: number }>();
+        )
+          .bind(id)
+          .first<{ key_epoch: number }>();
         return json({ error: 'epoch_conflict', currentEpoch: current?.key_epoch ?? 0 }, 409);
       }
     } catch {
       const current = await env.DB.prepare(
         'SELECT key_epoch FROM conversations WHERE id = ?',
-      ).bind(id).first<{ key_epoch: number }>();
+      )
+        .bind(id)
+        .first<{ key_epoch: number }>();
       return json({ error: 'epoch_conflict', currentEpoch: current?.key_epoch ?? 0 }, 409);
     }
 
-    return json({
-      conversationId: id,
-      epoch: parsed.data.epoch,
-      envelopes: parsedEnvelopes.rows.length,
-    }, 201);
+    return json(
+      {
+        conversationId: id,
+        epoch: parsed.data.epoch,
+        envelopes: parsedEnvelopes.rows.length,
+      },
+      201,
+    );
   },
 );
 
@@ -227,7 +239,7 @@ keysRouter.post(
     if (!conversation) return json({ error: 'Conversation not found' }, 404);
 
     const device = await resolveRequestDevice(request, env, userId);
-    if (!device || device.status !== 'active' || device.encryption_version !== 2) {
+    if (!isActiveV2Device(device)) {
       return json({ error: 'An active conversation-key device is required' }, 403);
     }
 
@@ -246,13 +258,17 @@ keysRouter.post(
 
     const epochExists = await env.DB.prepare(
       `SELECT 1 FROM conversation_key_epochs WHERE conversation_id = ? AND epoch = ?`,
-    ).bind(id, parsed.data.epoch).first<{ 1: number }>();
+    )
+      .bind(id, parsed.data.epoch)
+      .first<{ 1: number }>();
     if (!epochExists) return json({ error: 'epoch_not_found' }, 404);
 
     const allowedRows = await env.DB.prepare(
       `SELECT id FROM devices
-       WHERE user_id = ? AND status = 'active' AND encryption_version = 2`,
-    ).bind(userId).all<{ id: number }>();
+       WHERE user_id = ? AND status = 'active' AND identity_public_key IS NOT NULL`,
+    )
+      .bind(userId)
+      .all<{ id: number }>();
     const allowed = new Set((allowedRows.results ?? []).map((row) => row.id));
     for (const envelope of parsedEnvelopes.rows) {
       if (!allowed.has(envelope.recipientDeviceId)) {
@@ -309,28 +325,29 @@ keysRouter.get(
     if (!conversation) return json({ error: 'Conversation not found' }, 404);
 
     const device = await resolveRequestDevice(request, env, userId);
-    if (!device || device.status !== 'active' || device.encryption_version !== 2) {
+    if (!isActiveV2Device(device)) {
       return json({ error: 'Device registration required' }, 403);
     }
 
     const epochRaw = new URL(request.url).searchParams.get('epoch');
     const epoch = epochRaw == null ? null : Number.parseInt(epochRaw, 10);
-    const rows = epoch == null
-      ? await env.DB.prepare(
-          `SELECT conversation_id, epoch, ephemeral_public_key, nonce, ciphertext, mac
-           FROM device_key_envelopes
-           WHERE conversation_id = ? AND recipient_device_id = ?
-           ORDER BY epoch ASC`,
-        )
-          .bind(id, device.id)
-          .all<Record<string, unknown>>()
-      : await env.DB.prepare(
-          `SELECT conversation_id, epoch, ephemeral_public_key, nonce, ciphertext, mac
-           FROM device_key_envelopes
-           WHERE conversation_id = ? AND recipient_device_id = ? AND epoch = ?`,
-        )
-          .bind(id, device.id, Number.isInteger(epoch) ? epoch : -1)
-          .all<Record<string, unknown>>();
+    const rows =
+      epoch == null
+        ? await env.DB.prepare(
+            `SELECT conversation_id, epoch, ephemeral_public_key, nonce, ciphertext, mac
+             FROM device_key_envelopes
+             WHERE conversation_id = ? AND recipient_device_id = ?
+             ORDER BY epoch ASC`,
+          )
+            .bind(id, device.id)
+            .all<Record<string, unknown>>()
+        : await env.DB.prepare(
+            `SELECT conversation_id, epoch, ephemeral_public_key, nonce, ciphertext, mac
+             FROM device_key_envelopes
+             WHERE conversation_id = ? AND recipient_device_id = ? AND epoch = ?`,
+          )
+            .bind(id, device.id, Number.isInteger(epoch) ? epoch : -1)
+            .all<Record<string, unknown>>();
 
     return json({
       conversationId: id,

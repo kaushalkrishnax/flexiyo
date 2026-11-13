@@ -14,6 +14,10 @@ Message serverShapedMessage(String id) => Message(
       senderId: 'user-a',
       senderDeviceId: 3,
       encryptedPayload: 'c2lnbmFsLWNpcGhlcnRleHQ=',
+      encryptionVersion: 2,
+      nonce: 'bm9uY2UtMjQtYnl0ZXMtcGxhY2Vob2xkZXI=',
+      authTag: 'YXV0aC10YWctMTYtYnl0ZXM=',
+      keyEpoch: 1,
       messageType: MessageType.signal,
       version: 1,
       createdAt: DateTime.fromMillisecondsSinceEpoch(1792331831000),
@@ -93,10 +97,14 @@ void main() {
     expect(rows, hasLength(1));
     final restored = Message.fromDbJson(rows.single);
     expect(restored.senderDeviceId, 3);
+    expect(restored.encryptionVersion, 2);
+    expect(restored.nonce, 'bm9uY2UtMjQtYnl0ZXMtcGxhY2Vob2xkZXI=');
+    expect(restored.authTag, 'YXV0aC10YWctMTYtYnl0ZXM=');
+    expect(restored.keyEpoch, 1);
     expect(restored.encryptedPayload, 'c2lnbmFsLWNpcGhlcnRleHQ=');
   });
 
-  test('v7 databases gain sender_device_id on upgrade without losing rows',
+  test('v7 to v10 upgrade drops signal_sessions and purges un-upgraded V1 rows while preserving V2 rows',
       () async {
     final dbPath = p.join(tempDir.path, 'upgrade.db');
     final oldDb = await databaseFactory.openDatabase(
@@ -107,14 +115,22 @@ void main() {
           await db.execute(_v7MessagesSchema);
           await db.execute(_v7ConversationsSchema);
           await db.execute(_v7ConversationSettingsSchema);
+          await db.execute('''
+            CREATE TABLE signal_sessions (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              data TEXT NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+          ''');
         },
       ),
     );
     await oldDb.insert('messages', {
-      'id': 'm-old',
+      'id': 'm-old-v1',
       'conversation_id': 'conv-1',
       'sender_id': 'user-b',
-      'decrypted_text': 'kept across upgrade',
+      'decrypted_text': 'legacy plaintext',
       'message_type': 'signal',
       'version': 1,
       'is_unsent': 0,
@@ -123,22 +139,32 @@ void main() {
       'created_at': 1792331831000,
       'status': 'sent',
     });
+    await oldDb.insert('signal_sessions', {
+      'id': 's-1',
+      'name': 'session',
+      'data': 'blob',
+      'updated_at': 1792331831000,
+    });
     await oldDb.close();
 
     LocalDb.instance.debugDatabasePath = dbPath;
     await LocalDb.instance.initialize();
 
     final before = await LocalDb.instance.getMessages('conv-1');
-    expect(before, hasLength(1));
-    expect(before.single['decrypted_text'], 'kept across upgrade');
+    expect(before, isEmpty);
 
     await LocalDb.instance.upsertMessage(serverShapedMessage('m-new').toJson());
 
     final after = await LocalDb.instance.getMessages('conv-1');
-    expect(after.map((row) => row['id']), containsAll(['m-old', 'm-new']));
-    expect(
-      after.firstWhere((row) => row['id'] == 'm-new')['sender_device_id'],
-      3,
+    expect(after, hasLength(1));
+    expect(after.single['id'], 'm-new');
+    expect(after.single['sender_device_id'], 3);
+    expect(after.single['encryption_version'], 2);
+
+    final db = await LocalDb.instance.db;
+    final tables = await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'signal_sessions'",
     );
+    expect(tables, isEmpty);
   });
 }

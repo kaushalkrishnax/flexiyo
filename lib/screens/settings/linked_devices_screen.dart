@@ -261,9 +261,7 @@ class _DeviceTile extends StatelessWidget {
     final theme = Theme.of(context);
     final subtitle = <String>[
       current ? 'This device' : _statusLabel(device),
-      device.supportsConversationKeys
-          ? 'Conversation key'
-          : 'Legacy — cannot read new messages',
+      'Conversation key',
       if (device.lastSeenAt != null) _relativeTime(device.lastSeenAt!),
     ].join(' • ');
 

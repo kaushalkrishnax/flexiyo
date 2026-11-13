@@ -7,7 +7,8 @@ import {
   roomStub,
   seedBlock,
   seedConversation,
-  seedDevice,
+  seedConversationKeyDevice,
+  seedConversationKeyEpoch,
   seedMedia,
   seedMessage,
   seedUser,
@@ -18,6 +19,9 @@ const OTHER_CONVERSATION = 'conv-send-other';
 const ALICE = 'user-alice';
 const BOB = 'user-bob';
 const CAROL = 'user-carol';
+const NONCE = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const TAG = 'AAAAAAAAAAAAAAAAAAAAAA==';
+const CIPHERTEXT = 'YWJj';
 
 let aliceDevice = 0;
 let bobDevice = 0;
@@ -28,10 +32,11 @@ beforeEach(async () => {
   await seedUser(ALICE);
   await seedUser(BOB);
   await seedUser(CAROL);
-  aliceDevice = await seedDevice(ALICE, 'install-alice');
-  bobDevice = await seedDevice(BOB, 'install-bob');
-  carolDevice = await seedDevice(CAROL, 'install-carol');
+  aliceDevice = await seedConversationKeyDevice(ALICE, 'install-alice');
+  bobDevice = await seedConversationKeyDevice(BOB, 'install-bob');
+  carolDevice = await seedConversationKeyDevice(CAROL, 'install-carol');
   await seedConversation(CONVERSATION, ALICE, BOB);
+  await seedConversationKeyEpoch(CONVERSATION, 1, aliceDevice, [aliceDevice, bobDevice]);
 });
 
 interface SendOutcome {
@@ -39,11 +44,6 @@ interface SendOutcome {
   closed: { code: number; reason: string } | null;
 }
 
-/**
- * Drives the socket send path on the real Durable Object with a synthetic
- * socket, so acks and close frames can be asserted without a network round
- * trip. Identity lives in the attachment exactly as a live socket provides it.
- */
 async function send(
   frame: Record<string, unknown>,
   options: { userId?: string; deviceId?: number | null } = {},
@@ -81,7 +81,6 @@ async function send(
   });
 }
 
-/** Bypasses the frame-size gate to exercise validation that a socket cannot reach. */
 async function sendDirect(
   frame: Record<string, unknown>,
   options: { userId?: string; deviceId?: number | null } = {},
@@ -127,17 +126,17 @@ function message(
     id,
     conversationId: CONVERSATION,
     recipientId: BOB,
-    messageType: 'signal',
-    payloads: [
-      { deviceId: bobDevice, ciphertext: 'ct-bob', messageType: 'signal' },
-      { deviceId: aliceDevice, ciphertext: 'ct-alice', messageType: 'signal' },
-    ],
+    encryptionVersion: 2,
+    ciphertext: CIPHERTEXT,
+    nonce: NONCE,
+    authTag: TAG,
+    keyEpoch: 1,
     ...overrides,
   };
 }
 
 describe('send_message', () => {
-  it('commits the message, per-device ciphertexts and the conversation timestamp', async () => {
+  it('commits the v2 message and updates conversation metadata and unread state', async () => {
     const { ack, closed } = await send(message());
 
     expect(closed).toBeNull();
@@ -152,7 +151,7 @@ describe('send_message', () => {
     const stored = await db
       .prepare(
         `SELECT conversation_id, sender_id, sender_device_id, message_type, reply_to_id, media_id,
-                version, is_unsent, created_at, expires_at
+                version, is_unsent, created_at, expires_at, ciphertext, nonce, auth_tag, key_epoch
          FROM messages WHERE id = ?`,
       )
       .bind('11111111-1111-4111-8111-111111111111')
@@ -164,82 +163,32 @@ describe('send_message', () => {
       message_type: 'signal',
       version: 1,
       is_unsent: 0,
+      ciphertext: CIPHERTEXT,
+      nonce: NONCE,
+      auth_tag: TAG,
+      key_epoch: 1,
     });
     expect(Number(stored?.created_at)).toBeGreaterThan(0);
 
-    const deliveries = await db
-      .prepare(
-        `SELECT recipient_device_id, sender_device_id, payload, message_type
-         FROM message_deliveries WHERE message_id = ? ORDER BY recipient_device_id`,
-      )
-      .bind('11111111-1111-4111-8111-111111111111')
-      .all<Record<string, unknown>>();
-    expect(deliveries.results).toEqual(
-      expect.arrayContaining([
-        {
-          recipient_device_id: bobDevice,
-          sender_device_id: aliceDevice,
-          payload: 'ct-bob',
-          message_type: 'signal',
-        },
-        {
-          recipient_device_id: aliceDevice,
-          sender_device_id: aliceDevice,
-          payload: 'ct-alice',
-          message_type: 'signal',
-        },
-      ]),
-    );
-
     const conversation = await db
-      .prepare('SELECT last_message_at FROM conversations WHERE id = ?')
+      .prepare('SELECT last_message_at, last_message_sender_id FROM conversations WHERE id = ?')
       .bind(CONVERSATION)
-      .first<{ last_message_at: number | null }>();
+      .first<{ last_message_at: number | null; last_message_sender_id: string | null }>();
     expect(conversation?.last_message_at).toBeGreaterThan(0);
-  });
+    expect(conversation?.last_message_sender_id).toBe(ALICE);
 
-  it('fans out one ciphertext per active device on both sides', async () => {
-    const secondAlice = await seedDevice(ALICE, 'install-alice-2');
-    const secondBob = await seedDevice(BOB, 'install-bob-2');
-
-    const { ack } = await send(
-      message({
-        payloads: [
-          { deviceId: bobDevice, ciphertext: 'ct-bob-1', messageType: 'signal' },
-          { deviceId: secondBob, ciphertext: 'ct-bob-2', messageType: 'signal' },
-          { deviceId: aliceDevice, ciphertext: 'ct-alice-1', messageType: 'signal' },
-          { deviceId: secondAlice, ciphertext: 'ct-alice-2', messageType: 'signal' },
-        ],
-      }),
-    );
-
-    expect(ack).toMatchObject({ status: 'sent' });
-    expect(await countRows('SELECT COUNT(*) AS n FROM message_deliveries')).toBe(4);
-    const rows = await db
-      .prepare('SELECT recipient_device_id, payload FROM message_deliveries ORDER BY recipient_device_id')
-      .all<{ recipient_device_id: number; payload: string }>();
-    expect(rows.results).toEqual([
-      { recipient_device_id: aliceDevice, payload: 'ct-alice-1' },
-      { recipient_device_id: bobDevice, payload: 'ct-bob-1' },
-      { recipient_device_id: secondAlice, payload: 'ct-alice-2' },
-      { recipient_device_id: secondBob, payload: 'ct-bob-2' },
-    ]);
-  });
-
-  it('stores the prekey message type', async () => {
-    const { ack } = await send(message({ messageType: 'prekey' }));
-    expect(ack).toMatchObject({ status: 'sent' });
-    const stored = await db
-      .prepare('SELECT message_type FROM messages WHERE id = ?')
-      .bind('11111111-1111-4111-8111-111111111111')
-      .first<{ message_type: string }>();
-    expect(stored?.message_type).toBe('prekey');
+    const bobState = await db
+      .prepare('SELECT unread_count FROM conversation_user_state WHERE conversation_id = ? AND user_id = ?')
+      .bind(CONVERSATION, BOB)
+      .first<{ unread_count: number }>();
+    expect(bobState?.unread_count).toBe(1);
   });
 
   it('rejects a conversation the sender is not a party to', async () => {
     await seedConversation(OTHER_CONVERSATION, BOB, CAROL);
+    await seedConversationKeyEpoch(OTHER_CONVERSATION, 1, bobDevice, [bobDevice, carolDevice]);
     const { ack } = await send(
-      message({ conversationId: OTHER_CONVERSATION, payloads: [{ deviceId: carolDevice, ciphertext: 'ct' }] }),
+      message({ conversationId: OTHER_CONVERSATION, recipientId: CAROL }),
     );
     expect(ack).toMatchObject({ type: 'error', code: 'forbidden' });
     expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(0);
@@ -296,23 +245,23 @@ describe('send_message', () => {
   });
 
   it('rejects a send from a device that is no longer active', async () => {
-    const disabled = await seedDevice(ALICE, 'install-alice-old', 'disabled');
+    const disabled = await seedConversationKeyDevice(ALICE, 'install-alice-old', undefined, 'disabled');
     const { ack } = await send(message(), { deviceId: disabled });
     expect(ack).toMatchObject({ type: 'error', code: 'device_required' });
   });
 
-  it('rejects a recipient with no active encryption keys', async () => {
+  it('rejects a recipient with no active devices', async () => {
     await seedConversation(OTHER_CONVERSATION, ALICE, CAROL);
+    await seedConversationKeyEpoch(OTHER_CONVERSATION, 1, aliceDevice, [aliceDevice, carolDevice]);
     await db.prepare("UPDATE devices SET status = 'pending' WHERE user_id = ?").bind(CAROL).run();
 
     const { ack } = await send(
       message({
         conversationId: OTHER_CONVERSATION,
         recipientId: CAROL,
-        payloads: [{ deviceId: aliceDevice, ciphertext: 'ct' }],
       }),
     );
-    expect(ack).toMatchObject({ type: 'error', code: 'no_recipient_device' });
+    expect(ack).toMatchObject({ type: 'error', code: 'conversation_keys_not_provisioned' });
   });
 
   it('rejects sends without a conversation or message id', async () => {
@@ -326,110 +275,39 @@ describe('send_message', () => {
     });
   });
 
-  describe('payload validation', () => {
-    it('treats a non-array payloads field as missing device payloads', async () => {
-      const { ack } = await send(message({ payloads: 'nope' }));
-      expect(ack).toMatchObject({ type: 'error', code: 'missing_device_payloads' });
-      expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(0);
-    });
+  describe('envelope validation', () => {
+    it('rejects an invalid envelope ciphertext or missing fields', async () => {
+      const { ack: noV2 } = await send(message({ encryptionVersion: 1 }));
+      expect(noV2).toMatchObject({ type: 'error', code: 'invalid_v2_payload' });
 
-    it('rejects non-object entries', async () => {
-      const { ack } = await send(message({ payloads: [null, { deviceId: bobDevice, ciphertext: 'ct' }] }));
-      expect(ack).toMatchObject({ type: 'error', code: 'invalid_payload' });
-    });
+      const { ack: empty } = await send(message({ ciphertext: '' }));
+      expect(empty).toMatchObject({ type: 'error', code: 'missing_ciphertext' });
 
-    it('rejects an invalid device id', async () => {
-      for (const deviceId of [0, -1, 1.5, '1', null]) {
-        const { ack } = await send(
-          message({
-            payloads: [
-              { deviceId, ciphertext: 'ct' },
-              { deviceId: bobDevice, ciphertext: 'ct-bob' },
-            ],
-          }),
-        );
-        expect(ack).toMatchObject({ type: 'error', code: 'invalid_device' });
-      }
-    });
+      const { ack: badCiphertext } = await send(message({ ciphertext: 'not-base64!' }));
+      expect(badCiphertext).toMatchObject({ type: 'error', code: 'invalid_ciphertext' });
 
-    it('rejects an empty ciphertext', async () => {
-      const { ack } = await send(
-        message({
-          payloads: [
-            { deviceId: bobDevice, ciphertext: '' },
-            { deviceId: aliceDevice, ciphertext: 'ct' },
-          ],
-        }),
-      );
-      expect(ack).toMatchObject({ type: 'error', code: 'missing_ciphertext' });
+      const { ack: badNonce } = await send(message({ nonce: 'not-base64' }));
+      expect(badNonce).toMatchObject({ type: 'error', code: 'invalid_nonce' });
     });
 
     it('rejects oversized ciphertexts supplied outside the frame path', async () => {
       const { ack } = await sendDirect(
-        message({
-          payloads: [
-            { deviceId: bobDevice, ciphertext: 'x'.repeat(64 * 1024 + 1) },
-            { deviceId: aliceDevice, ciphertext: 'ct' },
-          ],
-        }),
+        message({ ciphertext: 'A'.repeat(88 * 1024) }),
       );
-      expect(ack).toMatchObject({ type: 'error', code: 'oversized' });
+      expect(ack).toMatchObject({ type: 'error', code: 'invalid_ciphertext' });
     });
 
     it('closes the socket for a frame that exceeds the limit before validation', async () => {
       const { ack, closed } = await send(
-        message({
-          payloads: [
-            { deviceId: bobDevice, ciphertext: 'x'.repeat(64 * 1024) },
-            { deviceId: aliceDevice, ciphertext: 'ct' },
-          ],
-        }),
+        message({ ciphertext: 'A'.repeat(64 * 1024) }),
       );
       expect(ack).toBeNull();
       expect(closed).toMatchObject({ code: 1009 });
       expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(0);
     });
-
-    it('rejects duplicate device ids', async () => {
-      const { ack } = await send(
-        message({
-          payloads: [
-            { deviceId: bobDevice, ciphertext: 'ct-1' },
-            { deviceId: bobDevice, ciphertext: 'ct-2' },
-          ],
-        }),
-      );
-      expect(ack).toMatchObject({ type: 'error', code: 'duplicate_device' });
-    });
-
-    it('rejects a device that is not part of the conversation', async () => {
-      const { ack } = await send(
-        message({
-          payloads: [
-            { deviceId: bobDevice, ciphertext: 'ct-bob' },
-            { deviceId: carolDevice, ciphertext: 'ct-carol' },
-          ],
-        }),
-      );
-      expect(ack).toMatchObject({ type: 'error', code: 'unknown_device', deviceId: carolDevice });
-    });
-
-    it('rejects when an active recipient device has no ciphertext', async () => {
-      const secondBob = await seedDevice(BOB, 'install-bob-2');
-      const { ack } = await send(
-        message({
-          payloads: [
-            { deviceId: bobDevice, ciphertext: 'ct-bob' },
-            { deviceId: aliceDevice, ciphertext: 'ct-alice' },
-          ],
-        }),
-      );
-      expect(ack).toMatchObject({ type: 'error', code: 'missing_device_payloads' });
-      expect(ack?.missingDeviceIds).toEqual([secondBob]);
-    });
   });
 
-  it('treats a retry with the same id as already committed without duplicating rows', async () => {
+  it('treats a retry with the same id as already committed without duplicating rows or unread', async () => {
     await send(message());
     const { ack } = await send(message({ requestId: 'req-2' }));
 
@@ -441,12 +319,17 @@ describe('send_message', () => {
       status: 'already_committed',
     });
     expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(1);
-    expect(await countRows('SELECT COUNT(*) AS n FROM message_deliveries')).toBe(2);
+    const bobState = await db
+      .prepare('SELECT unread_count FROM conversation_user_state WHERE conversation_id = ? AND user_id = ?')
+      .bind(CONVERSATION, BOB)
+      .first<{ unread_count: number }>();
+    expect(bobState?.unread_count).toBe(1);
   });
 
   it('rejects an id already used by another conversation message', async () => {
-    await seedMessage('taken-id', CONVERSATION, BOB, { senderDeviceId: bobDevice });
-    const { ack } = await send(message({}, 'taken-id'));
+    const takenId = '99999999-9999-4999-8999-999999999999';
+    await seedMessage(takenId, CONVERSATION, BOB, { senderDeviceId: bobDevice });
+    const { ack } = await send(message({}, takenId));
     expect(ack).toMatchObject({ type: 'error', code: 'conflict' });
     expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(1);
   });
@@ -456,12 +339,16 @@ describe('send_message', () => {
 
     expect(ack).toMatchObject({ type: 'error', code: 'send_failed' });
     expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(0);
-    expect(await countRows('SELECT COUNT(*) AS n FROM message_deliveries')).toBe(0);
     const conversation = await db
-      .prepare('SELECT last_message_at FROM conversations WHERE id = ?')
+      .prepare('SELECT last_message_at, last_message_sender_id FROM conversations WHERE id = ?')
       .bind(CONVERSATION)
-      .first<{ last_message_at: number | null }>();
-    expect(conversation?.last_message_at).toBeNull();
+      .first<{ last_message_at: number | null; last_message_sender_id: string | null }>();
+    expect(conversation).toEqual({ last_message_at: null, last_message_sender_id: null });
+    const bobState = await db
+      .prepare('SELECT unread_count FROM conversation_user_state WHERE conversation_id = ? AND user_id = ?')
+      .bind(CONVERSATION, BOB)
+      .first<{ unread_count: number }>();
+    expect(bobState?.unread_count).toBe(0);
   });
 
   describe('media ownership', () => {

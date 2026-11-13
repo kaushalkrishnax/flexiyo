@@ -1,7 +1,5 @@
 name: flexiyo
-description: Secure one-to-one encrypted messaging powered by the Signal Protocol.
-# NOTE: libsignal_protocol_dart is GPL-3.0 licensed.
-# By including it, this application is subject to GPL-3.0 terms.
+description: Secure one-to-one end-to-end encrypted messaging.
 
 publish_to: 'none'
 
@@ -29,9 +27,6 @@ dependencies:
 
   # WebSocket (Cloudflare Workers compatible)
   web_socket_channel: ^3.0.1
-
-  # Signal Protocol E2EE (GPL-3.0)
-  libsignal_protocol_dart: ^0.8.2
 
   # Secure storage for keys/JWT
   flutter_secure_storage: ^11.2.0

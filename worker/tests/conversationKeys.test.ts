@@ -59,7 +59,7 @@ beforeEach(async () => {
 });
 
 describe('conversation-key v2 messages', () => {
-  it('persists one ciphertext and no per-device delivery rows', async () => {
+  it('persists one ciphertext and updates conversation state', async () => {
     const id = crypto.randomUUID();
     const response = await api(
       'POST',
@@ -90,13 +90,11 @@ describe('conversation-key v2 messages', () => {
       keyEpoch: 1,
     });
     expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(1);
-    expect(await countRows('SELECT COUNT(*) AS n FROM message_deliveries')).toBe(0);
 
     const stored = await db.prepare(
-      'SELECT encryption_version, ciphertext, nonce, auth_tag, key_epoch FROM messages WHERE id = ?',
+      'SELECT ciphertext, nonce, auth_tag, key_epoch FROM messages WHERE id = ?',
     ).bind(id).first<Record<string, unknown>>();
     expect(stored).toEqual({
-      encryption_version: 2,
       ciphertext: CIPHERTEXT,
       nonce: NONCE,
       auth_tag: TAG,
@@ -218,19 +216,14 @@ describe('conversation-key device bootstrap and QR pairing', () => {
     expect(await countRows(
       `SELECT COUNT(*) AS n FROM devices
        WHERE user_id = ? AND installation_id = 'joined-installation'
-         AND encryption_version = 2 AND status = 'active'`,
+         AND identity_public_key IS NOT NULL AND status = 'active'`,
       ALICE,
     )).toBe(1);
   });
 });
 
-
-// ---------------------------------------------------------------------------
-// POST /key-envelopes
-// ---------------------------------------------------------------------------
 describe('POST /key-envelopes: epoch_not_found', () => {
-  it('returns 404 when posting envelopes for a non-existent epoch', async () => {
-    // Epoch 999 was never created
+  it('returns 409 when posting envelopes for a non-existent epoch', async () => {
     const response = await api(
       'POST',
       `/api/conversations/${CONVERSATION}/key-envelopes`,
@@ -289,12 +282,8 @@ describe('POST /key-envelopes: idempotency', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// POST /key-epochs
-// ---------------------------------------------------------------------------
 describe('POST /key-epochs: stale epoch rejected', () => {
   it('returns 409 epoch_conflict when proposed epoch skips ahead', async () => {
-    // Current epoch is 1, so only epoch 2 is valid; submitting 5 must fail.
     const response = await api(
       'POST',
       `/api/conversations/${CONVERSATION}/key-epochs`,
@@ -328,7 +317,6 @@ describe('POST /key-epochs: stale epoch rejected', () => {
 
 describe('POST /key-epochs: missing device envelope rejected', () => {
   it('returns 409 missing_device_envelopes when a device has no envelope', async () => {
-    // Only supply alice's envelope; bob's device is missing.
     const response = await api(
       'POST',
       `/api/conversations/${CONVERSATION}/key-epochs`,
@@ -353,17 +341,15 @@ describe('POST /key-epochs: missing device envelope rejected', () => {
   });
 });
 
-describe('POST /key-epochs: v1 device rejected', () => {
-  it('returns 403 when a v1 (non-upgraded) device attempts to create an epoch', async () => {
-    // Seed a v1 device for alice (no encryption_version = 2)
-    await seedDevice(ALICE, 'v1-alice');
+describe('POST /key-epochs: unprovisioned device rejected', () => {
+  it('returns 403 when a device without an identity public key attempts to create an epoch', async () => {
+    await seedDevice(ALICE, 'no-key-alice', 'active', null);
 
     const response = await api(
       'POST',
       `/api/conversations/${CONVERSATION}/key-epochs`,
       {
-        // No X-Installation-Id header → resolveRequestDevice returns null/v1 device
-        installation: 'v1-alice',
+        installation: 'no-key-alice',
         body: {
           epoch: 2,
           envelopes: [

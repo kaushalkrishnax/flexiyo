@@ -42,7 +42,7 @@ class LocalDb {
 
     final database = await openDatabase(
       path,
-      version: 9,
+      version: 10,
       onCreate: _createSchema,
       onUpgrade: _onUpgrade,
     );
@@ -63,7 +63,7 @@ class LocalDb {
         sender_id TEXT NOT NULL,
         sender_device_id INTEGER,
         encrypted_payload TEXT,
-        encryption_version INTEGER NOT NULL DEFAULT 1,
+        encryption_version INTEGER NOT NULL DEFAULT 2,
         nonce TEXT,
         auth_tag TEXT,
         key_epoch INTEGER,
@@ -109,15 +109,6 @@ class LocalDb {
     await database.execute(
       'CREATE UNIQUE INDEX idx_conversation_settings_conversation ON conversation_settings(conversation_id);',
     );
-
-    await database.execute('''
-      CREATE TABLE signal_sessions (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        data TEXT NOT NULL,
-        updated_at INTEGER NOT NULL
-      );
-    ''');
   }
 
   Future<void> _onUpgrade(
@@ -239,6 +230,10 @@ class LocalDb {
           await database.execute(statement);
         } catch (_) {}
       }
+    }
+    if (oldVersion < 10) {
+      await database.execute('DROP TABLE IF EXISTS signal_sessions;');
+      await database.delete('messages', where: 'encryption_version != 2');
     }
   }
 
@@ -542,7 +537,6 @@ class LocalDb {
       await txn.delete('messages');
       await txn.delete('conversations');
       await txn.delete('conversation_settings');
-      await txn.delete('signal_sessions');
     });
   }
 }

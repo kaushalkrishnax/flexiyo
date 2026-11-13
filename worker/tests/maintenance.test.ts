@@ -7,7 +7,7 @@ import {
   db,
   resetDatabase,
   seedConversation,
-  seedDevice,
+  seedConversationKeyDevice,
   seedUser,
   testEnv,
 } from './support.js';
@@ -15,20 +15,22 @@ import {
 const ALICE = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const BOB = 'bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb';
 const CONVERSATION = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+const NONCE = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const TAG = 'AAAAAAAAAAAAAAAAAAAAAA==';
+const CIPHERTEXT = 'YWJj';
 
 function now(): number {
   return Math.floor(Date.now() / 1000);
 }
 
 let aliceDevice = 0;
-let bobDevice = 0;
 
 beforeEach(async () => {
   await resetDatabase();
   await seedUser(ALICE);
   await seedUser(BOB);
-  aliceDevice = await seedDevice(ALICE, 'install-alice');
-  bobDevice = await seedDevice(BOB, 'install-bob');
+  aliceDevice = await seedConversationKeyDevice(ALICE, 'install-alice');
+  await seedConversationKeyDevice(BOB, 'install-bob');
   await seedConversation(CONVERSATION, ALICE, BOB);
 });
 
@@ -48,14 +50,19 @@ function mediaInsert(id: string, expiresAt: number): D1PreparedStatement {
     .bind(id, CONVERSATION, ALICE, `media/${id}`, expiresAt);
 }
 
-function messageInsert(id: string, expiresAt: number | null): D1PreparedStatement {
+function messageInsert(
+  id: string,
+  expiresAt: number | null,
+  createdAt = 1,
+): D1PreparedStatement {
   return db
     .prepare(
       `INSERT INTO messages
-         (id, conversation_id, sender_id, sender_device_id, message_type, version, is_unsent, created_at, expires_at)
-       VALUES (?, ?, ?, ?, 'signal', 1, 0, 0, ?)`,
+         (id, conversation_id, sender_id, sender_device_id, message_type, version, is_unsent,
+          created_at, expires_at, ciphertext, nonce, auth_tag, key_epoch)
+       VALUES (?, ?, ?, ?, 'signal', 1, 0, ?, ?, ?, ?, ?, 1)`,
     )
-    .bind(id, CONVERSATION, ALICE, aliceDevice, expiresAt);
+    .bind(id, CONVERSATION, ALICE, aliceDevice, createdAt, expiresAt, CIPHERTEXT, NONCE, TAG);
 }
 
 async function setLastCleanup(timestamp: number): Promise<void> {
@@ -201,28 +208,37 @@ describe('cleanExpiredMessages', () => {
     expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(1);
   });
 
-  it('deletes expired messages and their deliveries once the window elapsed', async () => {
+  it('deletes expired messages and updates conversation state once the window elapsed', async () => {
     await setLastCleanup(now() - 61);
     const expired = crypto.randomUUID();
     const alive = crypto.randomUUID();
     await flush([
-      messageInsert(expired, now() - 5),
-      messageInsert(alive, now() + 3_600),
+      messageInsert(alive, now() + 3_600, 100),
+      messageInsert(expired, now() - 5, 200),
+      db
+        .prepare('UPDATE conversations SET last_message_at = 200, last_message_sender_id = ? WHERE id = ?')
+        .bind(ALICE, CONVERSATION),
+      db
+        .prepare('UPDATE conversation_user_state SET unread_count = 2 WHERE conversation_id = ? AND user_id = ?')
+        .bind(CONVERSATION, BOB),
     ]);
-    await db
-      .prepare(
-        `INSERT INTO message_deliveries
-           (id, message_id, recipient_device_id, payload, message_type, created_at)
-         VALUES (?, ?, ?, 'ct', 'signal', 0)`,
-      )
-      .bind(crypto.randomUUID(), expired, bobDevice)
-      .run();
 
     await cleanExpiredMessages(testEnv);
 
     expect(await countRows('SELECT COUNT(*) AS n FROM messages WHERE id = ?', expired)).toBe(0);
     expect(await countRows('SELECT COUNT(*) AS n FROM messages WHERE id = ?', alive)).toBe(1);
-    expect(await countRows('SELECT COUNT(*) AS n FROM message_deliveries')).toBe(0);
+
+    const conv = await db
+      .prepare('SELECT last_message_at, last_message_sender_id FROM conversations WHERE id = ?')
+      .bind(CONVERSATION)
+      .first<{ last_message_at: number | null; last_message_sender_id: string | null }>();
+    expect(conv).toEqual({ last_message_at: 100, last_message_sender_id: ALICE });
+
+    const bobState = await db
+      .prepare('SELECT unread_count FROM conversation_user_state WHERE conversation_id = ? AND user_id = ?')
+      .bind(CONVERSATION, BOB)
+      .first<{ unread_count: number }>();
+    expect(bobState?.unread_count).toBe(1);
 
     const meta = await db
       .prepare(`SELECT value FROM worker_meta WHERE key = 'last_expiry_cleanup'`)
@@ -238,7 +254,7 @@ describe('cleanExpiredMessages', () => {
     for (let i = 0; i < 501; i++) {
       const id = crypto.randomUUID();
       ids.push(id);
-      statements.push(messageInsert(id, base + i));
+      statements.push(messageInsert(id, base + i, i + 1));
     }
     await flush(statements);
 

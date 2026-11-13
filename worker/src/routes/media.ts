@@ -104,11 +104,11 @@ function utcDayKey(): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
 }
 
-/** Removes the stored object and metadata, or schedules a tombstone retry on failure. */
+/** Deletes the R2 object and marks the metadata row consumed so future fetches return 410. */
 async function consume(env: Env, mediaId: string, r2Key: string): Promise<void> {
   try {
     await env.MEDIA.delete(r2Key);
-    await env.DB.prepare('DELETE FROM media WHERE id = ?').bind(mediaId).run();
+    await env.DB.prepare('UPDATE media SET consumed = 1 WHERE id = ?').bind(mediaId).run();
   } catch {
     // Keep a consumed tombstone and retry cleanup on the next scheduled sweep.
     const retryAt = Math.floor(Date.now() / 1000) + 3_600;

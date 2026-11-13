@@ -4,23 +4,17 @@ import {
   db,
   resetDatabase,
   seedConversationKeyDevice,
-  seedDevice,
   seedUser,
   tokenFor,
 } from './support.js';
+import { MAX_ACTIVE_DEVICES } from '../src/routes/devices.js';
 
 const ALICE = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const BOB   = 'bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb';
-// 32-byte base64 (valid X25519 public key)
 const PUB32 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
-// 24-byte base64 (XChaCha20 nonce)
 const NONCE24 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
-// 16-byte base64 (Poly1305 MAC)
 const MAC16 = 'AAAAAAAAAAAAAAAAAAAAAA==';
-// small valid ciphertext
 const CT = 'YWJj';
-
-let aliceDeviceId = 0;
 
 async function api(
   method: string,
@@ -41,14 +35,11 @@ beforeEach(async () => {
   await resetDatabase();
   await seedUser(ALICE);
   await seedUser(BOB);
-  aliceDeviceId = await seedConversationKeyDevice(ALICE, 'v2-alice', PUB32);
+  await seedConversationKeyDevice(ALICE, 'v2-alice', PUB32);
 });
 
-// ---------------------------------------------------------------------------
-// Happy path: create → join → approve
-// ---------------------------------------------------------------------------
 describe('pairing: full create → join → approve flow', () => {
-  it('creates a session, joins it and approves it to register a new device', async () => {
+  it('creates a session, joins it and approves it to register a new v2 device', async () => {
     const create = await api('POST', '/api/devices/pairing/create', {
       installation: 'v2-alice',
       body: { initiatorEphemeralPublic: PUB32 },
@@ -70,8 +61,6 @@ describe('pairing: full create → join → approve flow', () => {
     expect(join.status).toBe(200);
     expect(await join.json()).toMatchObject({ joined: true, sessionId });
 
-    // The initiator must receive the joining installation id and identity so
-    // it can rebuild the proof AAD and verify the device before approval.
     const pending = await api('GET', `/api/devices/pairing/${sessionId}`);
     expect(pending.status).toBe(200);
     expect(await pending.json()).toMatchObject({
@@ -98,15 +87,13 @@ describe('pairing: full create → join → approve flow', () => {
     expect(sessionBody.deviceId).toBe(approved.deviceId);
 
     const row = await db.prepare(
-      `SELECT status FROM devices WHERE user_id = ? AND installation_id = 'v2-alice-new'`,
-    ).bind(ALICE).first<{ status: string }>();
-    expect(row?.status).toBe('active');
+      `SELECT status, identity_public_key FROM devices
+       WHERE user_id = ? AND installation_id = 'v2-alice-new'`,
+    ).bind(ALICE).first<{ status: string; identity_public_key: string | null }>();
+    expect(row).toEqual({ status: 'active', identity_public_key: PUB32 });
   });
 });
 
-// ---------------------------------------------------------------------------
-// Approve after expiry
-// ---------------------------------------------------------------------------
 describe('pairing: approve after expiry rejected', () => {
   it('returns 404 when the session has already expired', async () => {
     const create = await api('POST', '/api/devices/pairing/create', {
@@ -128,7 +115,6 @@ describe('pairing: approve after expiry rejected', () => {
     });
     expect(join.status).toBe(200);
 
-    // Backdating expires_at causes the approve query to find no matching row.
     await db.prepare(
       `UPDATE pairing_sessions SET expires_at = 1 WHERE id = ?`,
     ).bind(sessionId).run();
@@ -141,9 +127,6 @@ describe('pairing: approve after expiry rejected', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Double-approve rejected
-// ---------------------------------------------------------------------------
 describe('pairing: double-approve rejected', () => {
   it('returns 409 on a second approve call for the same session', async () => {
     const create = await api('POST', '/api/devices/pairing/create', {
@@ -177,9 +160,6 @@ describe('pairing: double-approve rejected', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Join with wrong user rejected
-// ---------------------------------------------------------------------------
 describe('pairing: join with wrong user rejected', () => {
   it('returns 404 when a different user tries to join', async () => {
     const create = await api('POST', '/api/devices/pairing/create', {
@@ -188,7 +168,6 @@ describe('pairing: join with wrong user rejected', () => {
     });
     const { sessionId } = await create.json() as { sessionId: string };
 
-    // BOB attempts to join ALICE's session — the query requires user_id = userId
     const join = await api('POST', `/api/devices/pairing/${sessionId}/join`, {
       userId: BOB,
       body: {
@@ -204,51 +183,8 @@ describe('pairing: join with wrong user rejected', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Legacy installation promoted by pairing
-// ---------------------------------------------------------------------------
-describe('pairing: legacy installation', () => {
-  it('promotes the existing v1 row instead of inserting a duplicate', async () => {
-    const legacyId = await seedDevice(ALICE, 'legacy-installation');
-
-    const create = await api('POST', '/api/devices/pairing/create', {
-      installation: 'v2-alice',
-      body: { initiatorEphemeralPublic: PUB32 },
-    });
-    const { sessionId } = await create.json() as { sessionId: string };
-
-    const join = await api('POST', `/api/devices/pairing/${sessionId}/join`, {
-      body: {
-        installationId: 'legacy-installation',
-        identityPublicKey: PUB32,
-        joinedEphemeralPublic: PUB32,
-        nonce: NONCE24,
-        ciphertext: CT,
-        mac: MAC16,
-      },
-    });
-    expect(join.status).toBe(200);
-
-    const approve = await api('POST', `/api/devices/pairing/${sessionId}/approve`, {
-      installation: 'v2-alice',
-      body: {},
-    });
-    expect(approve.status).toBe(200);
-    expect(await approve.json()).toMatchObject({ approved: true, deviceId: legacyId });
-
-    const rows = await db.prepare(
-      `SELECT id, encryption_version, status FROM devices
-       WHERE user_id = ? AND installation_id = 'legacy-installation'`,
-    ).bind(ALICE).all<{ id: number; encryption_version: number; status: string }>();
-    expect(rows.results).toHaveLength(1);
-    expect(rows.results?.[0]).toMatchObject({
-      id: legacyId,
-      encryption_version: 2,
-      status: 'active',
-    });
-  });
-
-  it('rejects joining an installation that is already a v2 device', async () => {
+describe('pairing: already-registered installations and limits', () => {
+  it('rejects joining an installation that is already registered', async () => {
     const create = await api('POST', '/api/devices/pairing/create', {
       installation: 'v2-alice',
       body: { initiatorEphemeralPublic: PUB32 },
@@ -268,11 +204,61 @@ describe('pairing: legacy installation', () => {
     expect(join.status).toBe(409);
     expect(await join.json()).toMatchObject({ error: 'Installation is already registered' });
   });
+
+  it('rejects joining a disabled installation as already registered', async () => {
+    await seedConversationKeyDevice(ALICE, 'disabled-installation', PUB32, 'disabled');
+    const create = await api('POST', '/api/devices/pairing/create', {
+      installation: 'v2-alice',
+      body: { initiatorEphemeralPublic: PUB32 },
+    });
+    const { sessionId } = await create.json() as { sessionId: string };
+
+    const join = await api('POST', `/api/devices/pairing/${sessionId}/join`, {
+      body: {
+        installationId: 'disabled-installation',
+        identityPublicKey: PUB32,
+        joinedEphemeralPublic: PUB32,
+        nonce: NONCE24,
+        ciphertext: CT,
+        mac: MAC16,
+      },
+    });
+    expect(join.status).toBe(409);
+    expect(await join.json()).toMatchObject({ error: 'Installation is already registered' });
+  });
+
+  it('rejects approval when active device limit is reached', async () => {
+    for (let i = 1; i < MAX_ACTIVE_DEVICES; i += 1) {
+      await seedConversationKeyDevice(ALICE, `extra-${i}`, PUB32);
+    }
+    const create = await api('POST', '/api/devices/pairing/create', {
+      installation: 'v2-alice',
+      body: { initiatorEphemeralPublic: PUB32 },
+    });
+    const { sessionId } = await create.json() as { sessionId: string };
+
+    await api('POST', `/api/devices/pairing/${sessionId}/join`, {
+      body: {
+        installationId: 'overflow-device',
+        identityPublicKey: PUB32,
+        joinedEphemeralPublic: PUB32,
+        nonce: NONCE24,
+        ciphertext: CT,
+        mac: MAC16,
+      },
+    });
+
+    const approve = await api('POST', `/api/devices/pairing/${sessionId}/approve`, {
+      installation: 'v2-alice',
+      body: {},
+    });
+    expect(approve.status).toBe(409);
+    expect(await approve.json()).toMatchObject({
+      error: 'Device limit reached or pairing already completed',
+    });
+  });
 });
 
-// ---------------------------------------------------------------------------
-// Approval authorization
-// ---------------------------------------------------------------------------
 describe('pairing: approval authorization', () => {
   it('rejects approval from a different v2 device of the same account', async () => {
     await seedConversationKeyDevice(ALICE, 'v2-alice-other', PUB32);

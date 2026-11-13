@@ -1,8 +1,9 @@
 import 'package:flexiyo/models/conversation.dart';
 import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/providers/chat/chat_provider.dart';
-import 'package:flexiyo/providers/signal_crypto_provider.dart';
+import 'package:flexiyo/providers/conversation_crypto_provider.dart';
 import 'package:flexiyo/services/api_service.dart';
+import 'package:flexiyo/services/media/media_service.dart';
 import 'package:flexiyo/widgets/conversation/app_popup_menu.dart';
 import 'package:flexiyo/widgets/conversation/avatar.dart';
 import 'package:flexiyo/widgets/conversation/skeleton.dart';
@@ -51,7 +52,7 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
       if (userId == null) throw StateError('Your account is still loading');
       final requests = await api.getMessageRequests();
 
-      final crypto = await ref.read(signalCryptoProvider(userId).future);
+      final crypto = ref.read(conversationCryptoProvider);
       final hydrated = <Conversation>[];
 
       for (final request in requests) {
@@ -60,15 +61,20 @@ class _MessageRequestsScreenState extends ConsumerState<MessageRequestsScreen> {
           final messages = await api.getMessages(request.id, limit: 1);
           if (messages.isNotEmpty) {
             final message = messages.first;
-            if (message.encryptedPayload != null) {
-              preview = await crypto.getLocalMessageText(message.id) ??
-                  await crypto.decryptFromUser(
-                    senderId: message.senderId,
-                    senderDeviceId: message.senderDeviceId!,
-                    payload: message.encryptedPayload!,
-                    messageType: message.messageType.name,
-                  );
-              await crypto.saveLocalMessageText(message.id, preview);
+            if (message.encryptedPayload != null &&
+                message.nonce != null &&
+                message.authTag != null &&
+                message.keyEpoch != null) {
+              final plaintext = await crypto.decryptMessage(
+                userId: userId,
+                conversationId: request.id,
+                messageId: message.id,
+                keyEpoch: message.keyEpoch!,
+                ciphertext: message.encryptedPayload!,
+                nonce: message.nonce!,
+                authTag: message.authTag!,
+              );
+              preview = MediaRef.parse(plaintext)?.label ?? plaintext;
             }
           }
         } catch (_) {

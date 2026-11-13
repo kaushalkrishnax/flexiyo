@@ -1,45 +1,13 @@
 import { IRequest, Router } from 'itty-router';
-import { z } from 'zod';
-import type { Env, AuthenticatedRequest, DeviceRow, DeviceStatus } from '../types.js';
+import type { Env, AuthenticatedRequest, DeviceRow } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
-import { resolveRequestDevice } from '../middleware/device.js';
-import { checkRateLimitDistributed } from '../middleware/rateLimit.js';
-import { generateId } from '../utils/crypto.js';
-import { runBatched } from '../utils/d1.js';
 import { readJsonBody } from '../utils/http.js';
+import { postChatRoomJson } from '../utils/durableObject.js';
 import { validatePublicKey } from '../services/conversationKeys.js';
 
 export const devicesRouter = Router({ base: '/api/devices' });
 
-/** Maximum number of devices in ('active','pending') per account. */
 export const MAX_ACTIVE_DEVICES = 5;
-
-/** Upper bound on stored unconsumed one-time pre-keys per device. */
-export const MAX_STORED_PREKEYS = 500;
-
-const MAX_KEY_CHARS = 4096;
-
-const preKeySchema = z.object({
-  keyId: z.number().int().positive(),
-  publicKey: z.string().min(1).max(MAX_KEY_CHARS),
-});
-
-const registerDeviceSchema = z.object({
-  installationId: z.string().min(1).max(128),
-  identityKey: z.string().min(1).max(MAX_KEY_CHARS),
-  registrationId: z.number().int().positive(),
-  signedPreKey: z.object({
-    keyId: z.number().int().positive(),
-    publicKey: z.string().min(1).max(MAX_KEY_CHARS),
-    signature: z.string().min(1).max(MAX_KEY_CHARS),
-  }),
-  preKeys: z.array(preKeySchema).min(1).max(200),
-  activate: z.boolean().optional(),
-});
-
-const replenishPreKeysSchema = z.object({
-  preKeys: z.array(preKeySchema).min(1).max(200),
-});
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -53,13 +21,11 @@ function deviceToJson(d: DeviceRow) {
     deviceId: d.id,
     installationId: d.installation_id,
     status: d.status,
-    registrationId: d.registration_id,
-    identityKey: d.identity_key,
-    signedPreKeyId: d.signed_pre_key_id,
+    identityPublicKey: d.identity_public_key,
     createdAt: d.created_at,
     lastSeenAt: d.last_seen_at,
     revokedAt: d.revoked_at,
-    encryptionVersion: d.encryption_version,
+    encryptionVersion: 2,
   };
 }
 
@@ -77,140 +43,7 @@ devicesRouter.get(
   },
 );
 
-devicesRouter.post(
-  '/register',
-  (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
-  async (request: IRequest, env: Env): Promise<Response> => {
-    const authReq = request as unknown as AuthenticatedRequest;
-    const userId = authReq.user.sub;
-
-    const bodyResult = await readJsonBody(request);
-    if (!bodyResult.ok) return bodyResult.response;
-    const body = bodyResult.body;
-
-    const parsed = registerDeviceSchema.safeParse(body);
-    if (!parsed.success) {
-      return json({ error: 'Validation failed', details: parsed.error.flatten() }, 400);
-    }
-
-    const { installationId, identityKey, registrationId, signedPreKey, preKeys } = parsed.data;
-    const status: DeviceStatus = parsed.data.activate === false ? 'pending' : 'active';
-    const now = Math.floor(Date.now() / 1000);
-
-    let deviceId: number;
-
-    const existing = await env.DB.prepare(
-      `SELECT * FROM devices WHERE user_id = ? AND installation_id = ?`,
-    )
-      .bind(userId, installationId)
-      .first<DeviceRow>();
-
-    if (existing) {
-      // Safe reactivation of a known installation: refresh its keys and return
-      // it to the requested status. Re-registering an installation that is
-      // currently counted (active/pending) consumes no new slot; reactivating
-      // a disabled/logged-out one must still respect the account limit.
-      const updated = await env.DB.prepare(
-        `UPDATE devices
-         SET registration_id = ?, identity_key = ?, signed_pre_key_id = ?,
-             signed_pre_key_public = ?, signed_pre_key_signature = ?,
-             status = ?, revoked_at = NULL, last_seen_at = ?
-         WHERE id = ? AND user_id = ?
-           AND (? IN ('active', 'pending')
-                OR (SELECT COUNT(*) FROM devices
-                    WHERE user_id = ? AND status IN ('active', 'pending')) < ?)`,
-      )
-        .bind(
-          registrationId,
-          identityKey,
-          signedPreKey.keyId,
-          signedPreKey.publicKey,
-          signedPreKey.signature,
-          status,
-          now,
-          existing.id,
-          userId,
-          existing.status,
-          userId,
-          MAX_ACTIVE_DEVICES,
-        )
-        .run();
-
-      if (updated.meta.changes === 0) {
-        return json(
-          {
-            error: 'device_limit_reached',
-            message: `An account may have at most ${MAX_ACTIVE_DEVICES} active devices`,
-            limit: MAX_ACTIVE_DEVICES,
-          },
-          409,
-        );
-      }
-      deviceId = existing.id;
-    } else {
-      // Single-statement conditional insert: atomic under D1 (which has no
-      // multi-statement transactions) — racing registrations cannot exceed 5.
-      const inserted = await env.DB.prepare(
-        `INSERT INTO devices
-           (user_id, installation_id, registration_id, identity_key,
-            signed_pre_key_id, signed_pre_key_public, signed_pre_key_signature,
-            status, created_at, last_seen_at)
-         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-         WHERE (
-           SELECT COUNT(*) FROM devices
-           WHERE user_id = ? AND status IN ('active', 'pending')
-         ) < ?`,
-      )
-        .bind(
-          userId,
-          installationId,
-          registrationId,
-          identityKey,
-          signedPreKey.keyId,
-          signedPreKey.publicKey,
-          signedPreKey.signature,
-          status,
-          now,
-          now,
-          userId,
-          MAX_ACTIVE_DEVICES,
-        )
-        .run();
-
-      if (inserted.meta.changes === 0) {
-        return json(
-          {
-            error: 'device_limit_reached',
-            message: `An account may have at most ${MAX_ACTIVE_DEVICES} active devices`,
-            limit: MAX_ACTIVE_DEVICES,
-          },
-          409,
-        );
-      }
-      deviceId = Number(inserted.meta.last_row_id);
-    }
-
-    // One-time pre-keys are PER DEVICE: reset only this installation's keys.
-    // Sibling devices' key material is never touched by a re-registration.
-    await env.DB.prepare(`DELETE FROM pre_keys WHERE device_id = ?`)
-      .bind(deviceId)
-      .run();
-
-    const preKeyInserts = preKeys.map((pk) =>
-      env.DB.prepare(
-        `INSERT OR IGNORE INTO pre_keys (id, device_id, key_id, public_key, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
-      ).bind(generateId(), deviceId, pk.keyId, pk.publicKey, now),
-    );
-    await runBatched(env.DB, preKeyInserts);
-
-    return json({ deviceId, installationId, status }, 201);
-  },
-);
-
-// ---------------------------------------------------------------------------
-// Conversation-key v2 bootstrap. Existing accounts must approve additional
-// installations through the QR pairing flow.
+// First-device V2 bootstrap. Additional installations must approve via QR pairing.
 devicesRouter.post(
   '/v2/register',
   (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
@@ -221,24 +54,23 @@ devicesRouter.post(
     const body = bodyResult.body as Record<string, unknown>;
     const installationId = body.installationId;
     const identityPublicKey = validatePublicKey(body.identityPublicKey);
-    if (typeof installationId !== 'string' || installationId.length < 1 ||
-        installationId.length > 128 || !identityPublicKey) {
+    if (
+      typeof installationId !== 'string' ||
+      installationId.length < 1 ||
+      installationId.length > 128 ||
+      !identityPublicKey
+    ) {
       return json({ error: 'Invalid installation or identity key' }, 400);
     }
 
     const existing = await env.DB.prepare(
-      `SELECT id, status, encryption_version, identity_public_key
+      `SELECT id, status, identity_public_key
        FROM devices WHERE user_id = ? AND installation_id = ?`,
-    ).bind(userId, installationId).first<{
-      id: number;
-      status: DeviceStatus;
-      encryption_version: number;
-      identity_public_key: string | null;
-    }>();
+    )
+      .bind(userId, installationId)
+      .first<Pick<DeviceRow, 'id' | 'status' | 'identity_public_key'>>();
     if (existing) {
-      if (existing.encryption_version === 2 &&
-          existing.status === 'active' &&
-          existing.identity_public_key === identityPublicKey) {
+      if (existing.status === 'active' && existing.identity_public_key === identityPublicKey) {
         return json({ deviceId: existing.id, status: existing.status, encryptionVersion: 2 });
       }
       return json({ error: 'installation_already_registered' }, 409);
@@ -247,73 +79,26 @@ devicesRouter.post(
     const now = Math.floor(Date.now() / 1000);
     const inserted = await env.DB.prepare(
       `INSERT INTO devices
-         (user_id, installation_id, registration_id, identity_key,
-          signed_pre_key_id, signed_pre_key_public, signed_pre_key_signature,
-          status, created_at, last_seen_at, encryption_version, identity_public_key)
-       SELECT ?, ?, 1, 'conversation-key-v2', 1, 'conversation-key-v2',
-              'conversation-key-v2', 'active', ?, ?, 2, ?
+         (user_id, installation_id, status, created_at, last_seen_at, identity_public_key)
+       SELECT ?, ?, 'active', ?, ?, ?
        WHERE NOT EXISTS (
          SELECT 1 FROM devices WHERE user_id = ? AND status = 'active'
        )
        RETURNING id`,
-    ).bind(userId, installationId, now, now, identityPublicKey, userId)
+    )
+      .bind(userId, installationId, now, now, identityPublicKey, userId)
       .first<{ id: number }>();
 
     if (!inserted) {
-      return json({
-        error: 'pairing_required',
-        message: 'An existing active device must approve this installation.',
-      }, 409);
+      return json(
+        {
+          error: 'pairing_required',
+          message: 'An existing active device must approve this installation.',
+        },
+        409,
+      );
     }
     return json({ deviceId: inserted.id, status: 'active', encryptionVersion: 2 }, 201);
-  },
-);
-
-devicesRouter.post(
-  '/v2/upgrade',
-  (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
-  async (request: IRequest, env: Env): Promise<Response> => {
-    const userId = (request as unknown as AuthenticatedRequest).user.sub;
-    const device = await resolveRequestDevice(request, env, userId);
-    if (!device || device.status !== 'active') {
-      return json({ error: 'Active registered installation required' }, 403);
-    }
-
-    const bodyResult = await readJsonBody(request);
-    if (!bodyResult.ok) return bodyResult.response;
-    const body = bodyResult.body as Record<string, unknown>;
-    const identityPublicKey = validatePublicKey(body.identityPublicKey);
-    if (!identityPublicKey) return json({ error: 'Invalid identity public key' }, 400);
-
-    if (device.encryption_version === 2) {
-      if (device.identity_public_key !== identityPublicKey) {
-        return json({ error: 'Device identity key mismatch' }, 409);
-      }
-      return json({ deviceId: device.id, encryptionVersion: 2 });
-    }
-
-    // A v1 installation may self-upgrade only while the account has no
-    // conversation-key device at all: there is no v2 device that could approve
-    // it yet. Once a v2 device exists, extra installations must pair.
-    const activeV2 = await env.DB.prepare(
-      `SELECT COUNT(*) AS n FROM devices
-       WHERE user_id = ? AND status = 'active' AND encryption_version = 2`,
-    ).bind(userId).first<{ n: number }>();
-    if ((activeV2?.n ?? 0) > 0) {
-      return json({
-        error: 'pairing_required',
-        message: 'An existing conversation-key device must approve this installation.',
-      }, 409);
-    }
-
-    const updated = await env.DB.prepare(
-      `UPDATE devices SET encryption_version = 2, identity_public_key = ?
-       WHERE id = ? AND user_id = ? AND status = 'active' AND encryption_version = 1`,
-    ).bind(identityPublicKey, device.id, userId).run();
-    if ((updated.meta.changes ?? 0) !== 1) {
-      return json({ error: 'device_upgrade_conflict' }, 409);
-    }
-    return json({ deviceId: device.id, encryptionVersion: 2 });
   },
 );
 
@@ -327,20 +112,23 @@ devicesRouter.get(
       `SELECT 1 FROM user_blocks
        WHERE (blocker_id = ? AND blocked_id = ?)
           OR (blocker_id = ? AND blocked_id = ?) LIMIT 1`,
-    ).bind(userId, requesterId, requesterId, userId).first();
+    )
+      .bind(userId, requesterId, requesterId, userId)
+      .first();
     if (blocked) return json({ error: 'Cannot retrieve device keys for this account' }, 403);
 
     const rows = await env.DB.prepare(
       `SELECT id, installation_id, identity_public_key
        FROM devices
-       WHERE user_id = ? AND status = 'active'
-         AND encryption_version = 2 AND identity_public_key IS NOT NULL
+       WHERE user_id = ? AND status = 'active' AND identity_public_key IS NOT NULL
        ORDER BY id`,
-    ).bind(userId).all<{
-      id: number;
-      installation_id: string;
-      identity_public_key: string;
-    }>();
+    )
+      .bind(userId)
+      .all<{
+        id: number;
+        installation_id: string;
+        identity_public_key: string;
+      }>();
     return json({
       userId,
       devices: (rows.results ?? []).map((row) => ({
@@ -359,30 +147,30 @@ async function closeRevokedDeviceSockets(
 ): Promise<void> {
   const rooms = await env.DB.prepare(
     `SELECT id FROM conversations WHERE user_a_id = ? OR user_b_id = ?`,
-  ).bind(userId, userId).all<{ id: string }>();
+  )
+    .bind(userId, userId)
+    .all<{ id: string }>();
 
   await env.DB.prepare(
     `UPDATE conversations SET key_rotation_required = 1
      WHERE key_epoch > 0 AND id IN (
        SELECT conversation_id FROM device_key_envelopes WHERE recipient_device_id = ?
      )`,
-  ).bind(deviceId).run();
+  )
+    .bind(deviceId)
+    .run();
   await env.DB.prepare(
     'DELETE FROM device_key_envelopes WHERE recipient_device_id = ?',
-  ).bind(deviceId).run();
+  )
+    .bind(deviceId)
+    .run();
 
-  await Promise.all((rooms.results ?? []).map(async ({ id }) => {
-    const stub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(id));
-    await stub.fetch(new Request('https://internal/disconnect-device', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId, deviceId }),
-    }));
-  }));
+  await Promise.all(
+    (rooms.results ?? []).map(({ id }) =>
+      postChatRoomJson(env, id, '/disconnect-device', { userId, deviceId }),
+    ),
+  );
 }
-
-// Device lifecycle: disable / enable / revoke (owner-scoped by device id)
-// ---------------------------------------------------------------------------
 
 async function findOwnDevice(
   env: Env,
@@ -410,9 +198,6 @@ devicesRouter.post(
     if (!device) return json({ error: 'Device not found' }, 404);
     if (device.status === 'disabled') return json(deviceToJson(device));
 
-    // Disabled devices stop being served in key bundles immediately (pre-key
-    // invalidation) and free their device-limit slot. Rows are retained for
-    // auditability and can be re-enabled.
     await closeRevokedDeviceSockets(env, userId, device.id);
     await env.DB.prepare(
       `UPDATE devices SET status = 'disabled', last_seen_at = ? WHERE id = ?`,
@@ -435,9 +220,7 @@ devicesRouter.post(
     const device = await findOwnDevice(env, userId, id);
     if (!device) return json({ error: 'Device not found' }, 404);
 
-    // Conditional update: slot check and status flip happen in ONE statement,
-    // so concurrent enables cannot overshoot the limit. Flipping an already
-    // counted device (pending → active) consumes no additional slot.
+    // Slot check and status flip stay in one statement so concurrent enables cannot exceed the limit.
     const result = await env.DB.prepare(
       `UPDATE devices
        SET status = 'active', revoked_at = NULL, last_seen_at = ?
@@ -478,231 +261,11 @@ devicesRouter.delete(
     const device = await findOwnDevice(env, userId, id);
     if (!device) return json({ error: 'Device not found' }, 404);
 
-    // Hard revocation: FK cascades remove this device's one-time pre-keys and
-    // its recipient-side delivery rows; sender attribution on other devices'
-    // delivery rows degrades to NULL (ON DELETE SET NULL) instead of deleting
-    // their receipts.
     await closeRevokedDeviceSockets(env, userId, device.id);
     await env.DB.prepare(`DELETE FROM devices WHERE id = ? AND user_id = ?`)
       .bind(device.id, userId)
       .run();
 
     return json({ revoked: true, deviceId: device.id });
-  },
-);
-
-// ---------------------------------------------------------------------------
-// Key bundles
-// ---------------------------------------------------------------------------
-
-/**
- * Atomically claims the next unused one-time pre-key for a device.
- * Single conditional UPDATE ... RETURNING — two concurrent requests can never
- * receive the same key (D1 runs each statement in its own implicit transaction).
- */
-async function claimOneTimePreKey(
-  env: Env,
-  deviceId: number,
-  now: number,
-): Promise<{ key_id: number; public_key: string } | null> {
-  const claimed = await env.DB.prepare(
-    `UPDATE pre_keys SET consumed_at = ?
-     WHERE id = (
-       SELECT id FROM pre_keys
-       WHERE device_id = ? AND consumed_at IS NULL
-       ORDER BY key_id ASC LIMIT 1
-     )
-     AND consumed_at IS NULL
-     RETURNING key_id, public_key`,
-  )
-    .bind(now, deviceId)
-    .first<{ key_id: number; public_key: string }>();
-  return claimed ?? null;
-}
-
-function bundleToJson(
-  device: DeviceRow,
-  preKey: { key_id: number; public_key: string } | null,
-) {
-  return {
-    userId: device.user_id,
-    deviceId: device.id,
-    installationId: device.installation_id,
-    registrationId: device.registration_id,
-    identityKey: device.identity_key,
-    signedPreKey: {
-      keyId: device.signed_pre_key_id,
-      publicKey: device.signed_pre_key_public,
-      signature: device.signed_pre_key_signature,
-    },
-    // null = X3DH without a one-time pre-key (protocol-valid).
-    preKey: preKey ? { keyId: preKey.key_id, publicKey: preKey.public_key } : null,
-    messageType: 'prekey',
-  };
-}
-
-/**
- * Multi-device bundle fetch: one bundle per ACTIVE device of the target
- * account, each with its own atomically consumed one-time pre-key.
- */
-devicesRouter.get(
-  '/key-bundles/:userId',
-  (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
-  async (request: IRequest, env: Env): Promise<Response> => {
-    const { userId } = request.params as { userId: string };
-    const requesterId = (request as unknown as AuthenticatedRequest).user.sub;
-    const allowed = await checkRateLimitDistributed(
-      env,
-      // Account-wide: including target userId lets a caller evade the limit by
-      // rotating arbitrary target IDs. A generous ceiling avoids affecting
-      // ordinary one-to-one chat setup while bounding pre-key consumption.
-      `keybundle:${requesterId}`,
-      { limit: 30, windowMs: 60_000 },
-    );
-    if (!allowed) {
-      return json({ error: 'Too many requests. Please slow down.' }, 429);
-    }
-    const now = Math.floor(Date.now() / 1000);
-
-    // Relationship gate: never hand out (and consume) one-time pre-keys for a
-    // target that has blocked the requester, or that the requester has blocked.
-    const block = await env.DB.prepare(
-      `SELECT 1 FROM user_blocks
-       WHERE (blocker_id = ? AND blocked_id = ?)
-          OR (blocker_id = ? AND blocked_id = ?)
-       LIMIT 1`,
-    )
-      .bind(userId, requesterId, requesterId, userId)
-      .first();
-    if (block) {
-      return json({ error: 'Cannot establish a session with this account' }, 403);
-    }
-
-    const target = await env.DB.prepare(`SELECT id FROM users WHERE id = ?`)
-      .bind(userId)
-      .first<{ id: string }>();
-    if (!target) return json({ error: 'User not found' }, 404);
-
-    const devices = await env.DB.prepare(
-      `SELECT * FROM devices WHERE user_id = ? AND status = 'active' AND encryption_version = 1 ORDER BY id ASC`,
-    )
-      .bind(userId)
-      .all<DeviceRow>();
-
-    const bundles = [];
-    for (const device of devices.results) {
-      const preKey = await claimOneTimePreKey(env, device.id, now);
-      bundles.push(bundleToJson(device, preKey));
-    }
-
-    return json({ userId, bundles });
-  },
-);
-
-// ---------------------------------------------------------------------------
-// One-time pre-key inventory (per device via X-Installation-Id header)
-// ---------------------------------------------------------------------------
-
-devicesRouter.get(
-  '/prekeys/count',
-  (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
-  async (request: IRequest, env: Env): Promise<Response> => {
-    const userId = (request as unknown as AuthenticatedRequest).user.sub;
-    const installationId = request.headers.get('X-Installation-Id');
-
-    if (!installationId) return json({ error: 'X-Installation-Id header required' }, 400);
-    const result = await env.DB.prepare(
-      `SELECT COUNT(*) as count FROM pre_keys pk
-       JOIN devices d ON d.id = pk.device_id
-       WHERE d.user_id = ? AND d.installation_id = ? AND d.status = 'active'
-       AND pk.consumed_at IS NULL`,
-    )
-      .bind(userId, installationId)
-      .first<{ count: number }>();
-    return json({ remaining: result?.count ?? 0 });
-  },
-);
-
-devicesRouter.post(
-  '/prekeys/replenish',
-  (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
-  async (request: IRequest, env: Env): Promise<Response> => {
-    const userId = (request as unknown as AuthenticatedRequest).user.sub;
-
-    const bodyResult = await readJsonBody(request);
-    if (!bodyResult.ok) return bodyResult.response;
-    const body = bodyResult.body;
-
-    const parsed = replenishPreKeysSchema.safeParse(body);
-    if (!parsed.success) {
-      return json({ error: 'Validation failed', details: parsed.error.flatten() }, 400);
-    }
-
-    const { preKeys } = parsed.data;
-    const now = Math.floor(Date.now() / 1000);
-
-    const installationId = request.headers.get('X-Installation-Id');
-    if (!installationId) return json({ error: 'X-Installation-Id header required' }, 400);
-
-    let device: { id: number } | null;
-    device = await env.DB.prepare(
-      `SELECT id FROM devices WHERE user_id = ? AND installation_id = ? AND status = 'active'`,
-    )
-      .bind(userId, installationId)
-      .first<{ id: number }>();
-    if (!device) {
-      return json({ error: 'Unknown or inactive installation for this account' }, 404);
-    }
-
-    const allowed = await checkRateLimitDistributed(
-      env,
-      `prekeys:${userId}:${installationId}`,
-      { limit: 30, windowMs: 60_000 },
-    );
-    if (!allowed) {
-      return json({ error: 'Too many requests. Please slow down.' }, 429);
-    }
-
-    // Insert the submitted batch in one statement. The capacity CTE takes one
-    // indexed count snapshot and limits the input rows before INSERT, avoiding
-    // up to 200 repeated COUNT(*) scans while remaining atomic under concurrency.
-    const rows = preKeys.map((pk) => ({
-      id: generateId(),
-      keyId: pk.keyId,
-      publicKey: pk.publicKey,
-    }));
-    const inserted = await env.DB.prepare(
-      `WITH capacity AS (
-         SELECT MAX(0, ? - COUNT(*)) AS available
-         FROM pre_keys
-         WHERE device_id = ? AND consumed_at IS NULL
-       )
-       INSERT OR IGNORE INTO pre_keys (id, device_id, key_id, public_key, created_at)
-       SELECT
-         json_extract(incoming.value, '$.id'),
-         ?,
-         CAST(json_extract(incoming.value, '$.keyId') AS INTEGER),
-         json_extract(incoming.value, '$.publicKey'),
-         ?
-       FROM json_each(?) AS incoming
-       CROSS JOIN capacity
-       WHERE CAST(incoming.key AS INTEGER) < capacity.available
-       ORDER BY CAST(incoming.key AS INTEGER)`,
-    )
-      .bind(MAX_STORED_PREKEYS, device.id, device.id, now, JSON.stringify(rows))
-      .run();
-
-    const remaining = await env.DB.prepare(
-      `SELECT COUNT(*) as count FROM pre_keys WHERE device_id = ? AND consumed_at IS NULL`,
-    )
-      .bind(device.id)
-      .first<{ count: number }>();
-    const remainingAfter = remaining?.count ?? 0;
-
-    return json({
-      added: inserted.meta.changes ?? 0,
-      deviceId: device.id,
-      remaining: remainingAfter,
-    });
   },
 );

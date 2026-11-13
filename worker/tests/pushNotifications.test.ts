@@ -7,7 +7,8 @@ import {
   roomStub,
   seedBlock,
   seedConversation,
-  seedDevice,
+  seedConversationKeyDevice,
+  seedConversationKeyEpoch,
   seedPushToken,
   seedUser,
   tokenFor,
@@ -17,6 +18,9 @@ const ALICE = 'a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1';
 const BOB = 'b2b2b2b2-b2b2-4b2b-8b2b-b2b2b2b2b2b2';
 const CONVERSATION = 'c3c3c3c3-c3c3-4c3c-8c3c-c3c3c3c3c3c3';
 const MSG_ID = '11111111-1111-4111-8111-111111111111';
+const NONCE = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const TAG = 'AAAAAAAAAAAAAAAAAAAAAA==';
+const CIPHERTEXT = 'YWJj';
 
 let aliceDevice = 0;
 let bobDevice = 0;
@@ -25,16 +29,16 @@ beforeEach(async () => {
   await resetDatabase();
   await seedUser(ALICE);
   await seedUser(BOB);
-  aliceDevice = await seedDevice(ALICE, 'install-alice');
-  bobDevice = await seedDevice(BOB, 'install-bob');
+  aliceDevice = await seedConversationKeyDevice(ALICE, 'install-alice');
+  bobDevice = await seedConversationKeyDevice(BOB, 'install-bob');
   await seedConversation(CONVERSATION, ALICE, BOB);
+  await seedConversationKeyEpoch(CONVERSATION, 1, aliceDevice, [aliceDevice, bobDevice]);
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-/** Mocks OAuth + FCM and records each FCM token targeted. */
 function stubFcm(handler?: (token: string) => Response): Array<{ token: string }> {
   const calls: Array<{ token: string }> = [];
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -73,16 +77,15 @@ function message(
     id,
     conversationId: CONVERSATION,
     recipientId: BOB,
-    messageType: 'signal',
-    payloads: [
-      { deviceId: bobDevice, ciphertext: 'ct-bob', messageType: 'signal' },
-      { deviceId: aliceDevice, ciphertext: 'ct-alice', messageType: 'signal' },
-    ],
+    encryptionVersion: 2,
+    ciphertext: CIPHERTEXT,
+    nonce: NONCE,
+    authTag: TAG,
+    keyEpoch: 1,
     ...overrides,
   };
 }
 
-/** Drives the real WebSocket send path (FCM secret comes from the test env). */
 async function sendViaSocket(
   frame: Record<string, unknown>,
 ): Promise<Array<Record<string, unknown>>> {
@@ -202,9 +205,12 @@ describe('WebSocket message push notifications', () => {
           'X-Installation-Id': 'install-alice',
         },
         body: JSON.stringify({
+          encryptionVersion: 2,
           id: crypto.randomUUID(),
-          payloads: [{ deviceId: bobDevice, ciphertext: 'ct-bob', messageType: 'signal' }],
-          messageType: 'signal',
+          ciphertext: CIPHERTEXT,
+          nonce: NONCE,
+          authTag: TAG,
+          keyEpoch: 1,
           recipientId: BOB,
         }),
       }),

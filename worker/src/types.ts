@@ -3,31 +3,17 @@ export interface Env {
   CHAT_ROOM: DurableObjectNamespace;
   JWT_SECRET: string;
   CORS_ORIGIN: string;
-  /// Brevo transactional email API key (https://developers.brevo.com). Never
-  /// puts credentials in the client bundle — the Worker calls Brevo directly.
   BREVO_API_KEY?: string;
-  /// Brevo sender identity. Falls back to Brevo account default sender.
   BREVO_SENDER_EMAIL?: string;
   BREVO_SENDER_NAME?: string;
-  /// GitHub `owner/repo` publishing release APKs. Defaults to kaushalkrishnax/flexiyo.
   UPDATE_GITHUB_REPO?: string;
-  /// Optional GitHub PAT used by the Worker to avoid unauthenticated API limits.
   GITHUB_TOKEN?: string;
-  /// Firebase service-account JSON (Firebase console → Project settings →
-  /// Service accounts → Generate new private key) used for FCM push
-  /// delivery. When absent, push notifications are silently skipped.
   FCM_SERVICE_ACCOUNT?: string;
-  /** R2 bucket binding for media delivery (server-side only). */
   MEDIA: R2Bucket;
-  /** Media object TTL in days. Default 14. */
   MEDIA_TTL_DAYS?: string;
-  /** Per-user daily upload cap in bytes (soft quota). */
   MEDIA_DAILY_UPLOAD_BYTES?: string;
-  /** Per-user daily download cap in bytes (soft quota). */
   MEDIA_DAILY_DOWNLOAD_BYTES?: string;
-  /** Max bytes for a single media upload. Default 25 MB. */
   MEDIA_MAX_UPLOAD_BYTES?: string;
-  /** OAuth client ID accepted for Google ID tokens. */
   GOOGLE_OAUTH_CLIENT_ID?: string;
 }
 
@@ -59,9 +45,9 @@ export interface MediaDto {
 }
 
 export interface JWTPayload {
-  sub: string;       // user ID
+  sub: string;
   username: string;
-  jti: string;       // unique token ID (for revocation)
+  jti: string;
   iat: number;
   exp: number;
 }
@@ -87,37 +73,17 @@ export interface TokenRevocationRow {
 }
 
 export interface DeviceRow {
-  /** Server-assigned device id (integer, never reused). */
   id: number;
   user_id: string;
-  /** Stable client-generated installation identifier. */
   installation_id: string;
-  legacy_device_id: string | null;
-  registration_id: number;
-  identity_key: string;
-  signed_pre_key_id: number;
-  signed_pre_key_public: string;
-  signed_pre_key_signature: string;
   status: DeviceStatus;
   created_at: number;
   last_seen_at: number | null;
   revoked_at: number | null;
-  /** 1 = Signal bundle, 2 = conversation-key envelope. */
-  encryption_version: number;
-  /** X25519 public key used to seal conversation-key envelopes (v2 only). */
   identity_public_key: string | null;
 }
 
 export type DeviceStatus = 'active' | 'pending' | 'disabled' | 'logged_out';
-
-export interface PreKeyRow {
-  id: string;
-  device_id: number;
-  key_id: number;
-  public_key: string;
-  consumed_at: number | null;
-  created_at: number;
-}
 
 export interface ConversationRow {
   id: string;
@@ -128,9 +94,17 @@ export interface ConversationRow {
   disappearing_timer: number;
   created_at: number;
   last_message_at: number | null;
-  /** Highest published conversation-key epoch. 0 = none published yet. */
+  last_message_sender_id: string | null;
   key_epoch: number;
   key_rotation_required: number;
+}
+
+export interface ConversationUserStateRow {
+  conversation_id: string;
+  user_id: string;
+  unread_count: number;
+  last_read_at: number | null;
+  peer_seen_at: number | null;
 }
 
 export interface MessageRow {
@@ -147,20 +121,12 @@ export interface MessageRow {
   edited_at: number | null;
   system_data: string | null;
   reaction?: string | null;
-  /** Conversation-key envelope (encryption_version 2). */
-  ciphertext?: string | null;
-  nonce?: string | null;
-  auth_tag?: string | null;
-  key_epoch?: number | null;
-  encryption_version?: number;
-  /** Message-level receipts (v2). Legacy rows use message_deliveries. */
-  delivered_at?: number | null;
-  read_at?: number | null;
-  // Computed by list queries (not stored columns):
-  /** Ciphertext for the requesting device on legacy (v1) rows. */
-  device_payload?: string | null;
-  /** message_type of the requesting device's delivery row. */
-  device_message_type?: string | null;
+  ciphertext: string | null;
+  nonce: string | null;
+  auth_tag: string | null;
+  key_epoch: number | null;
+  delivered_at: number | null;
+  read_at: number | null;
   is_sent_by_me?: number;
 }
 
@@ -172,23 +138,6 @@ export interface MessageReactionRow {
   emoji: string;
   created_at: number;
   updated_at: number;
-}
-
-/**
- * Authoritative per-device delivery record: one row per (message, recipient
- * device) holding the ciphertext addressed to that device plus its delivery
- * and read state. Sender-side UI aggregates these across devices.
- */
-export interface MessageDeliveriesRow {
-  id: string;
-  message_id: string;
-  recipient_device_id: number;
-  sender_device_id: number | null;
-  payload: string | null;
-  message_type: string;
-  delivered_at: number | null;
-  read_at: number | null;
-  created_at: number;
 }
 
 export interface LocalDeletionRow {
@@ -216,25 +165,6 @@ export interface DisappearingTimerBody {
   timer: 0 | 30 | 60 | 300 | 3600 | 86400 | 604800;
 }
 
-/** One ciphertext addressed to a single device (Signal address = userId+deviceId). */
-export interface DevicePayload {
-  /** Server-assigned integer device id from the target account's bundle list. */
-  deviceId: number;
-  ciphertext: string;
-  /** Session kind used for this specific device; falls back to the message-level type. */
-  messageType?: 'signal' | 'prekey';
-}
-
-export interface SendMessageBody {
-  id: string;
-  payloads: DevicePayload[];
-  messageType: 'signal' | 'prekey';
-  recipientId: string;
-  mediaId?: string | null;
-  replyToId?: string | null;
-}
-
-/** Versioned conversation-key envelope sent by the active Flutter client. */
 export interface ConversationKeyMessageBody {
   id: string;
   encryptionVersion: 2;
@@ -245,12 +175,6 @@ export interface ConversationKeyMessageBody {
   recipientId: string;
   mediaId?: string | null;
   replyToId?: string | null;
-}
-
-export interface EditMessageBody {
-  payloads: DevicePayload[];
-  messageType: 'signal' | 'prekey';
-  version: number;
 }
 
 export interface ConversationKeyEditBody {
@@ -286,25 +210,6 @@ export interface PairingSessionRow {
   created_at: number;
   expires_at: number;
   approved_at: number | null;
-}
-
-export interface RegisterDeviceBody {
-  /** Stable installation id generated once per client install. */
-  installationId: string;
-  identityKey: string;
-  registrationId: number;
-  signedPreKey: {
-    keyId: number;
-    publicKey: string;
-    signature: string;
-  };
-  preKeys: Array<{ keyId: number; publicKey: string }>;
-  /** Register as 'pending' instead of 'active' (default true → active). */
-  activate?: boolean;
-}
-
-export interface ReplenishPreKeysBody {
-  preKeys: Array<{ keyId: number; publicKey: string }>;
 }
 
 export interface AuthResponse {
@@ -348,13 +253,13 @@ export interface MessageResponse {
   editedAt: number | null;
   systemData: string | null;
   reaction?: string | null;
-  ciphertext?: string;
-  nonce?: string;
-  authTag?: string;
-  keyEpoch?: number;
-  encryptionVersion: number;
-  deliveredAt?: number;
-  readAt?: number;
+  ciphertext?: string | null;
+  nonce?: string | null;
+  authTag?: string | null;
+  keyEpoch?: number | null;
+  encryptionVersion: 2;
+  deliveredAt?: number | null;
+  readAt?: number | null;
 }
 
 export type DOEvent =
@@ -364,19 +269,12 @@ export type DOEvent =
       conversationId: string;
       senderId: string;
       senderDeviceId: number | null;
-      /** User ids that should be notified (both participants). */
       recipients: string[];
-      /**
-       * Legacy v1 per-device ciphertexts. Only present on archived Signal
-       * traffic; every socket is filtered to its own device.
-       */
-      payloads?: Array<{ deviceId: number; payload: string | null; messageType: string }>;
-      /** v2 conversation-key envelope. Delivered byte-for-byte to every member. */
-      encryptionVersion?: number;
-      ciphertext?: string;
-      nonce?: string;
-      authTag?: string;
-      keyEpoch?: number;
+      encryptionVersion: 2;
+      ciphertext: string;
+      nonce: string;
+      authTag: string;
+      keyEpoch: number;
       messageType: string;
       replyToId: string | null;
       createdAt: number;
@@ -387,12 +285,11 @@ export type DOEvent =
       messageId: string;
       conversationId: string;
       recipients: string[];
-      payloads?: Array<{ deviceId: number; payload: string | null; messageType: string }>;
-      encryptionVersion?: number;
-      ciphertext?: string;
-      nonce?: string;
-      authTag?: string;
-      keyEpoch?: number;
+      encryptionVersion: 2;
+      ciphertext: string;
+      nonce: string;
+      authTag: string;
+      keyEpoch: number;
       messageType: string;
       version: number;
       editedAt: number;

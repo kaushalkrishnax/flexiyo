@@ -7,11 +7,9 @@ import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/providers/chat/chat_provider.dart';
 import 'package:flexiyo/providers/chat/conversation_pagination.dart';
 import 'package:flexiyo/providers/conversation_crypto_provider.dart';
-import 'package:flexiyo/providers/signal_crypto_provider.dart';
 import 'package:flexiyo/services/api_service.dart';
 import 'package:flexiyo/services/conversation_crypto_service.dart';
 import 'package:flexiyo/services/media/media_service.dart';
-import 'package:flexiyo/services/signal/signal_crypto_service.dart';
 import 'package:flexiyo/services/ws_service.dart';
 import 'package:flexiyo/storage/local_db.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -179,12 +177,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       )..sort(_compareMessages);
       hasMoreMessages = hasMoreMessages || hasOlderPage(fetched: messages.length);
       final crypto = _ref.read(conversationCryptoProvider);
-      SignalCryptoService? legacyCrypto;
-      if (messages.any((message) => message.encryptionVersion != 2)) {
-        try {
-          legacyCrypto = await _ref.read(signalCryptoProvider(_myUserId).future);
-        } catch (_) {}
-      }
       final cachedById = {
         for (final message in state.messages) message.id: message
       };
@@ -193,7 +185,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       for (final msg in messages) {
         Message hydrated;
         try {
-          hydrated = await _hydrateFromServer(msg, legacyCrypto, crypto, cachedById);
+          hydrated = await _hydrateFromServer(msg, crypto, cachedById);
         } catch (_) {
           // One bad row must never discard the rest of the batch.
           hydrated = msg;
@@ -280,18 +272,11 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         ...olderById,
       };
 
-      SignalCryptoService? legacyCrypto;
-      if (remoteMessages.any((message) => message.encryptionVersion != 2)) {
-        try {
-          legacyCrypto = await _ref.read(signalCryptoProvider(_myUserId).future);
-        } catch (_) {}
-      }
       final crypto = _ref.read(conversationCryptoProvider);
 
       for (final message in remoteMessages) {
         final hydrated = await _hydrateFromServer(
           message,
-          legacyCrypto,
           crypto,
           cachedById,
         );
@@ -339,11 +324,10 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     } catch (_) {}
   }
 
-  /// Resolves the renderable copy of a server row: locally stored plaintext
-  /// when available, otherwise a fresh decrypt.
+  /// Resolves the renderable copy of a server row: locally cached plaintext
+  /// when available, otherwise a fresh V2 decrypt.
   Future<Message> _hydrateFromServer(
     Message msg,
-    SignalCryptoService? legacyCrypto,
     ConversationCryptoService crypto,
     Map<String, Message> cachedById,
   ) async {
@@ -352,46 +336,22 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     final cachedText = cachedById[msg.id]?.decryptedText;
     if (cachedText != null) return msg.copyWith(decryptedText: cachedText);
 
-    if (msg.encryptionVersion == 2) {
-      if (msg.encryptedPayload == null ||
-          msg.nonce == null ||
-          msg.authTag == null ||
-          msg.keyEpoch == null) {
-        return msg;
-      }
-      try {
-        final plaintext = await crypto.decryptMessage(
-          userId: _myUserId,
-          conversationId: msg.conversationId,
-          messageId: msg.id,
-          keyEpoch: msg.keyEpoch!,
-          ciphertext: msg.encryptedPayload!,
-          nonce: msg.nonce!,
-          authTag: msg.authTag!,
-        );
-        return msg.copyWith(decryptedText: plaintext);
-      } catch (_) {
-        return msg;
-      }
+    if (msg.encryptedPayload == null ||
+        msg.nonce == null ||
+        msg.authTag == null ||
+        msg.keyEpoch == null) {
+      return msg;
     }
-
-    if (legacyCrypto == null) return msg;
-    if (msg.encryptedPayload == null) {
-      final localText = await legacyCrypto.getLocalMessageText(msg.id);
-      return localText == null ? msg : msg.copyWith(decryptedText: localText);
-    }
-    final localText = await legacyCrypto.getLocalMessageText(msg.id);
-    if (localText != null) return msg.copyWith(decryptedText: localText);
-    if (msg.senderId == _myUserId) return msg;
-
     try {
-      final plaintext = await legacyCrypto.decryptFromUser(
-        senderId: msg.senderId,
-        senderDeviceId: msg.senderDeviceId!,
-        payload: msg.encryptedPayload!,
-        messageType: msg.messageType.name,
+      final plaintext = await crypto.decryptMessage(
+        userId: _myUserId,
+        conversationId: msg.conversationId,
+        messageId: msg.id,
+        keyEpoch: msg.keyEpoch!,
+        ciphertext: msg.encryptedPayload!,
+        nonce: msg.nonce!,
+        authTag: msg.authTag!,
       );
-      await legacyCrypto.saveLocalMessageText(msg.id, plaintext);
       return msg.copyWith(decryptedText: plaintext);
     } catch (_) {
       return msg;
@@ -471,7 +431,8 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     if (msgId == null || state.messages.any((m) => m.id == msgId)) return;
 
     final senderId = event['senderId'] as String? ?? '';
-    final encryptionVersion = (event['encryptionVersion'] as num?)?.toInt() ?? 1;
+    final encryptionVersion = (event['encryptionVersion'] as num?)?.toInt() ?? 2;
+    if (encryptionVersion != 2) return;
     final senderDeviceId = (event['senderDeviceId'] as num?)?.toInt();
     final replyToId = event['replyToId'] as String?;
     final createdAtRaw = event['createdAt'];
@@ -488,63 +449,26 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       expiresAt = DateTime.fromMillisecondsSinceEpoch(timestamp);
     }
 
-    String? encryptedPayload;
-    String? nonce;
-    String? authTag;
-    int? keyEpoch;
-    String messageType = 'signal';
+    final encryptedPayload = event['ciphertext'] as String?;
+    final nonce = event['nonce'] as String?;
+    final authTag = event['authTag'] as String?;
+    final keyEpoch = (event['keyEpoch'] as num?)?.toInt();
     String? plaintext;
 
-    if (encryptionVersion == 2) {
-      encryptedPayload = event['ciphertext'] as String?;
-      nonce = event['nonce'] as String?;
-      authTag = event['authTag'] as String?;
-      keyEpoch = (event['keyEpoch'] as num?)?.toInt();
-      if (encryptedPayload != null && nonce != null &&
-          authTag != null && keyEpoch != null) {
-        try {
-          plaintext = await _ref.read(conversationCryptoProvider).decryptMessage(
-            userId: _myUserId,
-            conversationId: conversationId,
-            messageId: msgId,
-            keyEpoch: keyEpoch,
-            ciphertext: encryptedPayload,
-            nonce: nonce,
-            authTag: authTag,
-          );
-        } catch (_) {
-          plaintext = null;
-        }
-      }
-    } else {
-      final payloads = event['payloads'] as List<dynamic>? ?? const [];
+    if (encryptedPayload != null &&
+        nonce != null &&
+        authTag != null &&
+        keyEpoch != null) {
       try {
-        final legacyCrypto =
-            await _ref.read(signalCryptoProvider(_myUserId).future);
-        final myDeviceId = await legacyCrypto.getDeviceId();
-        Map<String, dynamic>? target;
-        if (myDeviceId != null) {
-          for (final payload in payloads) {
-            if (payload is Map<String, dynamic> &&
-                payload['deviceId'] == myDeviceId) {
-              target = payload;
-              break;
-            }
-          }
-        }
-        encryptedPayload = target?['payload'] as String?;
-        messageType = target?['messageType'] as String? ?? 'signal';
-        if (senderId == _myUserId) {
-          plaintext = await legacyCrypto.getLocalMessageText(msgId);
-        } else if (encryptedPayload != null && senderDeviceId != null) {
-          plaintext = await legacyCrypto.decryptFromUser(
-            senderId: senderId,
-            senderDeviceId: senderDeviceId,
-            payload: encryptedPayload,
-            messageType: messageType,
-          );
-          await legacyCrypto.saveLocalMessageText(msgId, plaintext);
-        }
+        plaintext = await _ref.read(conversationCryptoProvider).decryptMessage(
+          userId: _myUserId,
+          conversationId: conversationId,
+          messageId: msgId,
+          keyEpoch: keyEpoch,
+          ciphertext: encryptedPayload,
+          nonce: nonce,
+          authTag: authTag,
+        );
       } catch (_) {
         plaintext = null;
       }
@@ -556,15 +480,12 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       senderId: senderId,
       senderDeviceId: senderDeviceId,
       encryptedPayload: encryptedPayload,
-      encryptionVersion: encryptionVersion,
+      encryptionVersion: 2,
       nonce: nonce,
       authTag: authTag,
       keyEpoch: keyEpoch,
       decryptedText: plaintext,
-      messageType: MessageType.values.firstWhere(
-        (value) => value.name == messageType,
-        orElse: () => MessageType.signal,
-      ),
+      messageType: MessageType.signal,
       version: 1,
       createdAt: createdAt,
       expiresAt: expiresAt,
@@ -729,7 +650,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         clearReplyTo: expiredIds.contains(state.replyTo?.id),
       );
       for (final message in expired) {
-        unawaited(_deleteSecureMessageText(message.id, encryptionVersion: message.encryptionVersion));
         unawaited(LocalDb.instance.deleteMessage(message.id));
         final mediaId = message.mediaRef?.id;
         if (mediaId != null) {
@@ -748,6 +668,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
     final encryptionVersion =
         (event['encryptionVersion'] as num?)?.toInt() ?? original.encryptionVersion;
+    if (encryptionVersion != 2) return;
     final version = (event['version'] as num?)?.toInt() ?? original.version;
     final editedAtRaw = event['editedAt'];
     final editedAt = editedAtRaw is int
@@ -756,64 +677,26 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
           )
         : DateTime.now();
 
+    final ciphertext = event['ciphertext'] as String?;
+    final nonce = event['nonce'] as String?;
+    final authTag = event['authTag'] as String?;
+    final keyEpoch = (event['keyEpoch'] as num?)?.toInt();
     String? plaintext;
-    String? ciphertext;
-    String? nonce;
-    String? authTag;
-    int? keyEpoch;
-    String messageType = 'signal';
 
-    if (encryptionVersion == 2) {
-      ciphertext = event['ciphertext'] as String?;
-      nonce = event['nonce'] as String?;
-      authTag = event['authTag'] as String?;
-      keyEpoch = (event['keyEpoch'] as num?)?.toInt();
-      if (ciphertext != null && nonce != null &&
-          authTag != null && keyEpoch != null) {
-        try {
-          plaintext = await _ref.read(conversationCryptoProvider).decryptMessage(
-            userId: _myUserId,
-            conversationId: conversationId,
-            messageId: messageId,
-            keyEpoch: keyEpoch,
-            ciphertext: ciphertext,
-            nonce: nonce,
-            authTag: authTag,
-          );
-        } catch (_) {
-          plaintext = null;
-        }
-      }
-    } else {
-      final payloads = event['payloads'] as List<dynamic>? ?? const [];
+    if (ciphertext != null &&
+        nonce != null &&
+        authTag != null &&
+        keyEpoch != null) {
       try {
-        final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
-        final deviceId = await crypto.getDeviceId();
-        Map<String, dynamic>? target;
-        if (deviceId != null) {
-          for (final payload in payloads) {
-            if (payload is Map<String, dynamic> &&
-                payload['deviceId'] == deviceId) {
-              target = payload;
-              break;
-            }
-          }
-        }
-        ciphertext = target?['payload'] as String?;
-        messageType = target?['messageType'] as String? ?? 'signal';
-        if (original.senderId == _myUserId) {
-          plaintext = await crypto.getLocalMessageText(messageId) ??
-              original.decryptedText;
-        } else if (ciphertext != null) {
-          plaintext = await crypto.decryptFromUser(
-            senderId: original.senderId,
-            senderDeviceId: (event['senderDeviceId'] as num?)?.toInt() ??
-                original.senderDeviceId!,
-            payload: ciphertext,
-            messageType: messageType,
-          );
-          await crypto.saveLocalMessageText(messageId, plaintext);
-        }
+        plaintext = await _ref.read(conversationCryptoProvider).decryptMessage(
+          userId: _myUserId,
+          conversationId: conversationId,
+          messageId: messageId,
+          keyEpoch: keyEpoch,
+          ciphertext: ciphertext,
+          nonce: nonce,
+          authTag: authTag,
+        );
       } catch (_) {
         plaintext = null;
       }
@@ -821,13 +704,11 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
     final updated = original.copyWith(
       encryptedPayload: ciphertext,
-      encryptionVersion: encryptionVersion,
+      encryptionVersion: 2,
       nonce: nonce,
       authTag: authTag,
       keyEpoch: keyEpoch,
-      messageType: messageType == 'prekey'
-          ? MessageType.prekey
-          : MessageType.signal,
+      messageType: MessageType.signal,
       decryptedText: plaintext,
       version: version,
       isEdited: true,
@@ -848,12 +729,10 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         ?.mediaRef
         ?.id;
 
-    final deletedMessage = state.messages.where((message) => message.id == msgId).firstOrNull;
     state = state.copyWith(
       messages: state.messages.where((message) => message.id != msgId).toList(),
       clearReplyTo: state.replyTo?.id == msgId,
     );
-    unawaited(_deleteSecureMessageText(msgId, encryptionVersion: deletedMessage?.encryptionVersion ?? 1));
     unawaited(LocalDb.instance.deleteMessage(msgId));
     if (mediaId != null) {
       unawaited(_ref.read(mediaServiceProvider).purgeLocal(mediaId));
@@ -1026,78 +905,43 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     final now = DateTime.now();
 
     try {
-      if (original.encryptionVersion == 2) {
-        final crypto = _ref.read(conversationCryptoProvider);
-        final encrypted = await crypto.encryptMessage(
-          conversationId: conversationId,
-          messageId: messageId,
-          myUserId: _myUserId,
-          peerUserId: conversation.otherUserId,
-          plaintext: newText,
-        );
-        final deviceId = await crypto.ensureDeviceRegistered(userId: _myUserId);
-        final updated = original.copyWith(
-          decryptedText: newText,
-          senderDeviceId: deviceId,
-          encryptedPayload: encrypted['ciphertext'] as String,
-          encryptionVersion: 2,
-          nonce: encrypted['nonce'] as String,
-          authTag: encrypted['authTag'] as String,
-          keyEpoch: encrypted['keyEpoch'] as int,
-          isEdited: true,
-          editedAt: now,
-          version: original.version + 1,
-        );
-        _upsertMessage(updated);
-        await _cacheMessage(updated);
-        state = state.copyWith(clearEditDraft: true);
+      final crypto = _ref.read(conversationCryptoProvider);
+      final encrypted = await crypto.encryptMessage(
+        conversationId: conversationId,
+        messageId: messageId,
+        myUserId: _myUserId,
+        peerUserId: conversation.otherUserId,
+        plaintext: newText,
+      );
+      final deviceId = await crypto.ensureDeviceRegistered(userId: _myUserId);
+      final updated = original.copyWith(
+        decryptedText: newText,
+        senderDeviceId: deviceId,
+        encryptedPayload: encrypted['ciphertext'] as String,
+        encryptionVersion: 2,
+        nonce: encrypted['nonce'] as String,
+        authTag: encrypted['authTag'] as String,
+        keyEpoch: encrypted['keyEpoch'] as int,
+        isEdited: true,
+        editedAt: now,
+        version: original.version + 1,
+      );
+      _upsertMessage(updated);
+      await _cacheMessage(updated);
+      state = state.copyWith(clearEditDraft: true);
 
-        await _api.editMessageV2(
-          conversationId,
-          messageId,
-          ciphertext: encrypted['ciphertext'] as String,
-          nonce: encrypted['nonce'] as String,
-          authTag: encrypted['authTag'] as String,
-          keyEpoch: encrypted['keyEpoch'] as int,
-          version: original.version,
-        );
-      } else {
-        final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
-        final encrypted = await crypto.encryptForUser(conversation.otherUserId, newText);
-        await crypto.saveLocalMessageText(messageId, newText);
-        final deviceId = await crypto.getDeviceId();
-        final updated = original.copyWith(
-          decryptedText: newText,
-          senderDeviceId: deviceId ?? original.senderDeviceId,
-          isEdited: true,
-          editedAt: now,
-          version: original.version + 1,
-        );
-        _upsertMessage(updated);
-        await _cacheMessage(updated);
-        state = state.copyWith(clearEditDraft: true);
-
-        await _api.editMessage(
-          conversationId,
-          messageId,
-          payloads: encrypted.payloads.map((payload) => {
-            'deviceId': payload.recipientDeviceId,
-            'ciphertext': payload.payload,
-            'messageType': payload.messageType,
-          }).toList(),
-          version: original.version,
-          messageType: encrypted.messageType,
-        );
-      }
+      await _api.editMessageV2(
+        conversationId,
+        messageId,
+        ciphertext: encrypted['ciphertext'] as String,
+        nonce: encrypted['nonce'] as String,
+        authTag: encrypted['authTag'] as String,
+        keyEpoch: encrypted['keyEpoch'] as int,
+        version: original.version,
+      );
     } catch (error) {
       _upsertMessage(original);
       await _cacheMessage(original);
-      if (original.encryptionVersion == 1 && original.decryptedText != null) {
-        try {
-          final legacy = await _ref.read(signalCryptoProvider(_myUserId).future);
-          await legacy.saveLocalMessageText(messageId, original.decryptedText!);
-        } catch (_) {}
-      }
       if (mounted) state = state.copyWith(error: 'Edit failed: $error');
     }
   }
@@ -1122,7 +966,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
             state.messages.where((message) => message.id != messageId).toList(),
         clearReplyTo: state.replyTo?.id == messageId,
       );
-      await _deleteSecureMessageText(messageId);
       await LocalDb.instance.deleteMessage(messageId);
       if (mediaId != null) {
         await _ref.read(mediaServiceProvider).purgeLocal(mediaId);
@@ -1200,30 +1043,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     for (final id in ids) {
       await LocalDb.instance.markLocallyDeleted(id);
     }
-
-    final legacyMessageIds = originals
-        .where((message) => message.encryptionVersion == 1)
-        .map((message) => message.id)
-        .toList();
-    if (legacyMessageIds.isNotEmpty) {
-      try {
-        final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
-        for (final id in legacyMessageIds) {
-          await crypto.deleteLocalMessageText(id);
-        }
-      } catch (_) {}
-    }
-  }
-
-  Future<void> _deleteSecureMessageText(
-    String messageId, {
-    int encryptionVersion = 1,
-  }) async {
-    if (encryptionVersion == 2) return;
-    try {
-      final crypto = await _ref.read(signalCryptoProvider(_myUserId).future);
-      await crypto.deleteLocalMessageText(messageId);
-    } catch (_) {}
   }
 
 

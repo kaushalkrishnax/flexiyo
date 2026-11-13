@@ -5,7 +5,6 @@ import 'package:dio/dio.dart';
 import 'package:flexiyo/core/constants.dart';
 import 'package:flexiyo/core/exceptions.dart';
 import 'package:flexiyo/models/conversation.dart';
-import 'package:flexiyo/models/key_bundle.dart';
 import 'package:flexiyo/models/message.dart';
 import 'package:flexiyo/models/user.dart';
 import 'package:flexiyo/providers/auth_provider.dart';
@@ -114,50 +113,12 @@ class ApiService {
     await _post('/api/push/unregister', {'token': token});
   }
 
-  Future<int> registerDevice(Map<String, dynamic> keyBundle) async {
-    final response = await _post('/api/devices/register', keyBundle);
-    return (response['deviceId'] as num?)?.toInt() ?? 0;
-  }
-
-  Future<int> getPreKeyCount() async {
-    final data = await _get('/api/devices/prekeys/count');
-    return (data as Map<String, dynamic>)['remaining'] as int? ?? 0;
-  }
-
-  Future<void> replenishPreKeys(
-    List<Map<String, dynamic>> preKeys,
-  ) async {
-    await _post('/api/devices/prekeys/replenish', {'preKeys': preKeys});
-  }
-
-  /// Fetches every active device bundle for [userId]; the caller encrypts one
-  /// ciphertext per bundle so each device gets a session it can read.
-  Future<List<KeyBundle>> fetchKeyBundles(String userId) async {
-    final data =
-        await _get('/api/devices/key-bundles/$userId') as Map<String, dynamic>;
-    final rawList = (data['bundles'] as List<dynamic>?) ?? const [];
-    return rawList
-        .map(
-          (b) => KeyBundle.fromJson(b as Map<String, dynamic>),
-        )
-        .toList();
-  }
-
-  /// Announce server-side that this client is exiting; server revokes the
-  /// session so the JWT dies with it. Local storage cleanup happens in auth.
   Future<Map<String, dynamic>> registerConversationKeyDevice({
     required String installationId,
     required String identityPublicKey,
   }) =>
       _post('/api/devices/v2/register', {
         'installationId': installationId,
-        'identityPublicKey': identityPublicKey,
-      });
-
-  Future<Map<String, dynamic>> upgradeConversationKeyDevice(
-    String identityPublicKey,
-  ) =>
-      _post('/api/devices/v2/upgrade', {
         'identityPublicKey': identityPublicKey,
       });
 
@@ -382,20 +343,6 @@ class ApiService {
     return rawList
         .map((m) => Message.fromJson(m as Map<String, dynamic>))
         .toList();
-  }
-
-  Future<void> editMessage(
-    String conversationId,
-    String messageId, {
-    required List<Map<String, dynamic>> payloads,
-    required int version,
-    required String messageType,
-  }) async {
-    await _patch('/api/conversations/$conversationId/messages/$messageId', {
-      'payloads': payloads,
-      'version': version,
-      'messageType': messageType,
-    });
   }
 
   Future<void> editMessageV2(

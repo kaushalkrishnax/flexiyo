@@ -1,4 +1,5 @@
 import type { Env } from '../types.js';
+import { postChatRoomJson } from '../utils/durableObject.js';
 
 /**
  * Inbox fan-out: pushes lightweight "chat list changed" events to each user's
@@ -51,13 +52,8 @@ export async function notifyInboxes(
     userEvents.flatMap(({ userId, events }) => {
       if (events.length === 0) return [];
       // One request per user carrying all events, rather than one per event.
-      const stub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(`inbox:${userId}`));
       return [
-        stub.fetch(new Request('https://internal/broadcast', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ events }),
-        })).then(async (response) => ({
+        postChatRoomJson(env, `inbox:${userId}`, '/broadcast', { events }).then(async (response) => ({
           userId,
           delivered: response.ok
               ? Number(((await response.json()) as { delivered?: number }).delivered ?? 0)

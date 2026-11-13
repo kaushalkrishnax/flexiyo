@@ -96,7 +96,7 @@ function v2Frame(
 }
 
 describe('ChatRoom v2 conversation-key sends', () => {
-  it('persists one ciphertext and no per-device delivery rows', async () => {
+  it('persists one ciphertext and updates conversation_user_state', async () => {
     const outcome = await send(v2Frame());
 
     expect(outcome.ack).toMatchObject({
@@ -107,7 +107,7 @@ describe('ChatRoom v2 conversation-key sends', () => {
 
     const message = await db
       .prepare(
-        `SELECT ciphertext, nonce, auth_tag, key_epoch, encryption_version,
+        `SELECT ciphertext, nonce, auth_tag, key_epoch,
                 sender_device_id, delivered_at, read_at
          FROM messages WHERE conversation_id = ?`,
       )
@@ -117,7 +117,6 @@ describe('ChatRoom v2 conversation-key sends', () => {
         nonce: string;
         auth_tag: string;
         key_epoch: number;
-        encryption_version: number;
         sender_device_id: number;
       }>();
     expect(message).toMatchObject({
@@ -125,19 +124,46 @@ describe('ChatRoom v2 conversation-key sends', () => {
       nonce: NONCE,
       auth_tag: TAG,
       key_epoch: 1,
-      encryption_version: 2,
       sender_device_id: aliceDevice,
     });
-    expect(await countRows('SELECT COUNT(*) AS n FROM message_deliveries')).toBe(0);
     expect(
       await countRows(
         'SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ? AND delivered_at IS NULL',
         CONVERSATION,
       ),
     ).toBe(1);
+
+    const bobState = await db
+      .prepare('SELECT unread_count FROM conversation_user_state WHERE conversation_id = ? AND user_id = ?')
+      .bind(CONVERSATION, BOB)
+      .first<{ unread_count: number }>();
+    expect(bobState?.unread_count).toBe(1);
+
+    const conv = await db
+      .prepare('SELECT last_message_sender_id FROM conversations WHERE id = ?')
+      .bind(CONVERSATION)
+      .first<{ last_message_sender_id: string | null }>();
+    expect(conv?.last_message_sender_id).toBe(ALICE);
   });
 
-  it('treats a retry of the same id as already committed', async () => {
+  it('rejects a legacy v1 payloads frame', async () => {
+    const outcome = await send({
+      type: 'send_message',
+      requestId: 'req-v1',
+      id: '11111111-1111-4111-8111-111111111111',
+      conversationId: CONVERSATION,
+      recipientId: BOB,
+      payloads: [{ deviceId: bobDevice, ciphertext: 'ct' }],
+    });
+
+    expect(outcome.ack).toMatchObject({
+      type: 'error',
+      code: 'invalid_v2_payload',
+    });
+    expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(0);
+  });
+
+  it('treats a retry of the same id as already committed without double-counting unread', async () => {
     const first = await send(v2Frame());
     expect(first.ack).toMatchObject({ ok: true, status: 'sent' });
 
@@ -148,6 +174,11 @@ describe('ChatRoom v2 conversation-key sends', () => {
       status: 'already_committed',
     });
     expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(1);
+    const bobState = await db
+      .prepare('SELECT unread_count FROM conversation_user_state WHERE conversation_id = ? AND user_id = ?')
+      .bind(CONVERSATION, BOB)
+      .first<{ unread_count: number }>();
+    expect(bobState?.unread_count).toBe(1);
   });
 
   it('rejects a send while key rotation is required', async () => {
@@ -193,9 +224,9 @@ describe('ChatRoom v2 conversation-key sends', () => {
     expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(0);
   });
 
-  it('rejects a v1 device trying to send a v2 message', async () => {
+  it('rejects a device without an identity public key trying to send', async () => {
     await db
-      .prepare('UPDATE devices SET encryption_version = 1 WHERE id = ?')
+      .prepare('UPDATE devices SET identity_public_key = NULL WHERE id = ?')
       .bind(aliceDevice)
       .run();
 

@@ -33,7 +33,7 @@ class PairedDevice {
       id: (json['deviceId'] as num?)?.toInt() ?? 0,
       installationId: json['installationId'] as String? ?? '',
       status: json['status'] as String? ?? 'unknown',
-      encryptionVersion: (json['encryptionVersion'] as num?)?.toInt() ?? 1,
+      encryptionVersion: (json['encryptionVersion'] as num?)?.toInt() ?? 2,
       createdAt: seconds(json['createdAt']),
       lastSeenAt: seconds(json['lastSeenAt']),
       revokedAt: seconds(json['revokedAt']),

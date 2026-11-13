@@ -24,7 +24,6 @@ class AppConstants {
     604800,
   ];
 
-  static const int signalPreKeyCount = 100;
   static const int defaultDeviceId = 1;
 
   /// SQLite DB name.

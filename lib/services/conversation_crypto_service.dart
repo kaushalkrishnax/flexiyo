@@ -79,21 +79,35 @@ class ConversationCryptoService {
 
     if (existingDeviceId != null) {
       try {
-        final response = await _api.upgradeConversationKeyDevice(identityPublicKey);
+        final response = await _api.registerConversationKeyDevice(
+          installationId: installationId,
+          identityPublicKey: identityPublicKey,
+        );
         final verifiedId = (response['deviceId'] as num?)?.toInt();
         if (verifiedId == null || verifiedId != existingDeviceId) {
-          throw StateError('Stored device ID does not match the registered device');
+          await _store.clearDeviceId(userId);
+          _registeredDeviceIds.remove(userId);
+          throw StateError(
+            'Stored device ID does not match the registered device. Pair it again from Linked devices.',
+          );
         }
         _registeredDeviceIds[userId] = existingDeviceId;
         return existingDeviceId;
       } on UnauthorizedException {
-        // The installation was revoked or removed server-side.
         await _store.clearDeviceId(userId);
         _registeredDeviceIds.remove(userId);
         throw StateError(
           'This installation is no longer linked. Pair it again from Linked devices.',
         );
-      } catch (error) {
+      } on ApiException catch (error) {
+        if (error.message == 'pairing_required' ||
+            error.message == 'installation_already_registered') {
+          await _store.clearDeviceId(userId);
+          _registeredDeviceIds.remove(userId);
+          throw StateError(
+            'This installation is no longer linked. Pair it again from Linked devices.',
+          );
+        }
         throw StateError('Registered device could not be verified: $error');
       }
     }
@@ -111,35 +125,13 @@ class ConversationCryptoService {
       _registeredDeviceIds[userId] = deviceId;
       return deviceId;
     } on ApiException catch (registrationError) {
-      if (registrationError.message == 'pairing_required') {
+      if (registrationError.message == 'pairing_required' ||
+          registrationError.message == 'installation_already_registered') {
         throw StateError(
           'This installation needs approval from an existing linked device.',
         );
       }
-      if (registrationError.message != 'installation_already_registered') {
-        rethrow;
-      }
-      // A legacy (v1) installation with this id exists: upgrade it in place.
-      // This only works while the account has no v2 device; afterwards the
-      // server requires QR approval.
-      final Map<String, dynamic> response;
-      try {
-        response = await _api.upgradeConversationKeyDevice(identityPublicKey);
-      } on ApiException catch (upgradeError) {
-        if (upgradeError.message == 'pairing_required') {
-          throw StateError(
-            'This installation needs approval from an existing linked device.',
-          );
-        }
-        rethrow;
-      }
-      final deviceId = (response['deviceId'] as num?)?.toInt();
-      if (deviceId == null || deviceId <= 0) {
-        throw StateError('Server returned an invalid device ID');
-      }
-      await _store.saveDeviceId(userId, deviceId);
-      _registeredDeviceIds[userId] = deviceId;
-      return deviceId;
+      rethrow;
     }
   }
 

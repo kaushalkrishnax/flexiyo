@@ -866,16 +866,17 @@ messagesRouter.post(
            AND encryption_version = 2 AND read_at IS NULL`,
       ).bind(conversationId, userId),
       env.DB.prepare(
-        `UPDATE message_deliveries
+        `WITH target_messages AS MATERIALIZED (
+           SELECT id FROM messages
+           WHERE conversation_id = ? AND sender_id != ?
+             AND is_unsent = 0 AND encryption_version = 1
+         )
+         UPDATE message_deliveries
          SET delivered_at = COALESCE(delivered_at, ?), read_at = ?
          WHERE read_at IS NULL
            AND recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)
-           AND message_id IN (
-             SELECT id FROM messages
-             WHERE conversation_id = ? AND sender_id != ? AND is_unsent = 0
-               AND encryption_version = 1
-           )`,
-      ).bind(now, now, userId, conversationId, userId),
+           AND message_id IN (SELECT id FROM target_messages)`,
+      ).bind(conversationId, userId, now, now, userId),
       env.DB.prepare(
         `UPDATE messages SET delivered_at = COALESCE(delivered_at, ?), read_at = ?
          WHERE conversation_id = ? AND sender_id != ? AND is_unsent = 0

@@ -44,71 +44,99 @@ const BLOCKED_WHERE = `
           CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END)
        AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.is_unsent = 0)`;
 
-const UNREAD_COUNT = `(
-      SELECT COUNT(DISTINCT md.message_id)
-      FROM message_deliveries md
-      JOIN messages m ON m.id = md.message_id
-      WHERE md.recipient_device_id IN (SELECT id FROM devices WHERE user_id = ?)
-        AND md.read_at IS NULL
-        AND m.conversation_id = c.id AND m.is_unsent = 0
-        AND m.encryption_version = 1 AND m.sender_id != ?
-    ) + (
-      SELECT COUNT(*)
-      FROM messages m
-      WHERE m.conversation_id = c.id AND m.is_unsent = 0
-        AND m.encryption_version = 2 AND m.sender_id != ? AND m.read_at IS NULL
-    )`;
-
-/// When the conversant last read a message of mine (drives "Seen …" labels).
-const PEER_SEEN_AT = `(
-      SELECT MAX(seen_at) FROM (
-        SELECT md.read_at AS seen_at
-        FROM message_deliveries md
-        JOIN messages m ON m.id = md.message_id
-        WHERE m.conversation_id = c.id AND m.sender_id = ?
-          AND m.is_unsent = 0 AND m.encryption_version = 1
-          AND md.read_at IS NOT NULL
-        UNION ALL
-        SELECT m.read_at AS seen_at
-        FROM messages m
-        WHERE m.conversation_id = c.id AND m.sender_id = ?
-          AND m.is_unsent = 0 AND m.encryption_version = 2
-          AND m.read_at IS NOT NULL
-      )
-    )`;
-
-/// Whether the newest message is mine, so the inbox only shows a read
-/// receipt when the conversant has seen that message.
-const LAST_MESSAGE_IS_MINE = `(SELECT CASE WHEN m.sender_id = ? THEN 1 ELSE 0 END
-      FROM messages m
-      WHERE m.conversation_id = c.id AND m.is_unsent = 0
-      ORDER BY m.created_at DESC, m.id DESC LIMIT 1)`;
-
-
 export function conversationListQuery(
   userId: string,
   scope: Exclude<ConversationScope, 'all'>,
 ): { sql: string; binds: string[] } {
-  const binds: string[] = [];
-  binds.push(userId, userId, userId); // v1 + v2 unread sub-queries
-  binds.push(userId, userId, userId); // v1 + v2 peer seen + last message sender
-  binds.push(userId, userId); // participants selectors
-  binds.push(userId, userId); // participants WHERE
+  const whereBinds: string[] = [];
   if (scope === 'inbox') {
-    binds.push(userId); // initiated_by_id
-    binds.push(userId, userId); // user_blocks blocker + case
+    whereBinds.push(userId, userId, userId); // initiated_by_id + block check
   } else if (scope === 'requests') {
-    binds.push(userId, userId, userId); // user_blocks (3)
+    whereBinds.push(userId, userId, userId); // initiator + block check
   } else {
-    binds.push(userId, userId); // user_blocks blocker + case (2)
+    whereBinds.push(userId, userId); // block check
   }
+
   const where =
     scope === 'requests'
       ? REQUESTS_WHERE
       : scope === 'blocked'
         ? BLOCKED_WHERE
         : INBOX_WHERE;
+
+  // Aggregate receipt data once per conversation instead of running correlated
+  // delivery/message scans independently for every inbox row.
+  const binds = [
+    userId, // user_devices
+    userId, userId, // conversation participants
+    ...whereBinds,
+    userId, // v1 unread sender exclusion
+    userId, // v2 unread sender exclusion
+    userId, // v1 peer seen sender
+    userId, // v2 peer seen sender
+    userId, // latest message sender
+    userId, userId, // conversant username/id selectors
+  ];
+
   const sql = `
+    WITH
+    user_devices AS MATERIALIZED (
+      SELECT id FROM devices WHERE user_id = ?
+    ),
+    user_conversations AS MATERIALIZED (
+      SELECT c.*
+      FROM conversations c
+      WHERE (c.user_a_id = ? OR c.user_b_id = ?)
+        AND ${where}
+    ),
+    v1_unread AS (
+      SELECT m.conversation_id, COUNT(DISTINCT m.id) AS unread_count
+      FROM user_conversations uc
+      CROSS JOIN messages m
+      CROSS JOIN message_deliveries md
+      WHERE m.conversation_id = uc.id
+        AND md.message_id = m.id
+        AND md.recipient_device_id IN (SELECT id FROM user_devices)
+        AND md.read_at IS NULL
+        AND m.is_unsent = 0
+        AND m.encryption_version = 1
+        AND m.sender_id != ?
+      GROUP BY m.conversation_id
+    ),
+    v2_unread AS (
+      SELECT m.conversation_id, COUNT(*) AS unread_count
+      FROM user_conversations uc
+      CROSS JOIN messages m
+      WHERE m.conversation_id = uc.id
+        AND m.is_unsent = 0
+        AND m.encryption_version = 2
+        AND m.sender_id != ?
+        AND m.read_at IS NULL
+      GROUP BY m.conversation_id
+    ),
+    v1_peer_seen AS (
+      SELECT m.conversation_id, MAX(md.read_at) AS peer_seen_at
+      FROM user_conversations uc
+      CROSS JOIN messages m
+      JOIN message_deliveries md ON md.message_id = m.id
+      WHERE m.conversation_id = uc.id
+        AND m.sender_id = ?
+        AND m.is_unsent = 0
+        AND m.encryption_version = 1
+        AND md.read_at IS NOT NULL
+      GROUP BY m.conversation_id
+    ),
+    v2_peer_seen AS (
+      SELECT m.conversation_id, MAX(m.read_at) AS peer_seen_at
+      FROM user_conversations uc
+      CROSS JOIN messages m
+      WHERE m.conversation_id = uc.id
+        AND m.sender_id = ?
+        AND m.is_unsent = 0
+        AND m.encryption_version = 2
+        AND m.read_at IS NOT NULL
+      GROUP BY m.conversation_id
+    )
     SELECT
       c.id,
       c.disappearing_timer,
@@ -122,17 +150,26 @@ export function conversationListQuery(
       ) ELSE c.last_message_at END AS last_message_at,
       c.request_status,
       c.initiated_by_id,
-      ${UNREAD_COUNT} AS unread_count,
-      ${PEER_SEEN_AT} AS peer_seen_at,
-      ${LAST_MESSAGE_IS_MINE} AS last_message_is_mine,
+      COALESCE(v1_unread.unread_count, 0) + COALESCE(v2_unread.unread_count, 0) AS unread_count,
+      NULLIF(MAX(
+        COALESCE(v1_peer_seen.peer_seen_at, 0),
+        COALESCE(v2_peer_seen.peer_seen_at, 0)
+      ), 0) AS peer_seen_at,
+      (SELECT CASE WHEN m.sender_id = ? THEN 1 ELSE 0 END
+       FROM messages m
+       WHERE m.conversation_id = c.id AND m.is_unsent = 0
+       ORDER BY m.created_at DESC, m.id DESC LIMIT 1) AS last_message_is_mine,
       CASE WHEN c.user_a_id = ? THEN ub.username ELSE ua.username END AS conversant_username,
       CASE WHEN c.user_a_id = ? THEN c.user_b_id ELSE c.user_a_id END AS conversant_id
-    FROM conversations c
+    FROM user_conversations c
     JOIN users ua ON ua.id = c.user_a_id
     JOIN users ub ON ub.id = c.user_b_id
-    WHERE (c.user_a_id = ? OR c.user_b_id = ?)
-      AND ${where}
+    LEFT JOIN v1_unread ON v1_unread.conversation_id = c.id
+    LEFT JOIN v2_unread ON v2_unread.conversation_id = c.id
+    LEFT JOIN v1_peer_seen ON v1_peer_seen.conversation_id = c.id
+    LEFT JOIN v2_peer_seen ON v2_peer_seen.conversation_id = c.id
     ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC`;
+
   return { sql, binds };
 }
 

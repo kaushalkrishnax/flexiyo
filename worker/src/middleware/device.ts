@@ -2,10 +2,6 @@ import type { DeviceStatus, Env, DeviceRow } from '../types.js';
 
 export const INSTALLATION_HEADER = 'X-Installation-Id';
 
-/**
- * Resolves the calling device from the X-Installation-Id header.
- * Returns null when the installation header is missing or unknown.
- */
 export async function resolveRequestDevice(
   request: Request,
   env: Env,
@@ -21,36 +17,14 @@ export async function resolveRequestDevice(
   return device ?? null;
 }
 
-/**
- * Active device ids of two accounts, keyed by owner. One round trip for both
- * sides of a conversation: sender-device sync and recipient fan-out need them
- * together.
- */
-export async function pairedActiveDeviceIds(
-  db: D1Database,
-  userId: string,
-  peerId: string,
-): Promise<{ own: number[]; peer: number[] }> {
-  const rows = await db
-    .prepare(
-      `SELECT id, user_id FROM devices
-       WHERE status = 'active' AND encryption_version = 1
-         AND (user_id = ? OR user_id = ?)
-       ORDER BY id`,
-    )
-    .bind(userId, peerId)
-    .all<{ id: number; user_id: string }>();
-
-  const own: number[] = [];
-  const peer: number[] = [];
-  for (const row of rows.results ?? []) {
-    if (row.user_id === userId) own.push(row.id);
-    else peer.push(row.id);
-  }
-  return { own, peer };
+export function isActiveV2Device(
+  device: DeviceRow | null,
+): device is DeviceRow & { identity_public_key: string } {
+  return Boolean(
+    device && device.status === 'active' && device.identity_public_key,
+  );
 }
 
-/** All device ids of an account in the given statuses. */
 export async function deviceIdsFor(
   env: Env,
   userId: string,

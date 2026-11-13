@@ -1,8 +1,8 @@
 import { IRequest, Router } from 'itty-router';
 import { z } from 'zod';
-import type { AuthenticatedRequest, DeviceStatus, Env, PairingSessionRow } from '../types.js';
+import type { AuthenticatedRequest, Env, PairingSessionRow } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
-import { resolveRequestDevice } from '../middleware/device.js';
+import { isActiveV2Device, resolveRequestDevice } from '../middleware/device.js';
 import { validateKeyEnvelope, validatePublicKey } from '../services/conversationKeys.js';
 import { generateId } from '../utils/crypto.js';
 import { readJsonBody } from '../utils/http.js';
@@ -35,7 +35,7 @@ pairingRouter.post(
   async (request: IRequest, env: Env): Promise<Response> => {
     const userId = (request as unknown as AuthenticatedRequest).user.sub;
     const device = await resolveRequestDevice(request, env, userId);
-    if (!device || device.status !== 'active' || device.encryption_version !== 2) {
+    if (!isActiveV2Device(device)) {
       return json({ error: 'An active conversation-key device is required' }, 403);
     }
 
@@ -58,19 +58,33 @@ pairingRouter.post(
          SELECT COUNT(*) FROM pairing_sessions
          WHERE user_id = ? AND status IN ('pending', 'joined') AND expires_at > ?
        ) < 3`,
-    ).bind(
-      id, userId, device.id, parsed.data.initiatorEphemeralPublic, now, expiresAt,
-      userId, now,
-    ).run();
+    )
+      .bind(
+        id,
+        userId,
+        device.id,
+        parsed.data.initiatorEphemeralPublic,
+        now,
+        expiresAt,
+        userId,
+        now,
+      )
+      .run();
     if ((inserted.meta.changes ?? 0) === 0) {
-      return json({ error: 'Too many active pairing sessions. Finish or wait for an existing session to expire.' }, 429);
+      return json(
+        { error: 'Too many active pairing sessions. Finish or wait for an existing session to expire.' },
+        429,
+      );
     }
 
-    return json({
-      sessionId: id,
-      initiatorEphemeralPublic: parsed.data.initiatorEphemeralPublic,
-      expiresAt,
-    }, 201);
+    return json(
+      {
+        sessionId: id,
+        initiatorEphemeralPublic: parsed.data.initiatorEphemeralPublic,
+        expiresAt,
+      },
+      201,
+    );
   },
 );
 
@@ -88,34 +102,33 @@ pairingRouter.post(
     }
 
     const value = parsed.data;
-    if (!validatePublicKey(value.identityPublicKey) ||
-        !validatePublicKey(value.joinedEphemeralPublic) ||
-        validateKeyEnvelope({
-          ephemeralPublicKey: value.joinedEphemeralPublic,
-          nonce: value.nonce,
-          ciphertext: value.ciphertext,
-          mac: value.mac,
-        })) {
+    if (
+      !validatePublicKey(value.identityPublicKey) ||
+      !validatePublicKey(value.joinedEphemeralPublic) ||
+      validateKeyEnvelope({
+        ephemeralPublicKey: value.joinedEphemeralPublic,
+        nonce: value.nonce,
+        ciphertext: value.ciphertext,
+        mac: value.mac,
+      })
+    ) {
       return json({ error: 'Invalid encrypted pairing payload' }, 400);
     }
 
     const session = await env.DB.prepare(
       `SELECT * FROM pairing_sessions
        WHERE id = ? AND user_id = ? AND status = 'pending' AND expires_at > ?`,
-    ).bind(id, userId, Math.floor(Date.now() / 1000)).first<PairingSessionRow>();
+    )
+      .bind(id, userId, Math.floor(Date.now() / 1000))
+      .first<PairingSessionRow>();
     if (!session) return json({ error: 'Pairing session not found or expired' }, 404);
 
     const existing = await env.DB.prepare(
-      `SELECT id, status, encryption_version FROM devices
-       WHERE user_id = ? AND installation_id = ?`,
-    ).bind(userId, value.installationId).first<{
-      id: number;
-      status: DeviceStatus;
-      encryption_version: number;
-    }>();
-    // A legacy (v1) row for this installation may be upgraded in place by the
-    // approval step; an already-linked v2 installation cannot pair again.
-    if (existing && existing.encryption_version === 2) {
+      `SELECT id FROM devices WHERE user_id = ? AND installation_id = ?`,
+    )
+      .bind(userId, value.installationId)
+      .first<{ id: number }>();
+    if (existing) {
       return json({ error: 'Installation is already registered' }, 409);
     }
 
@@ -124,17 +137,19 @@ pairingRouter.post(
        SET status = 'joined', joined_installation_id = ?, joined_identity_public = ?,
            joined_ephemeral_public = ?, joined_nonce = ?, joined_ciphertext = ?, joined_mac = ?
        WHERE id = ? AND user_id = ? AND status = 'pending' AND expires_at > ?`,
-    ).bind(
-      value.installationId,
-      value.identityPublicKey,
-      value.joinedEphemeralPublic,
-      value.nonce,
-      value.ciphertext,
-      value.mac,
-      id,
-      userId,
-      Math.floor(Date.now() / 1000),
-    ).run();
+    )
+      .bind(
+        value.installationId,
+        value.identityPublicKey,
+        value.joinedEphemeralPublic,
+        value.nonce,
+        value.ciphertext,
+        value.mac,
+        id,
+        userId,
+        Math.floor(Date.now() / 1000),
+      )
+      .run();
 
     if ((updated.meta.changes ?? 0) === 0) {
       return json({ error: 'Pairing session was already used or expired' }, 409);
@@ -152,14 +167,18 @@ pairingRouter.get(
     const now = Math.floor(Date.now() / 1000);
     const session = await env.DB.prepare(
       'SELECT * FROM pairing_sessions WHERE id = ? AND user_id = ?',
-    ).bind(id, userId).first<PairingSessionRow>();
+    )
+      .bind(id, userId)
+      .first<PairingSessionRow>();
     if (!session) return json({ error: 'Pairing session not found' }, 404);
 
     if (session.status !== 'approved' && session.status !== 'cancelled' && session.expires_at <= now) {
       await env.DB.prepare(
         `UPDATE pairing_sessions SET status = 'expired'
          WHERE id = ? AND status IN ('pending', 'joined') AND expires_at <= ?`,
-      ).bind(id, now).run();
+      )
+        .bind(id, now)
+        .run();
       return json({ sessionId: id, status: 'expired' });
     }
 
@@ -185,14 +204,16 @@ pairingRouter.post(
     const userId = (request as unknown as AuthenticatedRequest).user.sub;
     const { id } = request.params as { id: string };
     const initiator = await resolveRequestDevice(request, env, userId);
-    if (!initiator || initiator.status !== 'active' || initiator.encryption_version !== 2) {
+    if (!isActiveV2Device(initiator)) {
       return json({ error: 'An active conversation-key device is required' }, 403);
     }
 
     const now = Math.floor(Date.now() / 1000);
     const session = await env.DB.prepare(
       `SELECT * FROM pairing_sessions WHERE id = ? AND user_id = ?`,
-    ).bind(id, userId).first<PairingSessionRow>();
+    )
+      .bind(id, userId)
+      .first<PairingSessionRow>();
     if (!session || session.initiator_device_id !== initiator.id || session.expires_at <= now) {
       return json({ error: 'Pairing session not found or expired' }, 404);
     }
@@ -208,74 +229,44 @@ pairingRouter.post(
 
     const joinedInstallation = session.joined_installation_id;
     const existing = await env.DB.prepare(
-      `SELECT id, status, encryption_version FROM devices
-       WHERE user_id = ? AND installation_id = ?`,
-    ).bind(userId, joinedInstallation).first<{
-      id: number;
-      status: DeviceStatus;
-      encryption_version: number;
-    }>();
+      `SELECT id FROM devices WHERE user_id = ? AND installation_id = ?`,
+    )
+      .bind(userId, joinedInstallation)
+      .first<{ id: number }>();
 
-    if (existing?.encryption_version === 2) {
+    if (existing) {
       return json({ error: 'Installation is already registered' }, 409);
     }
 
-    // A legacy installation may already own a v1 device row. Promote that row
-    // instead of inserting a duplicate so its device id keeps resolving.
-    const deviceStatement = existing
-      ? env.DB.prepare(
-          `UPDATE devices
-           SET encryption_version = 2, identity_public_key = ?, status = 'active',
-               revoked_at = NULL, last_seen_at = ?
-           WHERE id = ? AND user_id = ? AND encryption_version = 1
-             AND (? IN ('active', 'pending')
-                  OR (SELECT COUNT(*) FROM devices
-                      WHERE user_id = ? AND status IN ('active', 'pending')) < ?)
-           RETURNING id`,
-        ).bind(
-          session.joined_identity_public,
-          now,
-          existing.id,
-          userId,
-          existing.status,
-          userId,
-          MAX_ACTIVE_DEVICES,
-        )
-      : env.DB.prepare(
-          `INSERT INTO devices
-             (user_id, installation_id, registration_id, identity_key,
-              signed_pre_key_id, signed_pre_key_public, signed_pre_key_signature,
-              status, created_at, last_seen_at, encryption_version, identity_public_key)
-           SELECT ?, ?, 1, 'conversation-key-v2', 1, 'conversation-key-v2',
-                  'conversation-key-v2', 'active', ?, ?, 2, ?
-           WHERE EXISTS (
-             SELECT 1 FROM pairing_sessions
-             WHERE id = ? AND user_id = ? AND status = 'joined' AND expires_at > ?
-           )
-           AND (SELECT COUNT(*) FROM devices
-                WHERE user_id = ? AND status IN ('active', 'pending')) < ?
-           RETURNING id`,
-        ).bind(
-          userId,
-          joinedInstallation,
-          now,
-          now,
-          session.joined_identity_public,
-          id,
-          userId,
-          now,
-          userId,
-          MAX_ACTIVE_DEVICES,
-        );
-
     const results = await env.DB.batch([
-      deviceStatement,
+      env.DB.prepare(
+        `INSERT INTO devices
+           (user_id, installation_id, status, created_at, last_seen_at, identity_public_key)
+         SELECT ?, ?, 'active', ?, ?, ?
+         WHERE EXISTS (
+           SELECT 1 FROM pairing_sessions
+           WHERE id = ? AND user_id = ? AND status = 'joined' AND expires_at > ?
+         )
+         AND (SELECT COUNT(*) FROM devices
+              WHERE user_id = ? AND status IN ('active', 'pending')) < ?
+         RETURNING id`,
+      ).bind(
+        userId,
+        joinedInstallation,
+        now,
+        now,
+        session.joined_identity_public,
+        id,
+        userId,
+        now,
+        userId,
+        MAX_ACTIVE_DEVICES,
+      ),
       env.DB.prepare(
         `UPDATE pairing_sessions
          SET status = 'approved',
              approved_device_id = (
                SELECT id FROM devices WHERE user_id = ? AND installation_id = ?
-                 AND encryption_version = 2
              ),
              approved_at = ?
          WHERE id = ? AND user_id = ? AND status = 'joined' AND expires_at > ?`,
@@ -298,14 +289,16 @@ pairingRouter.post(
     const userId = (request as unknown as AuthenticatedRequest).user.sub;
     const { id } = request.params as { id: string };
     const device = await resolveRequestDevice(request, env, userId);
-    if (!device || device.status !== 'active' || device.encryption_version !== 2) {
+    if (!isActiveV2Device(device)) {
       return json({ error: 'An active conversation-key device is required' }, 403);
     }
     const result = await env.DB.prepare(
       `UPDATE pairing_sessions SET status = 'cancelled'
        WHERE id = ? AND user_id = ? AND initiator_device_id = ?
          AND status IN ('pending', 'joined')`,
-    ).bind(id, userId, device.id).run();
+    )
+      .bind(id, userId, device.id)
+      .run();
     if ((result.meta.changes ?? 0) === 0) return json({ error: 'Pairing session not found' }, 404);
     return json({ cancelled: true });
   },

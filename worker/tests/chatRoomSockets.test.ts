@@ -3,12 +3,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChatRoom } from '../src/sockets/chatRoom.js';
 import {
   countRows,
-  db,
   openSocket,
   resetDatabase,
   roomStub,
   seedConversation,
-  seedDevice,
+  seedConversationKeyDevice,
+  seedConversationKeyEpoch,
   seedUser,
   testEnv,
   tokenFor,
@@ -18,6 +18,9 @@ import type { Env } from '../src/types.js';
 const CONVERSATION = 'conv-sockets';
 const ALICE = 'user-alice';
 const BOB = 'user-bob';
+const NONCE = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const TAG = 'AAAAAAAAAAAAAAAAAAAAAA==';
+const CIPHERTEXT = 'YWJj';
 
 let aliceDevice = 0;
 let bobDevice = 0;
@@ -26,9 +29,10 @@ beforeEach(async () => {
   await resetDatabase();
   await seedUser(ALICE);
   await seedUser(BOB);
-  aliceDevice = await seedDevice(ALICE, 'install-alice');
-  bobDevice = await seedDevice(BOB, 'install-bob');
+  aliceDevice = await seedConversationKeyDevice(ALICE, 'install-alice');
+  bobDevice = await seedConversationKeyDevice(BOB, 'install-bob');
   await seedConversation(CONVERSATION, ALICE, BOB);
+  await seedConversationKeyEpoch(CONVERSATION, 1, aliceDevice, [aliceDevice, bobDevice]);
 });
 
 describe('ChatRoom WebSocket lifecycle', () => {
@@ -37,8 +41,6 @@ describe('ChatRoom WebSocket lifecycle', () => {
 
     expect(await socket.next()).toMatchObject({ type: 'connected', userId: ALICE });
 
-    // The socket is registered with the Durable Object's hibernation API, not
-    // in instance memory.
     await runInDurableObject(roomStub(CONVERSATION), async (_instance, state) => {
       const sockets = state.getWebSockets(ALICE);
       expect(sockets).toHaveLength(1);
@@ -49,7 +51,6 @@ describe('ChatRoom WebSocket lifecycle', () => {
       expect(typeof sockets[0].deserializeAttachment().sessionId).toBe('string');
     });
 
-    // Live instances and woken instances share the same socket set.
     await runInDurableObject(roomStub(CONVERSATION), async (_instance, state) => {
       const woken = new ChatRoom(state, testEnv as unknown as Env);
       expect(woken.broadcast({
@@ -67,8 +68,6 @@ describe('ChatRoom WebSocket lifecycle', () => {
     const socket = await openSocket(CONVERSATION, await tokenFor(ALICE), aliceDevice);
     await socket.next();
 
-    // Exact client frame ({"type":"ping"}) is matched by the runtime's
-    // auto-response; the explicit frame is what the client expects.
     await runInDurableObject(roomStub(CONVERSATION), async (_instance, state) => {
       const pair = state.getWebSocketAutoResponse();
       expect(pair?.request).toBe('{"type":"ping"}');
@@ -86,8 +85,6 @@ describe('ChatRoom WebSocket lifecycle', () => {
     const socket = await openSocket(CONVERSATION, await tokenFor(ALICE), aliceDevice);
     await socket.next();
 
-    // Simulate eviction + wake: a brand new instance with the same state must
-    // still route messages for the surviving socket.
     await runInDurableObject(roomStub(CONVERSATION), async (_instance, state) => {
       const woken = new ChatRoom(state, testEnv as unknown as Env);
       const [server] = state.getWebSockets();
@@ -115,8 +112,6 @@ describe('ChatRoom WebSocket lifecycle', () => {
         { setWebSocketAutoResponse: () => {}, getWebSockets: () => [] } as unknown as DurableObjectState,
         testEnv as unknown as Env,
       );
-      // A socket accepted before the hibernation rollout has no attachment:
-      // the handler must neither crash nor treat it as authenticated.
       await room.webSocketMessage(server, JSON.stringify({ type: 'ping' }));
     });
 
@@ -132,11 +127,8 @@ describe('ChatRoom WebSocket lifecycle', () => {
     }
     for (const socket of sockets) await socket.next();
 
-    // The first socket is evicted to make room for the ninth.
     expect((await sockets[0].closed).code).toBe(1000);
 
-    // Close handshakes are asynchronous: the evicted socket leaves the
-    // Durable Object's set once its closing handshake completes.
     await vi.waitFor(
       async () => {
         await runInDurableObject(roomStub(CONVERSATION), async (_instance, state) => {
@@ -146,7 +138,6 @@ describe('ChatRoom WebSocket lifecycle', () => {
       { timeout: 5_000, interval: 100 },
     );
 
-    // Surviving sockets still work.
     await runInDurableObject(roomStub(CONVERSATION), async (_instance, state) => {
       const woken = new ChatRoom(state, testEnv as unknown as Env);
       expect(woken.broadcast({
@@ -157,7 +148,6 @@ describe('ChatRoom WebSocket lifecycle', () => {
     });
     expect(await sockets[8].next()).toMatchObject({ messageId: 'msg-cap' });
 
-    // Only the evicted socket is closed; the other eight remain usable.
     for (const socket of sockets.slice(1)) {
       expect(socket.ws.readyState).toBe(WebSocket.OPEN);
     }
@@ -166,30 +156,32 @@ describe('ChatRoom WebSocket lifecycle', () => {
     }
   });
 
-  it('delivers only the ciphertext addressed to each session device', async () => {
+  it('broadcasts v2 new_message only to sessions bound to a device', async () => {
     const aliceToken = await tokenFor(ALICE);
-    const secondAliceDevice = await seedDevice(ALICE, 'install-alice-2');
+    const secondAliceDevice = await seedConversationKeyDevice(ALICE, 'install-alice-2');
     const bobSocket = await openSocket(CONVERSATION, await tokenFor(BOB), bobDevice);
     const alicePrimary = await openSocket(CONVERSATION, aliceToken, aliceDevice);
     const aliceSecondary = await openSocket(CONVERSATION, aliceToken, secondAliceDevice);
+    const deviceLessSocket = await openSocket(CONVERSATION, aliceToken);
     await bobSocket.next();
     await alicePrimary.next();
     await aliceSecondary.next();
+    await deviceLessSocket.next();
 
-    await runInDurableObject(roomStub(CONVERSATION), async (_instance, state) => {
+    const delivered = await runInDurableObject(roomStub(CONVERSATION), async (_instance, state) => {
       const woken = new ChatRoom(state, testEnv as unknown as Env);
-      woken.broadcast({
+      return woken.broadcast({
         type: 'new_message',
         messageId: 'msg-fanout',
         conversationId: CONVERSATION,
         senderId: ALICE,
         senderDeviceId: aliceDevice,
         recipients: [ALICE, BOB],
-        payloads: [
-          { deviceId: aliceDevice, payload: 'ct-alice-1', messageType: 'signal' },
-          { deviceId: secondAliceDevice, payload: 'ct-alice-2', messageType: 'signal' },
-          { deviceId: bobDevice, payload: 'ct-bob', messageType: 'signal' },
-        ],
+        encryptionVersion: 2,
+        ciphertext: CIPHERTEXT,
+        nonce: NONCE,
+        authTag: TAG,
+        keyEpoch: 1,
         messageType: 'signal',
         replyToId: null,
         createdAt: 1,
@@ -197,16 +189,20 @@ describe('ChatRoom WebSocket lifecycle', () => {
       });
     });
 
-    const bobFrame = await bobSocket.next();
-    expect(bobFrame.payloads).toEqual([{ deviceId: bobDevice, payload: 'ct-bob', messageType: 'signal' }]);
-    const primaryFrame = await alicePrimary.next();
-    expect(primaryFrame.payloads).toEqual([
-      { deviceId: aliceDevice, payload: 'ct-alice-1', messageType: 'signal' },
-    ]);
-    const secondaryFrame = await aliceSecondary.next();
-    expect(secondaryFrame.payloads).toEqual([
-      { deviceId: secondAliceDevice, payload: 'ct-alice-2', messageType: 'signal' },
-    ]);
+    expect(delivered).toBe(3);
+    for (const socket of [bobSocket, alicePrimary, aliceSecondary]) {
+      const frame = await socket.next();
+      expect(frame).toMatchObject({
+        type: 'new_message',
+        messageId: 'msg-fanout',
+        encryptionVersion: 2,
+        ciphertext: CIPHERTEXT,
+        nonce: NONCE,
+        authTag: TAG,
+        keyEpoch: 1,
+      });
+    }
+    await expect(deviceLessSocket.next(undefined, 150)).rejects.toThrow(/no WebSocket frame/);
   });
 
   it('routes typing to the peer only and throttles repeats', async () => {
@@ -224,11 +220,8 @@ describe('ChatRoom WebSocket lifecycle', () => {
       expect(server.deserializeAttachment().typingCount).toBe(1);
     });
 
-    // The sender never sees its own typing indicator.
     await expect(aliceSocket.next((frame) => frame.type === 'typing_start', 250)).rejects.toThrow();
 
-    // Flood protection: the window allows 20 frames plus the one above, so
-    // counts 2..20 reach the peer and count 21 is dropped.
     for (let i = 0; i < 20; i++) {
       aliceSocket.ws.send(JSON.stringify({ type: 'typing_start' }));
     }
@@ -238,8 +231,6 @@ describe('ChatRoom WebSocket lifecycle', () => {
         expect(server.deserializeAttachment().typingCount).toBe(21);
       });
     });
-    // The pre-flood frame plus 19 flood frames reached Bob; the 21st frame
-    // (the one over the window limit) never left the Durable Object.
     let delivered = 0;
     let drainError: unknown = null;
     for (;;) {
@@ -311,87 +302,96 @@ describe('ChatRoom frame validation', () => {
 });
 
 describe('ChatRoom message delivery over sockets', () => {
-  it('persists a socket send, acknowledges it and fans out per device', async () => {
+  it('persists a v2 socket send, acknowledges it, and broadcasts the envelope', async () => {
     const aliceToken = await tokenFor(ALICE);
     const bobSocket = await openSocket(CONVERSATION, await tokenFor(BOB), bobDevice);
     const aliceSocket = await openSocket(CONVERSATION, aliceToken, aliceDevice);
     await bobSocket.next();
     await aliceSocket.next();
 
+    const msgId = '11111111-1111-4111-8111-111111111111';
     aliceSocket.ws.send(JSON.stringify({
       type: 'send_message',
       requestId: 'req-send',
-      id: '11111111-1111-4111-8111-111111111111',
+      id: msgId,
       conversationId: CONVERSATION,
       recipientId: BOB,
-      messageType: 'signal',
-      payloads: [
-        { deviceId: bobDevice, ciphertext: 'ct-for-bob', messageType: 'signal' },
-        { deviceId: aliceDevice, ciphertext: 'ct-for-alice', messageType: 'signal' },
-      ],
+      encryptionVersion: 2,
+      ciphertext: CIPHERTEXT,
+      nonce: NONCE,
+      authTag: TAG,
+      keyEpoch: 1,
     }));
 
     expect(await bobSocket.next()).toMatchObject({
       type: 'new_message',
-      messageId: '11111111-1111-4111-8111-111111111111',
-      payloads: [{ deviceId: bobDevice, payload: 'ct-for-bob', messageType: 'signal' }],
+      messageId: msgId,
+      encryptionVersion: 2,
+      ciphertext: CIPHERTEXT,
+      nonce: NONCE,
+      authTag: TAG,
+      keyEpoch: 1,
     });
-    // The sender's own device gets its own ciphertext, not the recipient's.
     expect(await aliceSocket.next()).toMatchObject({
       type: 'new_message',
-      payloads: [{ deviceId: aliceDevice, payload: 'ct-for-alice', messageType: 'signal' }],
+      messageId: msgId,
+      ciphertext: CIPHERTEXT,
     });
     expect(await aliceSocket.next()).toEqual({
       type: 'ack',
       requestId: 'req-send',
       ok: true,
-      messageId: '11111111-1111-4111-8111-111111111111',
+      messageId: msgId,
       status: 'sent',
     });
 
     expect(await countRows(`SELECT COUNT(*) AS n FROM messages`)).toBe(1);
-    expect(await countRows(`SELECT COUNT(*) AS n FROM message_deliveries`)).toBe(2);
     const stored = await testEnv.DB.prepare(
-      'SELECT payload FROM message_deliveries WHERE recipient_device_id = ?',
-    ).bind(bobDevice).first<{ payload: string }>();
-    expect(stored?.payload).toBe('ct-for-bob');
+      'SELECT ciphertext, key_epoch FROM messages WHERE id = ?',
+    ).bind(msgId).first<{ ciphertext: string; key_epoch: number }>();
+    expect(stored).toEqual({ ciphertext: CIPHERTEXT, key_epoch: 1 });
   });
 
-  it('broadcasts delivery acknowledgements back to the sender', async () => {
+  it('records delivered_at on messages and broadcasts delivery acknowledgements back to the sender', async () => {
     const aliceToken = await tokenFor(ALICE);
     const bobSocket = await openSocket(CONVERSATION, await tokenFor(BOB), bobDevice);
     const aliceSocket = await openSocket(CONVERSATION, aliceToken, aliceDevice);
     await bobSocket.next();
     await aliceSocket.next();
 
+    const msgId = '22222222-2222-4222-8222-222222222222';
     aliceSocket.ws.send(JSON.stringify({
       type: 'send_message',
       requestId: 'req-send',
-      id: '22222222-2222-4222-8222-222222222222',
+      id: msgId,
       conversationId: CONVERSATION,
       recipientId: BOB,
-      messageType: 'signal',
-      payloads: [{ deviceId: bobDevice, ciphertext: 'ct', messageType: 'signal' }],
+      encryptionVersion: 2,
+      ciphertext: CIPHERTEXT,
+      nonce: NONCE,
+      authTag: TAG,
+      keyEpoch: 1,
     }));
     await bobSocket.next((frame) => frame.type === 'new_message');
     await aliceSocket.next((frame) => frame.type === 'ack');
 
     bobSocket.ws.send(JSON.stringify({
       type: 'delivery_ack',
-      messageId: '22222222-2222-4222-8222-222222222222',
+      messageId: msgId,
       requestId: 'req-ack',
     }));
 
     const delivered = await aliceSocket.next((frame) => frame.type === 'message_delivered');
     expect(delivered).toMatchObject({
-      messageId: '22222222-2222-4222-8222-222222222222',
+      messageId: msgId,
       recipientId: BOB,
+      recipientDeviceId: bobDevice,
     });
     expect(await bobSocket.next()).toEqual({ type: 'ack', requestId: 'req-ack', ok: true });
 
     const row = await testEnv.DB.prepare(
-      'SELECT delivered_at FROM message_deliveries WHERE recipient_device_id = ?',
-    ).bind(bobDevice).first<{ delivered_at: number | null }>();
+      'SELECT delivered_at FROM messages WHERE id = ?',
+    ).bind(msgId).first<{ delivered_at: number | null }>();
     expect(row?.delivered_at).toBeGreaterThan(0);
   });
 
@@ -400,8 +400,6 @@ describe('ChatRoom message delivery over sockets', () => {
     const aliceSocket = await openSocket(CONVERSATION, aliceToken, aliceDevice);
     await aliceSocket.next();
 
-    // Wake a replacement object and drive a send through it: identity comes
-    // from the attachment, persistence from D1.
     await runInDurableObject(roomStub(CONVERSATION), async (_instance, state) => {
       const woken = new ChatRoom(state, testEnv as unknown as Env);
       const [server] = state.getWebSockets(ALICE);
@@ -411,11 +409,11 @@ describe('ChatRoom message delivery over sockets', () => {
         id: '33333333-3333-4333-8333-333333333333',
         conversationId: CONVERSATION,
         recipientId: BOB,
-        messageType: 'signal',
-        payloads: [
-          { deviceId: bobDevice, ciphertext: 'ct-bob', messageType: 'signal' },
-          { deviceId: aliceDevice, ciphertext: 'ct-alice', messageType: 'signal' },
-        ],
+        encryptionVersion: 2,
+        ciphertext: CIPHERTEXT,
+        nonce: NONCE,
+        authTag: TAG,
+        keyEpoch: 1,
       }));
     });
 
@@ -469,66 +467,5 @@ describe('ChatRoom inbox hubs', () => {
       }));
       expect(response.status).toBe(401);
     }
-  });
-});
-
-describe('ChatRoom v2 broadcast filtering', () => {
-  it('sends one ciphertext to v2 sessions and nothing to a legacy session', async () => {
-    const IDENTITY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
-    await db.prepare(
-      `UPDATE devices SET encryption_version = 2, identity_public_key = ?
-       WHERE id IN (?, ?)`,
-    ).bind(IDENTITY, aliceDevice, bobDevice).run();
-    const legacyAlice = await seedDevice(ALICE, 'install-legacy');
-
-    const aliceToken = await tokenFor(ALICE);
-    const bobSocket = await openSocket(CONVERSATION, await tokenFor(BOB), bobDevice);
-    const aliceSocket = await openSocket(CONVERSATION, aliceToken, aliceDevice);
-    const legacySocket = await openSocket(CONVERSATION, aliceToken, legacyAlice);
-    await bobSocket.next();
-    await aliceSocket.next();
-    await legacySocket.next();
-
-    const delivered = await runInDurableObject(
-      roomStub(CONVERSATION),
-      async (_instance, state) => {
-        const woken = new ChatRoom(state, testEnv as unknown as Env);
-        return woken.broadcast({
-          type: 'new_message',
-          messageId: 'msg-v2',
-          conversationId: CONVERSATION,
-          senderId: ALICE,
-          senderDeviceId: aliceDevice,
-          recipients: [ALICE, BOB],
-          encryptionVersion: 2,
-          ciphertext: 'YWJj',
-          nonce: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-          authTag: 'AAAAAAAAAAAAAAAAAAAAAA==',
-          keyEpoch: 1,
-          messageType: 'signal',
-          replyToId: null,
-          createdAt: 1,
-          expiresAt: null,
-        });
-      },
-    );
-
-    expect(delivered).toBe(2);
-    for (const socket of [bobSocket, aliceSocket]) {
-      const frame = await socket.next(
-        (value) => value.type === 'new_message' && value.messageId === 'msg-v2',
-      );
-      expect(frame).toMatchObject({
-        encryptionVersion: 2,
-        ciphertext: 'YWJj',
-        nonce: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-        authTag: 'AAAAAAAAAAAAAAAAAAAAAA==',
-        keyEpoch: 1,
-      });
-    }
-
-    await expect(legacySocket.next(undefined, 150)).rejects.toThrow(
-      /no WebSocket frame/,
-    );
   });
 });

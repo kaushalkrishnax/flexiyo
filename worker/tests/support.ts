@@ -19,12 +19,11 @@ export async function resetDatabase(): Promise<void> {
     'device_key_envelopes',
     'pairing_sessions',
     'conversation_key_epochs',
-    'message_deliveries',
+    'conversation_user_state',
     'local_deletions',
     'messages',
     'media',
     'conversations',
-    'pre_keys',
     'push_tokens',
     'daily_usage',
     'email_verification_codes',
@@ -45,20 +44,24 @@ export async function seedUser(id: string): Promise<void> {
     .run();
 }
 
+const DEFAULT_IDENTITY_PUB = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+const DEFAULT_NONCE = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const DEFAULT_TAG = 'AAAAAAAAAAAAAAAAAAAAAA==';
+const DEFAULT_CIPHERTEXT = 'YWJj';
+
 export async function seedDevice(
   userId: string,
   installationId: string,
   status: 'active' | 'pending' | 'disabled' | 'logged_out' = 'active',
+  identityPublicKey: string | null = DEFAULT_IDENTITY_PUB,
 ): Promise<number> {
   const result = await db
     .prepare(
       `INSERT INTO devices
-         (user_id, installation_id, registration_id, identity_key,
-          signed_pre_key_id, signed_pre_key_public, signed_pre_key_signature,
-          status, created_at)
-       VALUES (?, ?, 1, 'identity-key', 1, 'signed-pre-key', 'signature', ?, 0)`,
+         (user_id, installation_id, status, created_at, identity_public_key)
+       VALUES (?, ?, ?, 0, ?)`,
     )
-    .bind(userId, installationId, status)
+    .bind(userId, installationId, status, identityPublicKey)
     .run();
   return Number(result.meta.last_row_id);
 }
@@ -66,17 +69,10 @@ export async function seedDevice(
 export async function seedConversationKeyDevice(
   userId: string,
   installationId: string,
-  identityPublicKey = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+  identityPublicKey = DEFAULT_IDENTITY_PUB,
+  status: 'active' | 'pending' | 'disabled' | 'logged_out' = 'active',
 ): Promise<number> {
-  const result = await db.prepare(
-    `INSERT INTO devices
-       (user_id, installation_id, registration_id, identity_key,
-        signed_pre_key_id, signed_pre_key_public, signed_pre_key_signature,
-        status, created_at, encryption_version, identity_public_key)
-     VALUES (?, ?, 1, 'conversation-key-v2', 1, 'conversation-key-v2',
-             'conversation-key-v2', 'active', 0, 2, ?)`,
-  ).bind(userId, installationId, identityPublicKey).run();
-  return Number(result.meta.last_row_id);
+  return seedDevice(userId, installationId, status, identityPublicKey);
 }
 
 export async function seedConversationKeyEpoch(
@@ -104,10 +100,10 @@ export async function seedConversationKeyEpoch(
       epoch,
       recipientDeviceId,
       senderDeviceId,
-      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
-      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
-      'AAAAAAAAAAAAAAAAAAAAAA==',
+      DEFAULT_IDENTITY_PUB,
+      DEFAULT_NONCE,
+      DEFAULT_IDENTITY_PUB,
+      DEFAULT_TAG,
     )),
   ]);
 }
@@ -119,21 +115,28 @@ export async function seedConversation(
   options: { requestStatus?: 'pending' | 'accepted' | 'rejected'; initiatedById?: string | null; disappearingTimer?: number } = {},
 ): Promise<void> {
   const [a, b] = userA < userB ? [userA, userB] : [userB, userA];
-  await db
-    .prepare(
+  await db.batch([
+    db.prepare(
       `INSERT INTO conversations
          (id, user_a_id, user_b_id, initiated_by_id, request_status, disappearing_timer, created_at)
        VALUES (?, ?, ?, ?, ?, ?, 0)`,
-    )
-    .bind(
+    ).bind(
       id,
       a,
       b,
       options.initiatedById ?? null,
       options.requestStatus ?? 'accepted',
       options.disappearingTimer ?? 0,
-    )
-    .run();
+    ),
+    db.prepare(
+      `INSERT OR IGNORE INTO conversation_user_state (conversation_id, user_id, unread_count)
+       VALUES (?, ?, 0)`,
+    ).bind(id, a),
+    db.prepare(
+      `INSERT OR IGNORE INTO conversation_user_state (conversation_id, user_id, unread_count)
+       VALUES (?, ?, 0)`,
+    ).bind(id, b),
+  ]);
 }
 
 export async function seedBlock(blockerId: string, blockedId: string): Promise<void> {
@@ -147,21 +150,44 @@ export async function seedMessage(
   id: string,
   conversationId: string,
   senderId: string,
-  options: { senderDeviceId?: number | null; isUnsent?: boolean; createdAt?: number } = {},
+  options: {
+    senderDeviceId?: number | null;
+    isUnsent?: boolean;
+    createdAt?: number;
+    readAt?: number | null;
+    deliveredAt?: number | null;
+    expiresAt?: number | null;
+    keyEpoch?: number;
+  } = {},
 ): Promise<void> {
+  const createdAt = options.createdAt ?? 0;
+  const isUnsent = options.isUnsent ? 1 : 0;
+  const readAt = options.readAt ?? null;
+  const deliveredAt = options.deliveredAt ?? null;
+  const expiresAt = options.expiresAt ?? null;
+  const keyEpoch = options.keyEpoch ?? 1;
+
   await db
     .prepare(
       `INSERT INTO messages
-         (id, conversation_id, sender_id, sender_device_id, message_type, version, is_unsent, created_at)
-       VALUES (?, ?, ?, ?, 'signal', 1, ?, ?)`,
+         (id, conversation_id, sender_id, sender_device_id, message_type, version, is_unsent, created_at,
+          delivered_at, read_at, expires_at, ciphertext, nonce, auth_tag, key_epoch)
+       VALUES (?, ?, ?, ?, 'signal', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       id,
       conversationId,
       senderId,
       options.senderDeviceId ?? null,
-      options.isUnsent ? 1 : 0,
-      options.createdAt ?? 0,
+      isUnsent,
+      createdAt,
+      deliveredAt,
+      readAt,
+      expiresAt,
+      DEFAULT_CIPHERTEXT,
+      DEFAULT_NONCE,
+      DEFAULT_TAG,
+      keyEpoch,
     )
     .run();
 }

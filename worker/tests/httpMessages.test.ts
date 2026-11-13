@@ -6,7 +6,8 @@ import {
   resetDatabase,
   seedBlock,
   seedConversation,
-  seedDevice,
+  seedConversationKeyDevice,
+  seedConversationKeyEpoch,
   seedMessage,
   seedUser,
   testEnv,
@@ -18,20 +19,24 @@ const BOB = 'bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb';
 const CAROL = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 const CONVERSATION = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 const OTHER_CONVERSATION = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+const NONCE = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const TAG = 'AAAAAAAAAAAAAAAAAAAAAA==';
+const CIPHERTEXT = 'YWJj';
+const UPDATED_CIPHERTEXT = 'ZGVm';
 
 let aliceDevice = 0;
 let bobDevice = 0;
-let carolDevice = 0;
 
 beforeEach(async () => {
   await resetDatabase();
   await seedUser(ALICE);
   await seedUser(BOB);
   await seedUser(CAROL);
-  aliceDevice = await seedDevice(ALICE, 'install-alice');
-  bobDevice = await seedDevice(BOB, 'install-bob');
-  carolDevice = await seedDevice(CAROL, 'install-carol');
+  aliceDevice = await seedConversationKeyDevice(ALICE, 'install-alice');
+  bobDevice = await seedConversationKeyDevice(BOB, 'install-bob');
+  await seedConversationKeyDevice(CAROL, 'install-carol');
   await seedConversation(CONVERSATION, ALICE, BOB);
+  await seedConversationKeyEpoch(CONVERSATION, 1, aliceDevice, [aliceDevice, bobDevice]);
 });
 
 interface ApiOptions {
@@ -61,18 +66,19 @@ async function api(
 
 function sendBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
+    encryptionVersion: 2,
     id: crypto.randomUUID(),
-    payloads: [
-      { deviceId: bobDevice, ciphertext: 'ct-for-bob', messageType: 'signal' },
-    ],
-    messageType: 'signal',
+    ciphertext: CIPHERTEXT,
+    nonce: NONCE,
+    authTag: TAG,
+    keyEpoch: 1,
     recipientId: BOB,
     ...overrides,
   };
 }
 
 describe('POST /api/conversations/:id/messages', () => {
-  it('commits the message and returns the created resource', async () => {
+  it('commits the v2 message, returns it, and updates conversation state', async () => {
     const body = sendBody();
     const response = await api('POST', `/api/conversations/${CONVERSATION}/messages`, {
       installation: 'install-alice',
@@ -86,6 +92,11 @@ describe('POST /api/conversations/:id/messages', () => {
       conversationId: CONVERSATION,
       senderId: ALICE,
       senderDeviceId: aliceDevice,
+      encryptionVersion: 2,
+      ciphertext: CIPHERTEXT,
+      nonce: NONCE,
+      authTag: TAG,
+      keyEpoch: 1,
       messageType: 'signal',
       version: 1,
       isUnsent: false,
@@ -93,15 +104,21 @@ describe('POST /api/conversations/:id/messages', () => {
     });
 
     expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(1);
-    expect(await countRows('SELECT COUNT(*) AS n FROM message_deliveries')).toBe(1);
-    const delivery = await db
-      .prepare('SELECT recipient_device_id, payload FROM message_deliveries WHERE message_id = ?')
-      .bind(body.id as string)
-      .first<{ recipient_device_id: number; payload: string }>();
-    expect(delivery).toEqual({ recipient_device_id: bobDevice, payload: 'ct-for-bob' });
+    const conv = await db
+      .prepare('SELECT last_message_at, last_message_sender_id FROM conversations WHERE id = ?')
+      .bind(CONVERSATION)
+      .first<{ last_message_at: number | null; last_message_sender_id: string | null }>();
+    expect(conv?.last_message_at).toBeGreaterThan(0);
+    expect(conv?.last_message_sender_id).toBe(ALICE);
+
+    const bobState = await db
+      .prepare('SELECT unread_count FROM conversation_user_state WHERE conversation_id = ? AND user_id = ?')
+      .bind(CONVERSATION, BOB)
+      .first<{ unread_count: number }>();
+    expect(bobState?.unread_count).toBe(1);
   });
 
-  it('reports a retry of the same id as already committed', async () => {
+  it('reports a retry of the same id as already committed without double-counting unread', async () => {
     const body = sendBody();
 
     const first = await api('POST', `/api/conversations/${CONVERSATION}/messages`, {
@@ -117,6 +134,25 @@ describe('POST /api/conversations/:id/messages', () => {
     expect(retry.status).toBe(200);
     expect(await retry.json()).toEqual({ id: body.id, status: 'already_committed' });
     expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(1);
+
+    const bobState = await db
+      .prepare('SELECT unread_count FROM conversation_user_state WHERE conversation_id = ? AND user_id = ?')
+      .bind(CONVERSATION, BOB)
+      .first<{ unread_count: number }>();
+    expect(bobState?.unread_count).toBe(1);
+  });
+
+  it('rejects a legacy v1 payloads body', async () => {
+    const response = await api('POST', `/api/conversations/${CONVERSATION}/messages`, {
+      installation: 'install-alice',
+      body: {
+        id: crypto.randomUUID(),
+        payloads: [{ deviceId: bobDevice, ciphertext: 'ct', messageType: 'signal' }],
+        messageType: 'signal',
+        recipientId: BOB,
+      },
+    });
+    expect(response.status).toBe(400);
   });
 
   it('rejects an id used by another sender', async () => {
@@ -134,7 +170,7 @@ describe('POST /api/conversations/:id/messages', () => {
     await seedConversation(OTHER_CONVERSATION, BOB, CAROL);
     const response = await api('POST', `/api/conversations/${OTHER_CONVERSATION}/messages`, {
       installation: 'install-alice',
-      body: sendBody({ recipientId: CAROL, payloads: [{ deviceId: carolDevice, ciphertext: 'ct' }] }),
+      body: sendBody({ recipientId: CAROL }),
     });
     expect(response.status).toBe(404);
     expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(0);
@@ -159,9 +195,10 @@ describe('POST /api/conversations/:id/messages', () => {
     await resetDatabase();
     await seedUser(ALICE);
     await seedUser(BOB);
-    aliceDevice = await seedDevice(ALICE, 'install-alice');
-    bobDevice = await seedDevice(BOB, 'install-bob');
+    aliceDevice = await seedConversationKeyDevice(ALICE, 'install-alice');
+    bobDevice = await seedConversationKeyDevice(BOB, 'install-bob');
     await seedConversation(CONVERSATION, ALICE, BOB);
+    await seedConversationKeyEpoch(CONVERSATION, 1, aliceDevice, [aliceDevice, bobDevice]);
     await seedBlock(ALICE, BOB);
 
     const blockedBySender = await api('POST', `/api/conversations/${CONVERSATION}/messages`, {
@@ -180,7 +217,7 @@ describe('POST /api/conversations/:id/messages', () => {
     const response = await api('POST', `/api/conversations/${CONVERSATION}/messages`, {
       userId: BOB,
       installation: 'install-bob',
-      body: sendBody({ recipientId: ALICE, payloads: [{ deviceId: aliceDevice, ciphertext: 'ct' }] }),
+      body: sendBody({ recipientId: ALICE }),
     });
     expect(response.status).toBe(403);
   });
@@ -205,7 +242,7 @@ describe('POST /api/conversations/:id/messages', () => {
     expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(1);
   });
 
-  it('requires a known sender installation', async () => {
+  it('requires an active registered v2 sender installation', async () => {
     const missing = await api('POST', `/api/conversations/${CONVERSATION}/messages`, {
       body: sendBody(),
     });
@@ -216,57 +253,37 @@ describe('POST /api/conversations/:id/messages', () => {
       body: sendBody(),
     });
     expect(unknown.status).toBe(403);
+
+    await db.prepare("UPDATE devices SET status = 'disabled' WHERE id = ?").bind(aliceDevice).run();
+    const disabled = await api('POST', `/api/conversations/${CONVERSATION}/messages`, {
+      installation: 'install-alice',
+      body: sendBody(),
+    });
+    expect(disabled.status).toBe(403);
     expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(0);
   });
 
-  it('still sends from a device that was deactivated after registration', async () => {
-    await db.prepare("UPDATE devices SET status = 'disabled' WHERE id = ?").bind(aliceDevice).run();
-
-    const response = await api('POST', `/api/conversations/${CONVERSATION}/messages`, {
-      installation: 'install-alice',
-      body: sendBody(),
-    });
-    expect(response.status).toBe(201);
-  });
-
-  it('rejects a recipient with no active devices', async () => {
+  it('rejects when a recipient has no active devices or is missing a key envelope', async () => {
     await db.prepare("UPDATE devices SET status = 'disabled' WHERE user_id = ?").bind(BOB).run();
-
-    const response = await api('POST', `/api/conversations/${CONVERSATION}/messages`, {
+    const noRecipient = await api('POST', `/api/conversations/${CONVERSATION}/messages`, {
       installation: 'install-alice',
       body: sendBody(),
     });
-    expect(response.status).toBe(409);
-  });
+    expect(noRecipient.status).toBe(409);
 
-  it('rejects payloads for devices outside the conversation', async () => {
-    const response = await api('POST', `/api/conversations/${CONVERSATION}/messages`, {
-      installation: 'install-alice',
-      body: sendBody({
-        payloads: [
-          { deviceId: bobDevice, ciphertext: 'ct-for-bob' },
-          { deviceId: aliceDevice, ciphertext: 'ct-for-self' },
-        ],
-      }),
-    });
-    expect(response.status).toBe(400);
-    const body = (await response.json()) as Record<string, unknown>;
-    expect(body).toMatchObject({ error: 'unknown_device', deviceId: aliceDevice });
-  });
-
-  it('rejects when an active recipient device has no payload', async () => {
-    await seedDevice(BOB, 'install-bob-2');
-
-    const response = await api('POST', `/api/conversations/${CONVERSATION}/messages`, {
+    await db.prepare("UPDATE devices SET status = 'active' WHERE user_id = ?").bind(BOB).run();
+    await seedConversationKeyDevice(BOB, 'install-bob-2');
+    const missingEnvelope = await api('POST', `/api/conversations/${CONVERSATION}/messages`, {
       installation: 'install-alice',
       body: sendBody(),
     });
-    expect(response.status).toBe(409);
-    const body = (await response.json()) as Record<string, unknown>;
-    expect(body.error).toBe('missing_device_payloads');
+    expect(missingEnvelope.status).toBe(409);
+    expect(await missingEnvelope.json()).toMatchObject({
+      error: 'conversation_keys_not_provisioned',
+    });
   });
 
-  it('validates the body', async () => {
+  it('validates the body and auth', async () => {
     const badId = await api('POST', `/api/conversations/${CONVERSATION}/messages`, {
       installation: 'install-alice',
       body: sendBody({ id: 'not-a-uuid' }),
@@ -275,7 +292,7 @@ describe('POST /api/conversations/:id/messages', () => {
 
     const empty = await api('POST', `/api/conversations/${CONVERSATION}/messages`, {
       installation: 'install-alice',
-      body: sendBody({ payloads: [] }),
+      body: sendBody({ ciphertext: '' }),
     });
     expect(empty.status).toBe(400);
 
@@ -300,7 +317,7 @@ describe('GET /api/conversations/:id/messages', () => {
     return body.id as string;
   }
 
-  it('returns only the ciphertext addressed to the requesting device', async () => {
+  it('returns the conversation-key message for both participants', async () => {
     const messageId = await postMessage();
 
     const asBob = await api('GET', `/api/conversations/${CONVERSATION}/messages`, {
@@ -313,7 +330,11 @@ describe('GET /api/conversations/:id/messages', () => {
     expect(bobMessages[0]).toMatchObject({
       id: messageId,
       senderId: ALICE,
-      encryptedPayload: 'ct-for-bob',
+      encryptionVersion: 2,
+      ciphertext: CIPHERTEXT,
+      nonce: NONCE,
+      authTag: TAG,
+      keyEpoch: 1,
       isSentByMe: false,
     });
 
@@ -322,8 +343,11 @@ describe('GET /api/conversations/:id/messages', () => {
     });
     const aliceMessages = (await asAlice.json()) as Array<Record<string, unknown>>;
     expect(aliceMessages).toHaveLength(1);
-    expect(aliceMessages[0].encryptedPayload).toBeNull();
-    expect(aliceMessages[0].isSentByMe).toBe(true);
+    expect(aliceMessages[0]).toMatchObject({
+      id: messageId,
+      ciphertext: CIPHERTEXT,
+      isSentByMe: true,
+    });
   });
 
   it('requires the requesting device', async () => {
@@ -391,8 +415,60 @@ describe('GET /api/conversations/:id/messages', () => {
   });
 });
 
+describe('PATCH /api/conversations/:id/messages/:messageId', () => {
+  it('edits a v2 message and increments its version', async () => {
+    const body = sendBody();
+    const sent = await api('POST', `/api/conversations/${CONVERSATION}/messages`, {
+      installation: 'install-alice',
+      body,
+    });
+    expect(sent.status).toBe(201);
+
+    const editRes = await api('PATCH', `/api/conversations/${CONVERSATION}/messages/${body.id}`, {
+      installation: 'install-alice',
+      body: {
+        encryptionVersion: 2,
+        ciphertext: UPDATED_CIPHERTEXT,
+        nonce: NONCE,
+        authTag: TAG,
+        keyEpoch: 1,
+        version: 1,
+      },
+    });
+    expect(editRes.status).toBe(200);
+    expect(await editRes.json()).toMatchObject({
+      id: body.id,
+      ciphertext: UPDATED_CIPHERTEXT,
+      encryptionVersion: 2,
+      version: 2,
+    });
+
+    const staleEdit = await api('PATCH', `/api/conversations/${CONVERSATION}/messages/${body.id}`, {
+      installation: 'install-alice',
+      body: {
+        encryptionVersion: 2,
+        ciphertext: CIPHERTEXT,
+        nonce: NONCE,
+        authTag: TAG,
+        keyEpoch: 1,
+        version: 1,
+      },
+    });
+    expect(staleEdit.status).toBe(409);
+
+    const v1Edit = await api('PATCH', `/api/conversations/${CONVERSATION}/messages/${body.id}`, {
+      installation: 'install-alice',
+      body: {
+        payloads: [{ deviceId: bobDevice, ciphertext: 'ct' }],
+        version: 2,
+      },
+    });
+    expect(v1Edit.status).toBe(400);
+  });
+});
+
 describe('POST /api/conversations/:id/read', () => {
-  it('marks the peer messages delivered and read', async () => {
+  it('marks peer messages delivered/read and updates conversation_user_state', async () => {
     const body = sendBody();
     await api('POST', `/api/conversations/${CONVERSATION}/messages`, {
       installation: 'install-alice',
@@ -408,12 +484,24 @@ describe('POST /api/conversations/:id/read', () => {
     expect(payload.read).toBe(true);
     expect(payload.readAt).toBeGreaterThan(0);
 
-    const delivery = await db
-      .prepare('SELECT delivered_at, read_at FROM message_deliveries WHERE message_id = ?')
+    const stored = await db
+      .prepare('SELECT delivered_at, read_at FROM messages WHERE id = ?')
       .bind(body.id as string)
       .first<{ delivered_at: number | null; read_at: number | null }>();
-    expect(delivery?.delivered_at).toBeGreaterThan(0);
-    expect(delivery?.read_at).toBeGreaterThan(0);
+    expect(stored?.delivered_at).toBeGreaterThan(0);
+    expect(stored?.read_at).toBe(payload.readAt);
+
+    const aliceState = await db
+      .prepare('SELECT peer_seen_at FROM conversation_user_state WHERE conversation_id = ? AND user_id = ?')
+      .bind(CONVERSATION, ALICE)
+      .first<{ peer_seen_at: number | null }>();
+    expect(aliceState?.peer_seen_at).toBe(payload.readAt);
+
+    const bobState = await db
+      .prepare('SELECT unread_count, last_read_at FROM conversation_user_state WHERE conversation_id = ? AND user_id = ?')
+      .bind(CONVERSATION, BOB)
+      .first<{ unread_count: number; last_read_at: number | null }>();
+    expect(bobState).toEqual({ unread_count: 0, last_read_at: payload.readAt });
   });
 
   it('does not send receipts for pending or blocked conversations', async () => {
@@ -444,14 +532,14 @@ describe('POST /api/conversations/:id/read', () => {
     });
     expect(await blocked.json()).toEqual({ read: false, reason: 'blocked' });
 
-    const delivery = await db
-      .prepare('SELECT read_at FROM message_deliveries WHERE message_id = ?')
+    const stored = await db
+      .prepare('SELECT read_at FROM messages WHERE id = ?')
       .bind(body.id as string)
       .first<{ read_at: number | null }>();
-    expect(delivery?.read_at).toBeNull();
+    expect(stored?.read_at).toBeNull();
   });
 
-  it('deletes the message immediately when the disappearing timer is -1', async () => {
+  it('deletes the message immediately when the disappearing timer is -1 and resets state cleanly', async () => {
     await db
       .prepare('UPDATE conversations SET disappearing_timer = -1 WHERE id = ?')
       .bind(CONVERSATION)
@@ -469,6 +557,24 @@ describe('POST /api/conversations/:id/read', () => {
     });
     expect(response.status).toBe(200);
     expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(0);
+
+    const bobState = await db
+      .prepare('SELECT unread_count FROM conversation_user_state WHERE conversation_id = ? AND user_id = ?')
+      .bind(CONVERSATION, BOB)
+      .first<{ unread_count: number }>();
+    expect(bobState?.unread_count).toBe(0);
+
+    const aliceState = await db
+      .prepare('SELECT peer_seen_at FROM conversation_user_state WHERE conversation_id = ? AND user_id = ?')
+      .bind(CONVERSATION, ALICE)
+      .first<{ peer_seen_at: number | null }>();
+    expect(aliceState?.peer_seen_at).toBeNull();
+
+    const conv = await db
+      .prepare('SELECT last_message_at, last_message_sender_id FROM conversations WHERE id = ?')
+      .bind(CONVERSATION)
+      .first<{ last_message_at: number | null; last_message_sender_id: string | null }>();
+    expect(conv).toEqual({ last_message_at: null, last_message_sender_id: null });
   });
 
   it('arms expires_at for more than 100 messages in one read', async () => {
@@ -484,17 +590,11 @@ describe('POST /api/conversations/:id/read', () => {
         db
           .prepare(
             `INSERT INTO messages
-               (id, conversation_id, sender_id, sender_device_id, message_type, version, is_unsent, created_at)
-             VALUES (?, ?, ?, ?, 'signal', 1, 0, 0)`,
+               (id, conversation_id, sender_id, sender_device_id, message_type, version, is_unsent, created_at,
+                ciphertext, nonce, auth_tag, key_epoch)
+             VALUES (?, ?, ?, ?, 'signal', 1, 0, 0, ?, ?, ?, 1)`,
           )
-          .bind(id, CONVERSATION, ALICE, aliceDevice),
-        db
-          .prepare(
-            `INSERT INTO message_deliveries
-               (id, message_id, recipient_device_id, payload, message_type, created_at)
-             VALUES (?, ?, ?, 'ct', 'signal', 0)`,
-          )
-          .bind(crypto.randomUUID(), id, bobDevice),
+          .bind(id, CONVERSATION, ALICE, aliceDevice, CIPHERTEXT, NONCE, TAG),
       );
     }
     await db.batch(statements);
@@ -544,7 +644,7 @@ describe('DELETE /api/conversations/:id/messages/:messageId', () => {
     return { messageId: body.id as string, mediaId, r2Key };
   }
 
-  it('unsends the message and purges its media from R2', async () => {
+  it('unsends the message, purges its media from R2, and resets conversation state', async () => {
     const { messageId, mediaId, r2Key } = await sendMediaMessage();
 
     const response = await api('DELETE', `/api/conversations/${CONVERSATION}/messages/${messageId}`, {
@@ -554,15 +654,20 @@ describe('DELETE /api/conversations/:id/messages/:messageId', () => {
     expect(await response.json()).toEqual({ deleted: true, scope: 'global' });
 
     expect(await countRows('SELECT COUNT(*) AS n FROM messages')).toBe(0);
-    expect(await countRows('SELECT COUNT(*) AS n FROM message_deliveries')).toBe(0);
     expect(await countRows('SELECT COUNT(*) AS n FROM media WHERE id = ?', mediaId)).toBe(0);
     expect(await testEnv.MEDIA.get(r2Key)).toBeNull();
 
     const conversation = await db
-      .prepare('SELECT last_message_at FROM conversations WHERE id = ?')
+      .prepare('SELECT last_message_at, last_message_sender_id FROM conversations WHERE id = ?')
       .bind(CONVERSATION)
-      .first<{ last_message_at: number | null }>();
-    expect(conversation?.last_message_at).toBeNull();
+      .first<{ last_message_at: number | null; last_message_sender_id: string | null }>();
+    expect(conversation).toEqual({ last_message_at: null, last_message_sender_id: null });
+
+    const bobState = await db
+      .prepare('SELECT unread_count FROM conversation_user_state WHERE conversation_id = ? AND user_id = ?')
+      .bind(CONVERSATION, BOB)
+      .first<{ unread_count: number }>();
+    expect(bobState?.unread_count).toBe(0);
   });
 
   it('lets only the sender unsend', async () => {

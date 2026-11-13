@@ -31,7 +31,7 @@ class NetworkException extends FlexiyoException {
   const NetworkException([super.message = 'Network error']) : super();
 }
 
-/// Thrown when Signal Protocol session or key operations fail.
+/// Thrown when encryption or key operations fail.
 class CryptoException extends FlexiyoException {
   const CryptoException(super.message);
 }

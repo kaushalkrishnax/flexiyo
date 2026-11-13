@@ -4,8 +4,8 @@ import 'package:flutter/foundation.dart';
 /// Status of a message in the send pipeline.
 enum MessageStatus { sending, sent, delivered, read, failed }
 
-/// Type of Signal Protocol message envelope.
-enum MessageType { signal, prekey, system }
+/// Type of encrypted message envelope.
+enum MessageType { signal, system }
 
 /// An end-to-end encrypted message in a conversation.
 @immutable
@@ -21,7 +21,7 @@ class Message {
     required this.status,
     this.decryptedText,
     this.encryptedPayload,
-    this.encryptionVersion = 1,
+    this.encryptionVersion = 2,
     this.nonce,
     this.authTag,
     this.keyEpoch,
@@ -102,7 +102,7 @@ class Message {
       senderId: json['senderId'] as String? ?? '',
       senderDeviceId: json['senderDeviceId'] as int?,
       encryptedPayload: (json['ciphertext'] as String?) ?? json['encryptedPayload'] as String?,
-      encryptionVersion: (json['encryptionVersion'] as num?)?.toInt() ?? 1,
+      encryptionVersion: (json['encryptionVersion'] as num?)?.toInt() ?? 2,
       nonce: json['nonce'] as String?,
       authTag: json['authTag'] as String?,
       keyEpoch: (json['keyEpoch'] as num?)?.toInt(),
@@ -137,7 +137,7 @@ class Message {
       senderDeviceId: json['sender_device_id'] as int?,
       decryptedText: json['decrypted_text'] as String?,
       encryptedPayload: json['encrypted_payload'] as String?,
-      encryptionVersion: (json['encryption_version'] as int?) ?? 1,
+      encryptionVersion: (json['encryption_version'] as int?) ?? 2,
       nonce: json['nonce'] as String?,
       authTag: json['auth_tag'] as String?,
       keyEpoch: json['key_epoch'] as int?,

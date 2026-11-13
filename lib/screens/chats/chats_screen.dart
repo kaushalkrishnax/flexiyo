@@ -6,7 +6,7 @@ import 'package:flexiyo/models/conversation.dart';
 import 'package:flexiyo/models/user.dart';
 import 'package:flexiyo/providers/auth_provider.dart';
 import 'package:flexiyo/providers/chat/chat_provider.dart';
-import 'package:flexiyo/providers/signal_crypto_provider.dart';
+import 'package:flexiyo/providers/conversation_crypto_provider.dart';
 import 'package:flexiyo/services/api_service.dart';
 import 'package:flexiyo/widgets/conversation/avatar.dart';
 import 'package:flexiyo/widgets/conversation/app_popup_menu.dart';
@@ -521,7 +521,7 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen>
 
   Future<void> _warmUpCrypto(String userId) async {
     try {
-      await ref.read(signalCryptoProvider(userId).future);
+      await ref.read(conversationCryptoProvider).ensureDeviceRegistered(userId: userId);
     } catch (_) {}
   }
 }

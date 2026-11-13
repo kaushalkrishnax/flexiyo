@@ -19,29 +19,36 @@ export async function deleteMessages(
   const idSet = JSON.stringify(ids);
 
   const [deletedMedia, deletionImpacts] = await env.DB.batch([
+    // json_each drives the join so each id is a primary-key probe; an
+    // `id IN (SELECT ...)` predicate scans every message in the conversation.
     env.DB.prepare(
       `SELECT media.id AS id, media.r2_key AS r2_key
-       FROM messages m
+       FROM json_each(?) ids
+       CROSS JOIN messages m
        JOIN media ON media.id = m.media_id
-       WHERE m.conversation_id = ?
-         AND m.id IN (SELECT value FROM json_each(?))`,
-    ).bind(conversationId, idSet),
+       WHERE m.id = ids.value AND m.conversation_id = ?`,
+    ).bind(idSet, conversationId),
     env.DB.prepare(
       `SELECT
          m.sender_id AS sender_id,
          SUM(CASE WHEN m.read_at IS NULL THEN 1 ELSE 0 END) AS unread_deleted,
          SUM(CASE WHEN m.read_at IS NOT NULL THEN 1 ELSE 0 END) AS read_deleted
-       FROM messages m
-       WHERE m.conversation_id = ?
+       FROM json_each(?) ids
+       CROSS JOIN messages m
+       WHERE m.id = ids.value
+         AND m.conversation_id = ?
          AND m.is_unsent = 0
-         AND m.id IN (SELECT value FROM json_each(?))
        GROUP BY m.sender_id`,
-    ).bind(conversationId, idSet),
+    ).bind(idSet, conversationId),
     env.DB.prepare(
       `DELETE FROM messages
-       WHERE conversation_id = ?
-         AND id IN (SELECT value FROM json_each(?))`,
-    ).bind(conversationId, idSet),
+       WHERE rowid IN (
+         SELECT m.rowid
+         FROM json_each(?) ids
+         CROSS JOIN messages m
+         WHERE m.id = ids.value AND m.conversation_id = ?
+       )`,
+    ).bind(idSet, conversationId),
   ]);
 
   const media = (deletedMedia.results ?? []) as Array<{ id: string; r2_key: string }>;

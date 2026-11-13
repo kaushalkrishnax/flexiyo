@@ -12,6 +12,7 @@ export const DEFAULT_SCENARIO = {
   concurrency: 10,
   chatsPerDay: 3,
   messagesPerDay: 20,
+  scenario: 'normal',
   heartbeatsPerDay: 4,
   /** typing_start + typing_stop for every message. */
   typingEventsPerMessage: 2,
@@ -53,6 +54,7 @@ Options:
   --timeout-ms <n>       Per-request timeout (default ${DEFAULT_SCENARIO.requestTimeoutMs})
   --rows-read-limit <n>  D1 rows-read/day limit to project against (default ${DEFAULT_SCENARIO.rowsReadLimit})
   --rows-written-limit <n> D1 rows-written/day limit (default ${DEFAULT_SCENARIO.rowsWrittenLimit})
+  --scenario <name>      Cost-model scenario: normal, high-volume, or stress (default ${DEFAULT_SCENARIO.scenario})
   --allow-remote         Permit seeding users against a non-localhost target
   --help                 Show this help
 
@@ -124,6 +126,12 @@ export function parseArgs(argv) {
         break;
       case '--rows-written-limit':
         options.rowsWrittenLimit = number(value(), '--rows-written-limit');
+        break;
+      case '--scenario':
+        options.scenario = value();
+        if (!['normal', 'high-volume', 'stress'].includes(options.scenario)) {
+          throw new Error('--scenario must be normal, high-volume, or stress');
+        }
         break;
       case '--allow-remote':
         options.allowRemote = true;

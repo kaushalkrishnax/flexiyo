@@ -543,11 +543,15 @@ messagesRouter.post(
     }
 
     const messageIds = [...new Set(parsed.data.messageIds)];
+    // Driving from json_each keeps this to one primary-key lookup per id; the
+    // IN-subquery form makes SQLite scan the whole conversation instead.
     const matching = await env.DB.prepare(
-      `SELECT id FROM messages
-       WHERE conversation_id = ? AND id IN (SELECT value FROM json_each(?))`,
+      `SELECT m.id AS id
+       FROM json_each(?) ids
+       CROSS JOIN messages m
+       WHERE m.id = ids.value AND m.conversation_id = ?`,
     )
-      .bind(conversationId, JSON.stringify(messageIds))
+      .bind(JSON.stringify(messageIds), conversationId)
       .all<{ id: string }>();
     if ((matching.results ?? []).length !== messageIds.length) {
       return new Response(JSON.stringify({ error: 'One or more messages were not found' }), {
@@ -607,19 +611,20 @@ messagesRouter.post(
     const peerId =
       conversation.user_a_id === userId ? conversation.user_b_id : conversation.user_a_id;
 
-    const [unreadRows] = await env.DB.batch<{ id: string }>([
-      env.DB.prepare(
-        `SELECT id FROM messages
-         WHERE conversation_id = ? AND sender_id != ? AND is_unsent = 0 AND read_at IS NULL`,
-      ).bind(conversationId, userId),
-      env.DB.prepare(
-        `UPDATE messages
-         SET delivered_at = COALESCE(delivered_at, ?), read_at = ?
-         WHERE conversation_id = ? AND sender_id != ? AND is_unsent = 0 AND read_at IS NULL`,
-      ).bind(now, now, conversationId, userId),
-    ]);
+    // Address the peer directly so the (conversation_id, sender_id, read_at)
+    // index is fully constrained; `sender_id != ?` degrades to a conversation
+    // range scan. One UPDATE ... RETURNING replaces the SELECT-then-UPDATE so
+    // the unread set is scanned once and a concurrent read cannot double-broadcast.
+    const newlyRead = await env.DB.prepare(
+      `UPDATE messages
+       SET delivered_at = COALESCE(delivered_at, ?), read_at = ?
+       WHERE conversation_id = ? AND sender_id = ? AND is_unsent = 0 AND read_at IS NULL
+       RETURNING id`,
+    )
+      .bind(now, now, conversationId, peerId)
+      .all<{ id: string }>();
 
-    const newlyReadMessageIds = (unreadRows.results ?? []).map((row) => row.id);
+    const newlyReadMessageIds = (newlyRead.results ?? []).map((row) => row.id);
 
     if (newlyReadMessageIds.length > 0) {
       await env.DB.batch([

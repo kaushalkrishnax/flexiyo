@@ -1,10 +1,11 @@
 /**
- * Flexiyo load test entry point.
+ * Flexiyo load test entry point (V2).
  *
  * Simulates one compressed day for N daily-active users against a locally
- * running Worker (`bun run dev`): sign up synthetic accounts, open inbox and
- * chat sockets, send/ack/read messages, then project the measured client
- * traffic plus the modeled server costs (costs.js) onto the Cloudflare
+ * running Worker (`bun run dev`): sign up synthetic accounts, register V2
+ * devices, create conversations, provision key epochs + envelopes, open
+ * inbox and chat sockets, send/ack/read messages, then project the measured
+ * client traffic plus the modeled server costs (costs.js) onto the Cloudflare
  * free-plan limits (limits.js).
  *
  * Usage: bun run loadtest [--users 50]   (see usage() in scenario.js)
@@ -13,8 +14,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomBytes } from 'node:crypto';
 import { HttpError, LoadClient, Metrics, isLocalTarget, sleep } from './client.js';
-import { D1, DO_FANOUT } from './costs.js';
+import { D1, DO_FANOUT, scenario as loadScenario } from './costs.js';
 import { parseArgs, usage } from './scenario.js';
 import { buildReport, measureLocalD1 } from './report.js';
 
@@ -23,14 +25,14 @@ const STATE_FILE = join(HERE, '.state.json');
 const RESULTS_DIR = join(HERE, 'results');
 const WORKER_DIR = join(HERE, '..', '..', 'worker');
 
-const PRE_KEYS_PER_DEVICE = 5;
-/** Lets in-flight delivery acks land before the read pass. */
+const PRE_KEYS_PER_DEVICE = 0; // V2 has no pre_keys table.
 const SETTLE_MS = 400;
 const CRON_EXPRESSION = '0 * * * *';
 const SOCKET_OPEN = 1;
+const KEY_EPOCH = 1;
 
 const randomBase64 = (length) =>
-  Buffer.from(crypto.getRandomValues(new Uint8Array(length))).toString('base64');
+  Buffer.from(randomBytes(length)).toString('base64');
 const randomInt = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
 const jitter = (ms) => sleep(ms > 0 ? randomInt(0, ms) : 0);
 const seconds = (started) => `${((performance.now() - started) / 1000).toFixed(1)}s`;
@@ -88,7 +90,7 @@ async function preflight(baseUrl, timeoutMs) {
 }
 
 // ---------------------------------------------------------------------------
-// Account + conversation seeding (one-time cost, reported separately)
+// Day phases
 // ---------------------------------------------------------------------------
 
 /**
@@ -159,28 +161,71 @@ async function seedUser(args, setup, user) {
   client.userId = user.userId;
   client.username = user.username;
 
+  // V2 bootstrap: /api/devices/v2/register, identityPublicKey = 32 bytes base64,
+  // no pre_keys, no per-device acks.
   const device = await retry429(() =>
-    client.http('POST', '/api/devices/register', {
+    client.http('POST', '/api/devices/v2/register', {
       op: 'setup.device',
       body: {
         installationId: user.username,
-        identityKey: randomBase64(32),
-        registrationId: randomInt(1, 16_380),
-        signedPreKey: { keyId: 1, publicKey: randomBase64(32), signature: randomBase64(64) },
-        preKeys: Array.from({ length: PRE_KEYS_PER_DEVICE }, (_, index) => ({
-          keyId: index + 1,
-          publicKey: randomBase64(32),
-        })),
-        activate: true,
+        identityPublicKey: randomBase64(32),
       },
     }),
   );
   D1.authRequest(setup);
-  D1.deviceRegister(setup, { preKeys: PRE_KEYS_PER_DEVICE });
+  D1.deviceRegister(setup);
 
   user.installationId = device.json.installationId;
   user.deviceId = device.json.deviceId;
   user.client = client;
+}
+
+function envelopeFor(deviceId) {
+  return {
+    recipientDeviceId: deviceId,
+    ephemeralPublicKey: randomBase64(32),
+    nonce: randomBase64(24),
+    ciphertext: randomBase64(16),
+    mac: randomBase64(16),
+  };
+}
+
+/**
+ * Provision key epoch 1 and envelopes for a freshly created conversation so
+ * that V2 send_message passes the conversation_keys_not_provisioned check.
+ * Each user provisions envelopes for their own active devices only: the
+ * key-envelopes route restricts recipient_device_id to the caller's devices.
+ */
+async function provisionKeys(client, metrics, conversationId, ownDeviceId, peerDeviceId) {
+  // Initiator creates key epoch 1.
+  const epochResp = await client.http(
+    'POST',
+    `/api/conversations/${conversationId}/key-epochs`,
+    { body: { epoch: KEY_EPOCH }, op: 'setup.keyEpochs' },
+  );
+  D1.authRequest(metrics);
+  D1.keyEpochs(metrics, { deviceCount: 2 });
+
+  if (epochResp.status !== 201 && epochResp.status !== 409) {
+    // 409 = epoch already exists (reused account); not fatal.
+    metrics.recordError('setup.keyEpochs', `unexpected ${epochResp.status}`);
+  }
+
+  // Each caller provisions envelopes for their own device(s).
+  const envelopeResp = await client.http(
+    'POST',
+    `/api/conversations/${conversationId}/key-envelopes`,
+    {
+      body: { epoch: KEY_EPOCH, envelopes: [envelopeFor(ownDeviceId)] },
+      op: 'setup.keyEnvelopes',
+    },
+  );
+  D1.authRequest(metrics);
+  D1.keyEnvelopes(metrics, { recipientCount: 1 });
+
+  if (envelopeResp.status !== 201) {
+    metrics.recordError('setup.keyEnvelopes', `unexpected ${envelopeResp.status}`);
+  }
 }
 
 async function seedConversations(args, setup, users) {
@@ -213,6 +258,22 @@ async function seedConversations(args, setup, users) {
         setup.count('do.fanout', DO_FANOUT.requestDecision);
         setup.count('conversations.accepted');
       }
+
+      // V2: provision key epoch + envelopes so messages can be sent.
+      await provisionKeys(
+        initiator.client,
+        setup,
+        conversation.id,
+        initiator.deviceId,
+        responder.deviceId,
+      );
+      await provisionKeys(
+        responder.client,
+        setup,
+        conversation.id,
+        responder.deviceId,
+        initiator.deviceId,
+      );
     },
     errorReporter(),
   );
@@ -380,9 +441,11 @@ async function sendMessages(ctx, args, run) {
         conversationId: chat.conversation.id,
         id: crypto.randomUUID(),
         recipientId: chat.peer.userId,
-        payloads: [
-          { deviceId: chat.peer.deviceId, ciphertext: randomBase64(128), messageType: 'signal' },
-        ],
+        encryptionVersion: 2,
+        ciphertext: randomBase64(128),
+        nonce: randomBase64(24),
+        authTag: randomBase64(16),
+        keyEpoch: KEY_EPOCH,
         messageType: 'signal',
       },
       { op: 'ws.send_message' },
@@ -430,7 +493,7 @@ function closeSockets(ctx) {
   ctx.inbox?.close();
 }
 
-async function fireCron(args, run) {
+async function fireCron(args, run, activeScenario) {
   for (let index = 0; index < args.cronRuns; index += 1) {
     const url = new URL('/__scheduled', args.baseUrl);
     url.searchParams.set('cron', CRON_EXPRESSION);
@@ -449,7 +512,10 @@ async function fireCron(args, run) {
       return;
     }
     run.count('cron.runs');
-    D1.cron(run);
+    D1.cron(run, {
+      scanned: 1000 * activeScenario.messagesPerDay / 20,
+      written: 50,
+    });
   }
 }
 
@@ -466,6 +532,7 @@ async function main() {
   }
   await preflight(args.baseUrl, args.requestTimeoutMs);
 
+  const activeScenario = loadScenario(args.scenario);
   const startedAt = new Date();
   const run = new Metrics();
   const setup = new Metrics();
@@ -507,7 +574,7 @@ async function main() {
 
     if (args.sendCron) {
       started = performance.now();
-      await fireCron(args, run);
+      await fireCron(args, run, activeScenario);
       console.log(`  cron       ${run.get('cron.runs')}/${args.cronRuns} in ${seconds(started)}`);
     }
   } finally {

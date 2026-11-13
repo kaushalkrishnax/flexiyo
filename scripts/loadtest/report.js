@@ -69,16 +69,23 @@ function findSqliteFile(directory) {
 const D1_TABLES = [
   'users',
   'devices',
-  'pre_keys',
   'conversations',
   'messages',
-  'message_deliveries',
   'local_deletions',
   'message_reactions',
   'media',
   'media_views',
   'daily_usage',
   'worker_meta',
+  'conversation_key_epochs',
+  'device_key_envelopes',
+  'conversation_user_state',
+  'pairing_sessions',
+  'push_tokens',
+  'email_verification_codes',
+  'token_revocations',
+  'user_blocks',
+  'rate_limit_buckets',
 ];
 
 export async function measureLocalD1(workerDir) {

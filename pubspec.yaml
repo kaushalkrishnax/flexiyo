@@ -3,7 +3,7 @@ description: Secure one-to-one end-to-end encrypted messaging.
 
 publish_to: 'none'
 
-version: 1.0.4-beta.1+10004
+version: 1.0.4-beta.2+10004
 
 environment:
   sdk: '>=3.3.0 <4.0.0'

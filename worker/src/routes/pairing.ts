@@ -49,12 +49,22 @@ pairingRouter.post(
     const now = Math.floor(Date.now() / 1000);
     const id = generateId();
     const expiresAt = now + 180;
-    await env.DB.prepare(
+    const inserted = await env.DB.prepare(
       `INSERT INTO pairing_sessions
          (id, user_id, initiator_device_id, initiator_ephemeral_public,
           status, created_at, expires_at)
-       VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
-    ).bind(id, userId, device.id, parsed.data.initiatorEphemeralPublic, now, expiresAt).run();
+       SELECT ?, ?, ?, ?, 'pending', ?, ?
+       WHERE (
+         SELECT COUNT(*) FROM pairing_sessions
+         WHERE user_id = ? AND status IN ('pending', 'joined') AND expires_at > ?
+       ) < 3`,
+    ).bind(
+      id, userId, device.id, parsed.data.initiatorEphemeralPublic, now, expiresAt,
+      userId, now,
+    ).run();
+    if ((inserted.meta.changes ?? 0) === 0) {
+      return json({ error: 'Too many active pairing sessions. Finish or wait for an existing session to expire.' }, 429);
+    }
 
     return json({
       sessionId: id,

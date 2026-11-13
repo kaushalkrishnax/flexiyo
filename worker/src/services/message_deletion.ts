@@ -33,17 +33,27 @@ export async function deleteMessages(
 
   const media = deletedMedia.results ?? [];
   if (media.length > 0) {
-    // R2 first: a row without its object is unrecoverable, an orphan object is
-    // not (it expires with the bucket lifecycle). Deletes run concurrently so
-    // a sweep with many attachments is not serialized on network latency.
-    await Promise.allSettled(media.map((item) => env.MEDIA.delete(item.r2_key)));
-    await runBatched(
-      env.DB,
-      media.flatMap((item) => [
-        env.DB.prepare('DELETE FROM media_views WHERE media_id = ?').bind(item.id),
-        env.DB.prepare('DELETE FROM media WHERE id = ?').bind(item.id),
-      ]),
-    );
+    // Keep metadata when R2 deletion fails. The scheduled media purger can
+    // retry it later; deleting the row here would orphan an untracked object.
+    const outcomes = await Promise.allSettled(media.map((item) => env.MEDIA.delete(item.r2_key)));
+    const removed = media.filter((_, index) => outcomes[index]?.status === 'fulfilled');
+    const retry = media.filter((_, index) => outcomes[index]?.status === 'rejected');
+    if (removed.length > 0) {
+      // media_views has ON DELETE CASCADE, so one delete per media row is enough.
+      await runBatched(
+        env.DB,
+        removed.map((item) => env.DB.prepare('DELETE FROM media WHERE id = ?').bind(item.id)),
+      );
+    }
+    if (retry.length > 0) {
+      const retryAt = Math.floor(Date.now() / 1000) + 3_600;
+      await runBatched(
+        env.DB,
+        retry.map((item) => env.DB.prepare(
+          `UPDATE media SET consumed = 1, expires_at = ? WHERE id = ?`,
+        ).bind(retryAt, item.id)),
+      );
+    }
   }
 
   const latest = await env.DB.prepare(

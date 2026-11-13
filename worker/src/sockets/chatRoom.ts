@@ -5,6 +5,7 @@ import { sendMessagePush } from '../services/push.js';
 import { pairedActiveDeviceIds } from '../middleware/device.js';
 import type { JWTPayload } from '../types.js';
 import { validateConversationEnvelope } from '../services/conversationKeys.js';
+import { consumeWindowBudget } from '../utils/windowBudget.js';
 
 /**
  * Per-socket state. Kept serialized on the WebSocket itself so identity,
@@ -19,6 +20,14 @@ interface SessionState {
   connectedAt: number;
   typingCount: number;
   typingWindowStart: number;
+  sendCount10s: number;
+  sendWindow10s: number;
+  sendCount60s: number;
+  sendWindow60s: number;
+  ackCount10s: number;
+  ackWindow10s: number;
+  ackCount60s: number;
+  ackWindow60s: number;
 }
 
 interface Session extends SessionState {
@@ -42,6 +51,16 @@ const MAX_FRAME_BYTES = 64 * 1024;
 const MAX_PAYLOADS = 10;
 const MAX_TYPING_PER_WINDOW = 20;
 const TYPING_WINDOW_MS = 10_000;
+// Generous per-connection budgets: normal bursts remain unaffected, while a
+// compromised client cannot turn one socket into an unlimited D1/DO fan-out.
+const SEND_BURST_LIMIT = 30;
+const SEND_BURST_WINDOW_MS = 10_000;
+const SEND_SUSTAINED_LIMIT = 180;
+const SEND_SUSTAINED_WINDOW_MS = 60_000;
+const ACK_BURST_LIMIT = 120;
+const ACK_BURST_WINDOW_MS = 10_000;
+const ACK_SUSTAINED_LIMIT = 1_200;
+const ACK_SUSTAINED_WINDOW_MS = 60_000;
 const MAX_SESSIONS_PER_USER = 8;
 const SOCKET_OPEN = 1;
 
@@ -221,6 +240,14 @@ export class ChatRoom {
       connectedAt: now,
       typingCount: 0,
       typingWindowStart: now,
+      sendCount10s: 0,
+      sendWindow10s: now,
+      sendCount60s: 0,
+      sendWindow60s: now,
+      ackCount10s: 0,
+      ackWindow10s: now,
+      ackCount60s: 0,
+      ackWindow60s: now,
     };
 
     this.state.acceptWebSocket(server, [userId]);
@@ -236,7 +263,7 @@ export class ChatRoom {
       this.sendFrame(ws, JSON.stringify({ type: 'error', code: 'invalid_json' }));
       return;
     }
-    if (message.length > MAX_FRAME_BYTES) {
+    if (message.length > MAX_FRAME_BYTES || new TextEncoder().encode(message).byteLength > MAX_FRAME_BYTES) {
       this.closeSocket(ws, 1009, 'Frame too large');
       return;
     }
@@ -278,6 +305,14 @@ export class ChatRoom {
       connectedAt: typeof meta.connectedAt === 'number' ? meta.connectedAt : 0,
       typingCount: typeof meta.typingCount === 'number' ? meta.typingCount : 0,
       typingWindowStart: typeof meta.typingWindowStart === 'number' ? meta.typingWindowStart : 0,
+      sendCount10s: typeof meta.sendCount10s === 'number' ? meta.sendCount10s : 0,
+      sendWindow10s: typeof meta.sendWindow10s === 'number' ? meta.sendWindow10s : 0,
+      sendCount60s: typeof meta.sendCount60s === 'number' ? meta.sendCount60s : 0,
+      sendWindow60s: typeof meta.sendWindow60s === 'number' ? meta.sendWindow60s : 0,
+      ackCount10s: typeof meta.ackCount10s === 'number' ? meta.ackCount10s : 0,
+      ackWindow10s: typeof meta.ackWindow10s === 'number' ? meta.ackWindow10s : 0,
+      ackCount60s: typeof meta.ackCount60s === 'number' ? meta.ackCount60s : 0,
+      ackWindow60s: typeof meta.ackWindow60s === 'number' ? meta.ackWindow60s : 0,
     };
   }
 
@@ -302,6 +337,14 @@ export class ChatRoom {
         connectedAt: session.connectedAt,
         typingCount: session.typingCount,
         typingWindowStart: session.typingWindowStart,
+        sendCount10s: session.sendCount10s,
+        sendWindow10s: session.sendWindow10s,
+        sendCount60s: session.sendCount60s,
+        sendWindow60s: session.sendWindow60s,
+        ackCount10s: session.ackCount10s,
+        ackWindow10s: session.ackWindow10s,
+        ackCount60s: session.ackCount60s,
+        ackWindow60s: session.ackWindow60s,
       } satisfies SessionState);
     } catch {
       // ignore
@@ -405,6 +448,41 @@ export class ChatRoom {
     return count;
   }
 
+  private checkSocketBudget(session: Session, kind: 'send' | 'ack'): number {
+    const now = Date.now();
+    if (kind === 'send') {
+      const burst = consumeWindowBudget(
+        { count: session.sendCount10s, windowStart: session.sendWindow10s },
+        now, SEND_BURST_LIMIT, SEND_BURST_WINDOW_MS,
+      );
+      const sustained = consumeWindowBudget(
+        { count: session.sendCount60s, windowStart: session.sendWindow60s },
+        now, SEND_SUSTAINED_LIMIT, SEND_SUSTAINED_WINDOW_MS,
+      );
+      session.sendCount10s = burst.count;
+      session.sendWindow10s = burst.windowStart;
+      session.sendCount60s = sustained.count;
+      session.sendWindow60s = sustained.windowStart;
+      this.persistSession(session);
+      return Math.max(burst.retryAfterMs, sustained.retryAfterMs);
+    }
+
+    const burst = consumeWindowBudget(
+      { count: session.ackCount10s, windowStart: session.ackWindow10s },
+      now, ACK_BURST_LIMIT, ACK_BURST_WINDOW_MS,
+    );
+    const sustained = consumeWindowBudget(
+      { count: session.ackCount60s, windowStart: session.ackWindow60s },
+      now, ACK_SUSTAINED_LIMIT, ACK_SUSTAINED_WINDOW_MS,
+    );
+    session.ackCount10s = burst.count;
+    session.ackWindow10s = burst.windowStart;
+    session.ackCount60s = sustained.count;
+    session.ackWindow60s = sustained.windowStart;
+    this.persistSession(session);
+    return Math.max(burst.retryAfterMs, sustained.retryAfterMs);
+  }
+
   private async handleClientMessage(session: Session, data: string): Promise<void> {
     let msg: { type?: string; messageId?: string; requestId?: string } | null = null;
     try {
@@ -426,6 +504,13 @@ export class ChatRoom {
 
     // Bound frame already enforced; validate event type.
     if (msg.type === 'delivery_ack' && typeof msg.messageId === 'string' && msg.messageId.length <= 128) {
+      const retryAfterMs = this.checkSocketBudget(session, 'ack');
+      if (retryAfterMs > 0) {
+        this.sendFrame(session.ws, JSON.stringify({
+          type: 'error', requestId, code: 'rate_limited', retryAfterMs,
+        }));
+        return;
+      }
       await this.handleDeliveryAck(session.userId, msg.messageId, session.deviceId);
       if (requestId) {
         this.sendFrame(session.ws, JSON.stringify({ type: 'ack', requestId, ok: true }));
@@ -462,6 +547,14 @@ export class ChatRoom {
     }
 
     if (msg.type === 'send_message') {
+      const retryAfterMs = this.checkSocketBudget(session, 'send');
+      if (retryAfterMs > 0) {
+        this.sendFrame(session.ws, JSON.stringify({
+          type: 'error', requestId, code: 'rate_limited', retryAfterMs,
+          message: 'Message send rate is temporarily limited. Retry the same message shortly.',
+        }));
+        return;
+      }
       await this.handleSendMessage(session, msg as Record<string, unknown>, requestId);
       return;
     }

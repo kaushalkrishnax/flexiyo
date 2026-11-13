@@ -553,8 +553,11 @@ devicesRouter.get(
     const requesterId = (request as unknown as AuthenticatedRequest).user.sub;
     const allowed = await checkRateLimitDistributed(
       env,
-      `keybundle:${requesterId}:${userId}`,
-      { limit: 10, windowMs: 60_000 },
+      // Account-wide: including target userId lets a caller evade the limit by
+      // rotating arbitrary target IDs. A generous ceiling avoids affecting
+      // ordinary one-to-one chat setup while bounding pre-key consumption.
+      `keybundle:${requesterId}`,
+      { limit: 30, windowMs: 60_000 },
     );
     if (!allowed) {
       return json({ error: 'Too many requests. Please slow down.' }, 429);
@@ -660,32 +663,34 @@ devicesRouter.post(
       return json({ error: 'Too many requests. Please slow down.' }, 429);
     }
 
-    const current = await env.DB.prepare(
-      `SELECT COUNT(*) as count FROM pre_keys WHERE device_id = ? AND consumed_at IS NULL`,
+    // Insert the submitted batch in one statement. The capacity CTE takes one
+    // indexed count snapshot and limits the input rows before INSERT, avoiding
+    // up to 200 repeated COUNT(*) scans while remaining atomic under concurrency.
+    const rows = preKeys.map((pk) => ({
+      id: generateId(),
+      keyId: pk.keyId,
+      publicKey: pk.publicKey,
+    }));
+    const inserted = await env.DB.prepare(
+      `WITH capacity AS (
+         SELECT MAX(0, ? - COUNT(*)) AS available
+         FROM pre_keys
+         WHERE device_id = ? AND consumed_at IS NULL
+       )
+       INSERT OR IGNORE INTO pre_keys (id, device_id, key_id, public_key, created_at)
+       SELECT
+         json_extract(incoming.value, '$.id'),
+         ?,
+         CAST(json_extract(incoming.value, '$.keyId') AS INTEGER),
+         json_extract(incoming.value, '$.publicKey'),
+         ?
+       FROM json_each(?) AS incoming
+       CROSS JOIN capacity
+       WHERE CAST(incoming.key AS INTEGER) < capacity.available
+       ORDER BY CAST(incoming.key AS INTEGER)`,
     )
-      .bind(device.id)
-      .first<{ count: number }>();
-    const remainingBefore = current?.count ?? 0;
-
-    // The cap is evaluated inside each insert, so a concurrent replenish cannot
-    // both read the same remaining capacity and overshoot the limit.
-    const stmts = preKeys.map((pk) =>
-      env.DB.prepare(
-        `INSERT OR IGNORE INTO pre_keys (id, device_id, key_id, public_key, created_at)
-         SELECT ?, ?, ?, ?, ?
-         WHERE (SELECT COUNT(*) FROM pre_keys
-                WHERE device_id = ? AND consumed_at IS NULL) < ?`,
-      ).bind(
-        generateId(),
-        device!.id,
-        pk.keyId,
-        pk.publicKey,
-        now,
-        device!.id,
-        MAX_STORED_PREKEYS,
-      ),
-    );
-    if (stmts.length > 0) await runBatched(env.DB, stmts);
+      .bind(MAX_STORED_PREKEYS, device.id, device.id, now, JSON.stringify(rows))
+      .run();
 
     const remaining = await env.DB.prepare(
       `SELECT COUNT(*) as count FROM pre_keys WHERE device_id = ? AND consumed_at IS NULL`,
@@ -695,7 +700,7 @@ devicesRouter.post(
     const remainingAfter = remaining?.count ?? 0;
 
     return json({
-      added: Math.max(0, remainingAfter - remainingBefore),
+      added: inserted.meta.changes ?? 0,
       deviceId: device.id,
       remaining: remainingAfter,
     });

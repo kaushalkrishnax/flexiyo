@@ -19,9 +19,16 @@ export async function pruneOperationalData(env: Env): Promise<void> {
        )`,
     ).bind(bucketCutoff, PRUNE_LIMIT),
     env.DB.prepare(
-      `DELETE FROM email_verification_codes WHERE user_id IN (
-         SELECT user_id FROM email_verification_codes WHERE expires_at <= ? LIMIT ?
+      `DELETE FROM email_verification_codes WHERE id IN (
+         SELECT id FROM email_verification_codes WHERE expires_at <= ? LIMIT ?
        )`,
     ).bind(nowSeconds, PRUNE_LIMIT),
+    // Keep terminal pairing state briefly for clients to observe it, then
+    // remove expired rows so abandoned sessions cannot accumulate forever.
+    env.DB.prepare(
+      `DELETE FROM pairing_sessions WHERE id IN (
+         SELECT id FROM pairing_sessions WHERE expires_at <= ? LIMIT ?
+       )`,
+    ).bind(nowSeconds - 86_400, PRUNE_LIMIT),
   ]);
 }

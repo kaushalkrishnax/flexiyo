@@ -29,19 +29,93 @@ function envNum(env: Env, name: MediaEnvVar, fallback: number): number {
   return Number.isFinite(v) && v > 0 ? v : fallback;
 }
 
+async function readBoundedBody(request: Request, maxBytes: number): Promise<ArrayBuffer | null> {
+  const declared = request.headers.get('content-length');
+  if (declared != null) {
+    const length = Number(declared);
+    if (Number.isFinite(length) && length > maxBytes) return null;
+  }
+  if (!request.body) return null;
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        return null;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return null;
+  } finally {
+    reader.releaseLock();
+  }
+  if (total === 0) return null;
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes.buffer as ArrayBuffer;
+}
+
+async function reserveDailyBytes(
+  env: Env,
+  userId: string,
+  day: string,
+  column: 'bytes_up' | 'bytes_down',
+  size: number,
+  cap: number,
+): Promise<boolean> {
+  // Column names are selected from a closed union above, never user input.
+  const result = await env.DB.prepare(
+    `INSERT INTO daily_usage (user_id, day, bytes_up, bytes_down)
+     SELECT ?, ?, ?, ? WHERE ? <= ?
+     ON CONFLICT(user_id, day) DO UPDATE SET
+       ${column} = daily_usage.${column} + excluded.${column}
+     WHERE daily_usage.${column} + excluded.${column} <= ?
+     RETURNING ${column}`,
+  )
+    .bind(userId, day, column === 'bytes_up' ? size : 0, column === 'bytes_down' ? size : 0, size, cap, cap)
+    .first<{ bytes_up?: number; bytes_down?: number }>();
+  return result != null;
+}
+
+async function releaseDailyBytes(
+  env: Env,
+  userId: string,
+  day: string,
+  column: 'bytes_up' | 'bytes_down',
+  size: number,
+): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE daily_usage SET ${column} = MAX(0, ${column} - ?) WHERE user_id = ? AND day = ?`,
+  ).bind(size, userId, day).run();
+}
+
 function utcDayKey(): string {
   const d = new Date();
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
 }
 
-/** Removes the stored object and leaves a consumed tombstone behind. */
+/** Removes the stored object and metadata, or schedules a tombstone retry on failure. */
 async function consume(env: Env, mediaId: string, r2Key: string): Promise<void> {
   try {
     await env.MEDIA.delete(r2Key);
-  } catch (_) {}
-  await env.DB.prepare('UPDATE media SET consumed = 1 WHERE id = ?')
-    .bind(mediaId)
-    .run();
+    await env.DB.prepare('DELETE FROM media WHERE id = ?').bind(mediaId).run();
+  } catch {
+    // Keep a consumed tombstone and retry cleanup on the next scheduled sweep.
+    const retryAt = Math.floor(Date.now() / 1000) + 3_600;
+    await env.DB.prepare(
+      'UPDATE media SET consumed = 1, expires_at = ? WHERE id = ?',
+    ).bind(retryAt, mediaId).run();
+  }
 }
 
 /** Returns a claimed view that could not be served because the object failed. */
@@ -97,32 +171,19 @@ mediaRouter.post(
     }
 
     const maxUpload = envNum(env, MAX_UPLOAD_VAR, DEFAULT_MAX_UPLOAD_BYTES);
-    const declaredLength = Number(request.headers.get('content-length'));
-    if (Number.isFinite(declaredLength) && declaredLength > maxUpload) {
+    const body = await readBoundedBody(request, maxUpload);
+    if (!body) {
       return new Response(JSON.stringify({ error: 'File is empty or too large' }), {
         status: 413,
         headers: { 'Content-Type': 'application/json' },
       });
     }
-
-    const arrayBuffer = await request.arrayBuffer();
-    const size = arrayBuffer.byteLength;
-    if (size === 0 || size > maxUpload) {
-      return new Response(JSON.stringify({ error: 'File is empty or too large' }), {
-        status: 413,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+    const size = body.byteLength;
 
     const uploadCap = envNum(env, UPLOAD_CAP_VAR, 50 * 1024 * 1024);
     const today = utcDayKey();
-    const upRow = await env.DB.prepare(
-      'SELECT bytes_up FROM daily_usage WHERE user_id = ? AND day = ?',
-    )
-      .bind(userId, today)
-      .first<{ bytes_up: number }>();
-    const currentUp = upRow?.bytes_up ?? 0;
-    if (currentUp + size > uploadCap) {
+    const reserved = await reserveDailyBytes(env, userId, today, 'bytes_up', size, uploadCap);
+    if (!reserved) {
       return new Response(JSON.stringify({ error: 'Daily upload quota reached' }), {
         status: 429,
         headers: { 'Content-Type': 'application/json' },
@@ -139,7 +200,7 @@ mediaRouter.post(
       : 'application/octet-stream';
 
     try {
-      await env.MEDIA.put(r2Key, arrayBuffer, {
+      await env.MEDIA.put(r2Key, body, {
         httpMetadata: { contentType: 'application/octet-stream' },
         customMetadata: {
           conversationId,
@@ -151,29 +212,34 @@ mediaRouter.post(
       });
     } catch (error) {
       console.error('R2 media put failed', error);
+      await releaseDailyBytes(env, userId, today, 'bytes_up', size).catch(() => {});
       return new Response(JSON.stringify({ error: 'Storage upload failed' }), {
         status: 500,
         headers: { 'Content-Type': 'application/json' },
       });
     }
 
-    await env.DB.prepare(
-      `INSERT INTO media
-        (id, conversation_id, sender_id, kind, view_policy, size, mime_type,
-         r2_key, duration_ms, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-      .bind(id, conversationId, userId, kind, viewPolicy, size, mimeType, r2Key,
-            durationMs ?? null, now, expiresAt)
-      .run();
-
-    await env.DB.prepare(
-      `INSERT INTO daily_usage (user_id, day, bytes_up, bytes_down)
-       VALUES (?, ?, ?, 0)
-       ON CONFLICT(user_id, day) DO UPDATE SET bytes_up = bytes_up + excluded.bytes_up`,
-    )
-      .bind(userId, today, size)
-      .run();
+    try {
+      await env.DB.prepare(
+        `INSERT INTO media
+          (id, conversation_id, sender_id, kind, view_policy, size, mime_type,
+           r2_key, duration_ms, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(id, conversationId, userId, kind, viewPolicy, size, mimeType, r2Key,
+              durationMs ?? null, now, expiresAt)
+        .run();
+    } catch (error) {
+      await Promise.allSettled([
+        env.MEDIA.delete(r2Key),
+        releaseDailyBytes(env, userId, today, 'bytes_up', size),
+      ]);
+      console.error('Media metadata insert failed', error);
+      return new Response(JSON.stringify({ error: 'Storage upload failed' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
 
     const dto: MediaDto = { id, kind, viewPolicy: viewPolicy, size, durationMs, createdAt: now };
     return new Response(JSON.stringify(dto), {
@@ -221,18 +287,6 @@ mediaRouter.get(
     const limit = viewLimit(media.view_policy);
 
     const downloadCap = envNum(env, DOWNLOAD_CAP_VAR, 200 * 1024 * 1024);
-    const downRow = await env.DB.prepare(
-      'SELECT bytes_down FROM daily_usage WHERE user_id = ? AND day = ?',
-    )
-      .bind(userId, today)
-      .first<{ bytes_down: number }>();
-    const currentDown = downRow?.bytes_down ?? 0;
-    if (currentDown + media.size > downloadCap) {
-      return new Response(JSON.stringify({ error: 'Daily download quota reached' }), {
-        status: 429,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
 
     let object: R2Object | null;
     try {
@@ -268,6 +322,7 @@ mediaRouter.get(
         .first<{ count: number }>();
 
       if (!claimed) {
+        await releaseDailyBytes(env, userId, today, 'bytes_down', media.size).catch(() => {});
         // The request that used the final view is responsible for consuming
         // the object; deleting it here would race that response.
         return new Response(JSON.stringify({ error: 'View limit reached' }), {
@@ -282,11 +337,23 @@ mediaRouter.get(
       viewsRemaining = decision.remaining;
     }
 
+    const reservedDownload = await reserveDailyBytes(
+      env, userId, today, 'bytes_down', media.size, downloadCap,
+    );
+    if (!reservedDownload) {
+      if (claimedView) await releaseView(env, mediaId, userId);
+      return new Response(JSON.stringify({ error: 'Daily download quota reached' }), {
+        status: 429,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
     const r2Body = object as R2ObjectBody;
     let payload: ArrayBuffer;
     try {
       payload = await r2Body.arrayBuffer();
     } catch {
+      await releaseDailyBytes(env, userId, today, 'bytes_down', media.size).catch(() => {});
       if (claimedView) await releaseView(env, mediaId, userId);
       await consume(env, mediaId, media.r2_key);
       return new Response(JSON.stringify({ error: 'Media object unavailable' }), {
@@ -294,14 +361,6 @@ mediaRouter.get(
         headers: { 'Content-Type': 'application/json' },
       });
     }
-
-    await env.DB.prepare(
-      `INSERT INTO daily_usage (user_id, day, bytes_up, bytes_down)
-       VALUES (?, ?, 0, ?)
-       ON CONFLICT(user_id, day) DO UPDATE SET bytes_down = bytes_down + excluded.bytes_down`,
-    )
-      .bind(userId, today, media.size)
-      .run();
 
     if (isFinalView) {
       // Last allowed view served — purge the object now so nothing remains

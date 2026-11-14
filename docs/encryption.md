@@ -1,15 +1,11 @@
 # Encryption Design and Implementation
 
-Flexiyo currently ships two message encryption versions side by side:
+Flexiyo uses conversation-key encryption for all messages. It uses
+per-conversation keys, XChaCha20-Poly1305 authenticated encryption, and
+X25519-wrapped key distribution to each authorized device.
 
-- **Version 2 (conversation keys)** is used for all new messages. It uses
-  per-conversation keys, XChaCha20-Poly1305 authenticated encryption, and
-  X25519-wrapped key distribution to each authorized device.
-- **Version 1 (Signal Protocol)** remains available so messages written before
-  the migration still decrypt. New messages never use this path.
-
-`message.encryption_version` selects the path. The Worker never sees plaintext;
-D1 stores one ciphertext per v2 message rather than one copy per device.
+The Worker never sees plaintext; D1 stores one ciphertext per v2 message
+rather than one copy per device.
 
 ---
 
@@ -114,7 +110,7 @@ fetch; there is no plaintext or stale-key fallback.
 ### Device revocation
 
 `DELETE /api/devices/:id` closes the device's sockets, deletes the device row
-(and its pre-keys/envelopes through foreign keys), and marks every conversation
+(and its envelopes through foreign keys), and marks every conversation
 of that account as rotation-required. The next send publishes a new epoch whose
 envelopes omit the revoked device. A revoked device cannot receive new
 envelopes or messages. It may still hold keys for earlier epochs and therefore
@@ -135,52 +131,6 @@ The Worker cannot:
 - forge a message that authenticates under a conversation key,
 - silently substitute pairing keys: the initiator verifies an AEAD proof bound
   to the session, installation id, and joined identity key before approval.
-
----
-
-## Version 1: Legacy Signal Protocol
-
-The original implementation remains for rows with `encryption_version = 1`.
-It uses `libsignal_protocol_dart`:
-
-- X3DH for initial agreement.
-- Double Ratchet for subsequent messages.
-- AES-256-CBC + HMAC-SHA256 inside the ratchet.
-- One ciphertext per recipient device, stored in `message_deliveries`.
-
-V1 rows are still decrypted by `SignalCryptoService`. V1 edit, delete, and
-unsend paths remain in place. No new message is written as v1.
-
-### Compatibility rules
-
-- A row is handled as v2 only when `encryption_version == 2` **and** the
-  ciphertext, nonce, tag, and epoch fields are present.
-- Malformed v2 metadata produces a controlled "not decrypted" state, not a
-  plaintext or legacy fallback.
-- V1 rows are never passed through the v2 service, and v2 rows are never passed
-  through the Double Ratchet.
-- Local caches store the version alongside the ciphertext so offline
-  restoration picks the same path.
-
-The v1 implementation is preserved on the `archive/signal-e2ee` branch.
-
----
-
-## Licence
-
-`libsignal_protocol_dart` is licensed under GPL-3.0. Flexiyo is distributed
-under AGPL-3.0; linking the two is permitted under GPLv3 section 13.
-
-Under GPL-3.0, distributions must:
-
-1. Make the corresponding complete source code available to recipients under
-   the GPL-3.0 or a compatible licence.
-2. Include the GPL-3.0 licence text.
-3. Preserve all copyright and licence notices.
-
-The `libsignal_protocol_dart` copyright notice must be preserved and included
-in distributions. See the upstream LICENSE file:
-<https://github.com/MixinNetwork/libsignal_protocol_dart/blob/main/LICENSE>.
 
 ---
 

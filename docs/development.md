@@ -321,15 +321,6 @@ You need to run `bunx wrangler d1 create flexiyo-db` and paste the real ID into 
 
 Create `.dev.vars` at the root with `JWT_SECRET=...` for local development.
 
-### Flutter `pub get` fails on libsignal_protocol_dart
-
-Ensure Flutter SDK is ≥ 3.19.0 and Dart is ≥ 3.3.0:
-
-```bash
-flutter --version
-dart --version
-```
-
 ### WebSocket connection fails
 
 Check that:
@@ -339,21 +330,9 @@ Check that:
 
 ### Message decryption fails after reinstall
 
-Signal Protocol session state is stored in the local sqflite database. After reinstalling the app (clearing local storage), all sessions are lost. You must re-register a device:
+Conversation keys are stored in the local sqflite database. After reinstalling the app (clearing local storage), all keys are lost. You must re-register a device:
 - The app will automatically regenerate keys and re-register on first login after reinstall.
-- Old sessions with other users will be broken until they send you a new message (which re-establishes the session).
-
-### Pre-key exhausted (503 from key-bundle endpoint)
-
-The server has no more one-time pre-keys for a user. The Flutter client should detect low pre-key count and replenish:
-
-```dart
-// Check count after login
-final count = await api.getPreKeyCount();
-if (count < 10) {
-  await keyManager.replenishPreKeys(store, api);
-}
-```
+- Old conversations with other users will need new messages sent to re-establish shared keys.
 
 ---
 

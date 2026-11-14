@@ -85,7 +85,7 @@ See [Features](#-features) for the full capability list and [Download](#-downloa
       <td width="50%" align="center">
       <br/>🔒
       <h3>Encrypted by default</h3>
-      <sub>Signal Protocol (X3DH + Double Ratchet) runs on your device. The server only ever sees ciphertext.</sub>
+      <sub>Conversation-key encryption (XChaCha20-Poly1305) runs on your device. The server only ever sees ciphertext.</sub>
       <br/><br/>
       </td>
       <td width="50%" align="center">
@@ -118,7 +118,7 @@ See [Features](#-features) for the full capability list and [Download](#-downloa
 
 ### Messaging
 
-- **End-to-end encrypted by design:** Every message is encrypted on the sender's device with the Signal Protocol (X3DH key agreement and Double Ratchet) and decrypted only on the recipient's. The server stores ciphertext it has no way to read.
+- **End-to-end encrypted by design:** Every message is encrypted on the sender's device with conversation-key encryption (XChaCha20-Poly1305) and decrypted only on the recipient's. The server stores ciphertext it has no way to read.
 - **Instant, with offline catch-up:** Each conversation gets its own WebSocket hub on a Durable Object, so delivery and typing indicators are real time. Anything sent while you were away syncs the moment you reconnect.
 - **Device-isolated accounts:** Sign up with a username and password. Session tokens live in the platform keychain and stay on the device.
 - **Message requests:** Messages from new people go to a request inbox, with controls to accept, restrict, or block conversations.
@@ -158,7 +158,7 @@ See [Features](#-features) for the full capability list and [Download](#-downloa
 | State          | Riverpod                                            |
 | Routing        | go_router                                           |
 | Local storage  | SQLite (`sqflite`) · `flutter_secure_storage`       |
-| Cryptography   | `libsignal_protocol_dart` (X3DH, Double Ratchet)    |
+| Cryptography   | `cryptography` (XChaCha20-Poly1305)             |
 | Backend        | Cloudflare Workers · TypeScript · `itty-router`     |
 | Database       | Cloudflare D1 (SQLite) · Drizzle ORM                |
 | Media storage  | Cloudflare R2                                       |
@@ -195,7 +195,7 @@ Flexiyo is built around zero-knowledge message transport.
 | ---------------------- | --------------------------------------------------------------------------------------------------------- |
 | **Client cryptography** | Key generation, session negotiation, and encryption all happen on-device.                                |
 | **Key storage**         | Private identity and session keys live in hardware-backed storage (iOS Keychain, Android Keystore) and never reach the backend. |
-| **Server visibility**   | Public identity keys, prekey bundles, ciphertexts, and operational metadata (delivery timestamps, user IDs). |
+| **Server visibility**   | Public identity keys, ciphertexts, and operational metadata (delivery timestamps, user IDs). |
 | **Server blind spots**  | Message contents. The server cannot decrypt or inspect them.                                              |
 
 > **⚠️ Security boundaries:** E2EE protects content in transit and at rest on the server, but security still depends on device integrity. Compromised devices, screen recordings, and external backups sit outside the protocol. Flexiyo has **not** undergone an independent third-party security audit.
@@ -407,7 +407,7 @@ flutter run
 ## 🗺 Roadmap
 
 - [x] Registration, login, and device-isolated tokens
-- [x] Signal Protocol one-to-one E2EE
+- [x] Conversation-key one-to-one E2EE
 - [x] Edit, unsend, delete for me, and copy
 - [x] Disappearing messages that purge after the read receipt
 - [x] Offline delivery synchronization
@@ -427,14 +427,14 @@ flutter run
 | ----------------------------------------------- | -------------------------------------------------------- |
 | [Architecture Overview](docs/architecture.md)   | System components, data models, WebSocket lifecycle      |
 | [Development Guide](docs/development.md)        | Prerequisites, database setup, testing, build workflows  |
-| [Encryption Design](docs/encryption.md)         | Signal Protocol integration, ratchets, key replenishment |
+| [Encryption Design](docs/encryption.md)         | Conversation-key encryption, key epochs, envelopes |
 | [Security and Threat Model](docs/security.md)   | Security boundaries, trust assumptions, mitigations      |
 
 ---
 
 ## ⚖ Legal Notice
 
-**Flexiyo is an independent project.** It is not affiliated with, endorsed by, or connected to Signal Messenger LLC (formerly Open Whisper Systems). The Signal Protocol is developed by Signal Messenger LLC, and Flexiyo claims no copyright over it. Flexiyo has not been independently audited, so use it accordingly.
+**Flexiyo is an independent project.** It is not affiliated with, endorsed by, or connected to Signal Messenger LLC (formerly Open Whisper Systems). Flexiyo has not been independently audited, so use it accordingly.
 
 ---
 
@@ -450,7 +450,6 @@ flutter run
 
 | Component                 | License       | Notes                                                                                     |
 | ------------------------- | ------------- | ----------------------------------------------------------------------------------------- |
-| `libsignal_protocol_dart` | GPL-3.0       | © Open Whisper Systems, Mixin Network contributors. Combined under GPLv3 Section 13.      |
 | `drizzle-orm`             | Apache-2.0    | Attribution                                                                               |
 | `itty-router`             | MIT           | Attribution                                                                               |
 | `zod`                     | MIT           | Attribution                                                                               |

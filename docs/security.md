@@ -32,7 +32,7 @@ Even with E2EE, the Cloudflare Worker has visibility into:
 - Message sizes (approximate)
 - Whether a message was edited or unsent
 - Expiry timestamps
-- Public cryptographic key material (identity keys, signed pre-keys, one-time pre-keys, conversation-key envelope metadata)
+- Public cryptographic key material (identity public keys, conversation-key envelope metadata)
 - Delivery state (whether a message was delivered or read)
 - Device registration times, device status, and key-epoch numbers
 
@@ -41,7 +41,7 @@ The Worker cannot see:
 - User passwords (PBKDF2-hashed before transmission)
 - Private identity keys
 - Session state
-- Encryption keys derived during the Double Ratchet
+- Conversation keys derived per epoch
 
 ---
 
@@ -85,7 +85,7 @@ The Worker cannot see:
 | Compromised authorized installation | A device holding a conversation key can read every message in that epoch |
 | Replay of a pending QR code | QR payloads are single-use and expire after 180 seconds; proof verification still gates approval |
 | Denial of service during pairing | The Worker can refuse to relay pairing messages; it cannot approve a device on its own |
-| Forward secrecy after local key theft | Conversation keys are static per epoch (v2); a stolen epoch key exposes every message in it. legacy v1 uses the Double Ratchet. |
+| Forward secrecy after local key theft | Conversation keys are static per epoch (v2); a stolen epoch key exposes every message in it. |
 | Flash storage forensics | Deleted data on SSD/eMMC may persist in wear-leveling blocks |
 | OS-level memory inspection | Decrypted plaintext exists in process memory during display |
 | Cloudflare as infrastructure provider | Cloudflare can observe metadata and timing; they cannot decrypt payloads |
@@ -111,7 +111,7 @@ Private keys never leave the client device. They are stored in flutter_secure_st
 - iOS: Keychain Services
 - Android: Android Keystore-backed EncryptedSharedPreferences
 
-The server stores only public key material required by the X3DH handshake.
+The server stores only public key material required for conversation-key envelope distribution.
 
 ---
 

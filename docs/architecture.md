@@ -6,12 +6,12 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │                     Flutter Application                          │
 │  ┌──────────┐  ┌──────────┐  ┌───────────┐  ┌───────────────┐ │
-│  │  Screens  │  │ Riverpod │  │ Repos /   │  │ Signal Crypto │ │
+│  │  Screens  │  │ Riverpod │  │ Repos /   │  │ Conversation Crypto │ │
 │  │  (UI)     │◄─│ Providers│◄─│ Services  │  │ Service       │ │
 │  └──────────┘  └──────────┘  └─────┬─────┘  └───────┬───────┘ │
 │                                     │                 │          │
 │                              ┌──────▼──────┐  ┌──────▼──────┐  │
-│                              │  API Service │  │ SignalStore  │  │
+│                              │  API Service │  │ ConversationKeyStore  │  │
 │                              │  (Dio/HTTP)  │  │ (sqflite +  │  │
 │                              └──────┬───────┘  │  sec.storage)│ │
 │                              ┌──────▼───────┐  └─────────────┘  │
@@ -35,13 +35,11 @@
 │  │   (per-conversation WebSocket  │  │   (SQLite)            │  │
 │  │    hub for real-time delivery) │  │                       │  │
 │  └────────────────────────────────┘  │  users                │  │
-│                                      │  devices              │  │
-│                                      │  pre_keys             │  │
-│                                      │  conversations        │  │
-│                                      │  messages (ciphertext)│  │
-│                                      │  local_deletions      │  │
-│                                      │  message_delivery     │  │
-│                                      │  token_revocations    │  │
+│                                      │  devices                  │  │
+│                                      │  conversations            │  │
+│                                      │  messages (ciphertext)    │  │
+│                                      │  local_deletions          │  │
+│                                      │  token_revocations        │  │
 │                                      └───────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -56,7 +54,7 @@ flexiyo/
 │   ├── app/                  # App widget and router
 │   ├── core/                 # Constants, theme, exceptions
 │   ├── models/               # Data models
-│   ├── services/             # API, WebSocket, conversation-key and Signal services
+│   ├── services/             # API, WebSocket, conversation-key and ConversationKey services
 │   ├── providers/            # Riverpod state
 │   ├── screens/              # UI screens (auth, chats, conversation, settings, media)
 │   ├── widgets/              # Reusable widgets
@@ -120,80 +118,6 @@ The Worker never sees plaintext or conversation keys. It stores and forwards
 the ciphertext verbatim; each device obtains the conversation key from its own
 `device_key_envelopes` row. A message is marked sent only after the server
 `ack`; retries reuse the same message `id` and are idempotent.
-
-Legacy Signal delivery (below) is still used for `encryption_version = 1` rows
-written before the migration.
-
----
-
-## Data Flow: Legacy (v1) Signal Message
-
-```
-Sender device                   Worker (ChatRoom DO)          Recipient device
-     │                             │                              │
-     │ 1. Compose plaintext        │                              │
-     │    Encrypt with Signal      │                              │
-     │    (one ciphertext per      │                              │
-     │     active recipient device │                              │
-     │     + sender's own devices) │                              │
-     │                             │                              │
-     │ 2. WSS send_message         │                              │
-     │    {requestId, id,          │                              │
-     │     payloads, ...}          │                              │
-     │────────────────────────────►│                              │
-     │                             │ 3. Validate auth/session     │
-     │                             │    Validate membership,      │
-     │                             │    device, payloads, rate    │
-     │                             │    Idempotent retry check    │
-     │                             │ 4. Persist message +         │
-     │                             │    per-device deliveries to  │
-     │                             │    D1                        │
-     │                             │ 5. Durable Object broadcast  │
-     │                             │    new_message (per-device   │
-     │                             │    ciphertexts)              │
-     │◄──────── 6. ack {ok,id}     │─────────────────────────────►│
-     │    (only after D1 persist)  │    {type: new_message,       │
-     │                             │     payloads}                │
-     │                             │                              │
-     │ 7. Mark optimistic message  │              8. Receive event│
-     │    sent                     │                 Decrypt with │
-     │                             │                 SessionCipher│
-     │                             │                 Display      │
-```
-
-The Worker never sees plaintext. It stores and forwards the encrypted payload verbatim. A message is marked sent only after the server `ack`; retries reuse the same message `id` and are idempotent.
-
----
-
-## Data Flow: Session Establishment (X3DH)
-
-```
-Alice                             Worker                      Bob
-  │                                  │                          │
-  │  (Bob registered earlier:        │                          │
-  │   Bob's key bundle is in D1)     │                          │
-  │                                  │                          │
-  │  GET /devices/bob/key-bundle     │                          │
-  │─────────────────────────────────►│                          │
-  │◄─────────────────────────────────│                          │
-  │  {identityKey, signedPreKey,     │                          │
-  │   oneTimePreKey}                 │                          │
-  │                                  │                          │
-  │  X3DH locally                    │                          │
-  │  Build session with Bob          │                          │
-  │  Encrypt first message           │                          │
-  │  (PreKeySignalMessage)           │                          │
-  │                                  │                          │
-  │  POST /conversations/:id/messages│                          │
-  │  {encryptedPayload, type:prekey} │                          │
-  │─────────────────────────────────►│                          │
-  │                                  │  Store + broadcast       │
-  │                                  │─────────────────────────►│
-  │                                  │                 Receive  │
-  │                                  │                 decryptPreKeyWhisperMessage
-  │                                  │                 Session established
-  │                                  │                 Display plaintext
-```
 
 ---
 
@@ -269,9 +193,8 @@ installation id, and joining identity key.
 
 | Table | Purpose |
 |---|---|
-| `messages` | Cached message records (encrypted + decrypted, with `encryption_version`, `nonce`, `auth_tag`, `key_epoch`) |
+| `messages` | Cached message records (encrypted + decrypted, with `nonce`, `auth_tag`, `key_epoch`) |
 | `conversations` | Cached conversation metadata |
-| `signal_sessions` | Double Ratchet session state (legacy v1 only) |
 
 ### flutter_secure_storage
 
@@ -282,7 +205,6 @@ Stores:
 - v2 device id (per account)
 - Conversation keys per `conversation + epoch`
 - Pairing ephemeral seed and secret while a session is pending
-- Signal identity key pair, signed pre-key pair, and one-time pre-key pairs (legacy v1)
 
 ---
 
@@ -300,7 +222,7 @@ Client                        Worker (D1)
   │  {token, user}                │
   │                               │
   │  POST /api/devices/register   │
-  │  {identityKey, preKeys, ...}  │ ← Flutter generates keys locally first
+  │  {installationId, identityPublicKey}  │ ← Flutter generates keys locally first
   │──────────────────────────────►│
   │                               │ Store public keys only
   │◄──────────────────────────────│
@@ -348,19 +270,15 @@ Flutter client:
 users                  (id, username, password_hash, email, google_id,
                         email_verified, created_at)
 token_revocations      (jti, user_id, expires_at)
-devices                (id, user_id, installation_id, legacy_device_id,
-                        registration_id, identity_key, signed_pre_key_id,
-                        signed_pre_key_public, signed_pre_key_signature,
-                        status, created_at, last_seen_at, revoked_at,
-                        encryption_version, identity_public_key)
-pre_keys               (id, device_id, key_id, public_key, consumed_at,
-                        created_at)
+devices                (id, user_id, installation_id, status,
+                        created_at, last_seen_at, revoked_at,
+                        identity_public_key)
 conversations          (id, user_a_id, user_b_id, initiated_by_id,
                         request_status, disappearing_timer, created_at,
                         last_message_at, key_epoch, key_rotation_required)
 messages               (id, conversation_id, sender_id, sender_device_id,
                         ciphertext, nonce, auth_tag, key_epoch,
-                        encryption_version, message_type, reply_to_id, version,
+                        message_type, reply_to_id, version,
                         is_unsent, created_at, expires_at, edited_at,
                         system_data, reaction, delivered_at, read_at)
 conversation_key_epochs(conversation_id, epoch, created_by_device_id,
@@ -375,9 +293,6 @@ pairing_sessions       (id, user_id, initiator_device_id,
                         joined_ciphertext, joined_mac, approved_device_id,
                         created_at, expires_at, approved_at)
 local_deletions        (id, user_id, message_id, deleted_at)
-message_deliveries     (id, message_id, recipient_device_id,
-                        sender_device_id, payload, message_type,
-                        delivered_at, read_at, created_at)  -- v1 rows only
 ```
 
 ---

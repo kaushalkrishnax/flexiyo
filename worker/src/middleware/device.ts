@@ -1,4 +1,5 @@
 import type { DeviceStatus, Env, DeviceRow } from '../types.js';
+import { getSqlDb } from '../database/turso.js';
 
 export const INSTALLATION_HEADER = 'X-Installation-Id';
 
@@ -9,7 +10,8 @@ export async function resolveRequestDevice(
 ): Promise<DeviceRow | null> {
   const installationId = request.headers.get(INSTALLATION_HEADER);
   if (!installationId) return null;
-  const device = await env.DB.prepare(
+  const db = getSqlDb(env, request);
+  const device = await db.prepare(
     `SELECT * FROM devices WHERE user_id = ? AND installation_id = ?`,
   )
     .bind(userId, installationId)
@@ -30,8 +32,9 @@ export async function deviceIdsFor(
   userId: string,
   statuses: DeviceStatus[],
 ): Promise<number[]> {
+  const db = getSqlDb(env);
   const placeholders = statuses.map(() => '?').join(', ');
-  const rows = await env.DB.prepare(
+  const rows = await db.prepare(
     `SELECT id FROM devices WHERE user_id = ? AND status IN (${placeholders}) ORDER BY id`,
   )
     .bind(userId, ...statuses)

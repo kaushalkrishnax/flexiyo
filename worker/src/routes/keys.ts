@@ -7,6 +7,7 @@ import { generateId } from '../utils/crypto.js';
 import { readJsonBody } from '../utils/http.js';
 import { getConversationForMember } from './conversations.js';
 import { validateKeyEnvelope } from '../services/conversationKeys.js';
+import { getSqlDb, type SqlDatabase } from '../database/turso.js';
 
 export const keysRouter = Router({ base: '/api/conversations' });
 
@@ -50,9 +51,9 @@ function parseEnvelopes(
   return { ok: true, rows: envelopes };
 }
 
-async function activeDeviceIds(env: Env, userIds: string[]): Promise<number[]> {
+async function activeDeviceIds(db: SqlDatabase, userIds: string[]): Promise<number[]> {
   const placeholders = userIds.map(() => '?').join(', ');
-  const rows = await env.DB.prepare(
+  const rows = await db.prepare(
     `SELECT id FROM devices
      WHERE user_id IN (${placeholders})
        AND status = 'active'
@@ -70,10 +71,11 @@ keysRouter.get(
   async (request: IRequest, env: Env): Promise<Response> => {
     const userId = (request as unknown as AuthenticatedRequest).user.sub;
     const { id } = request.params as { id: string };
-    const conversation = await getConversationForMember(id, userId, env.DB);
+    const db = getSqlDb(env, request as unknown as Request);
+    const conversation = await getConversationForMember(id, userId, db);
     if (!conversation) return json({ error: 'Conversation not found' }, 404);
 
-    const rows = await env.DB.prepare(
+    const rows = await db.prepare(
       `SELECT epoch, created_by_device_id, created_at
        FROM conversation_key_epochs WHERE conversation_id = ? ORDER BY epoch ASC`,
     )
@@ -95,7 +97,8 @@ keysRouter.post(
   async (request: IRequest, env: Env): Promise<Response> => {
     const userId = (request as unknown as AuthenticatedRequest).user.sub;
     const { id } = request.params as { id: string };
-    const conversation = await getConversationForMember(id, userId, env.DB);
+    const db = getSqlDb(env, request as unknown as Request);
+    const conversation = await getConversationForMember(id, userId, db);
     if (!conversation) return json({ error: 'Conversation not found' }, 404);
     if (conversation.request_status === 'rejected') {
       return json({ error: 'Conversation is closed' }, 403);
@@ -128,7 +131,7 @@ keysRouter.post(
 
     const peerId =
       conversation.user_a_id === userId ? conversation.user_b_id : conversation.user_a_id;
-    const participantDeviceCounts = await env.DB.prepare(
+    const participantDeviceCounts = await db.prepare(
       `SELECT
          (SELECT COUNT(*) FROM devices
           WHERE user_id = ? AND status = 'active' AND identity_public_key IS NOT NULL) AS own_count,
@@ -144,7 +147,7 @@ keysRouter.post(
     ) {
       return json({ error: 'both_participants_need_active_v2_devices' }, 409);
     }
-    const allowed = new Set(await activeDeviceIds(env, [userId, peerId]));
+    const allowed = new Set(await activeDeviceIds(db, [userId, peerId]));
     for (const envelope of parsedEnvelopes.rows) {
       if (!allowed.has(envelope.recipientDeviceId)) {
         return json({ error: 'unknown_device', deviceId: envelope.recipientDeviceId }, 400);
@@ -159,12 +162,12 @@ keysRouter.post(
 
     const now = Math.floor(Date.now() / 1000);
     const statements = [
-      env.DB.prepare(
+      db.prepare(
         `UPDATE conversations
          SET key_epoch = ?, key_rotation_required = 0
          WHERE id = ? AND key_epoch = ?`,
       ).bind(parsed.data.epoch, id, conversation.key_epoch),
-      env.DB.prepare(
+      db.prepare(
         `INSERT INTO conversation_key_epochs
            (conversation_id, epoch, created_by_device_id, created_at)
          SELECT ?, ?, ?, ?
@@ -173,7 +176,7 @@ keysRouter.post(
          )`,
       ).bind(id, parsed.data.epoch, device.id, now, id, parsed.data.epoch),
       ...parsedEnvelopes.rows.map((envelope) =>
-        env.DB.prepare(
+        db.prepare(
           `INSERT INTO device_key_envelopes
              (id, conversation_id, epoch, recipient_device_id, sender_device_id,
               ephemeral_public_key, nonce, ciphertext, mac, created_at)
@@ -200,9 +203,9 @@ keysRouter.post(
     ];
 
     try {
-      const results = await env.DB.batch(statements);
+      const results = await db.batch(statements);
       if ((results[0].meta.changes ?? 0) !== 1) {
-        const current = await env.DB.prepare(
+        const current = await db.prepare(
           'SELECT key_epoch FROM conversations WHERE id = ?',
         )
           .bind(id)
@@ -210,7 +213,7 @@ keysRouter.post(
         return json({ error: 'epoch_conflict', currentEpoch: current?.key_epoch ?? 0 }, 409);
       }
     } catch {
-      const current = await env.DB.prepare(
+      const current = await db.prepare(
         'SELECT key_epoch FROM conversations WHERE id = ?',
       )
         .bind(id)
@@ -235,7 +238,8 @@ keysRouter.post(
   async (request: IRequest, env: Env): Promise<Response> => {
     const userId = (request as unknown as AuthenticatedRequest).user.sub;
     const { id } = request.params as { id: string };
-    const conversation = await getConversationForMember(id, userId, env.DB);
+    const db = getSqlDb(env, request as unknown as Request);
+    const conversation = await getConversationForMember(id, userId, db);
     if (!conversation) return json({ error: 'Conversation not found' }, 404);
 
     const device = await resolveRequestDevice(request, env, userId);
@@ -256,14 +260,14 @@ keysRouter.post(
       return json({ error: 'unknown_epoch', currentEpoch: conversation.key_epoch }, 409);
     }
 
-    const epochExists = await env.DB.prepare(
+    const epochExists = await db.prepare(
       `SELECT 1 FROM conversation_key_epochs WHERE conversation_id = ? AND epoch = ?`,
     )
       .bind(id, parsed.data.epoch)
       .first<{ 1: number }>();
     if (!epochExists) return json({ error: 'epoch_not_found' }, 404);
 
-    const allowedRows = await env.DB.prepare(
+    const allowedRows = await db.prepare(
       `SELECT id FROM devices
        WHERE user_id = ? AND status = 'active' AND identity_public_key IS NOT NULL`,
     )
@@ -277,9 +281,9 @@ keysRouter.post(
     }
 
     const now = Math.floor(Date.now() / 1000);
-    const results = await env.DB.batch(
+    const results = await db.batch(
       parsedEnvelopes.rows.map((envelope) =>
-        env.DB.prepare(
+        db.prepare(
           `INSERT INTO device_key_envelopes
              (id, conversation_id, epoch, recipient_device_id, sender_device_id,
               ephemeral_public_key, nonce, ciphertext, mac, created_at)
@@ -321,7 +325,8 @@ keysRouter.get(
   async (request: IRequest, env: Env): Promise<Response> => {
     const userId = (request as unknown as AuthenticatedRequest).user.sub;
     const { id } = request.params as { id: string };
-    const conversation = await getConversationForMember(id, userId, env.DB);
+    const db = getSqlDb(env, request as unknown as Request);
+    const conversation = await getConversationForMember(id, userId, db);
     if (!conversation) return json({ error: 'Conversation not found' }, 404);
 
     const device = await resolveRequestDevice(request, env, userId);
@@ -333,7 +338,7 @@ keysRouter.get(
     const epoch = epochRaw == null ? null : Number.parseInt(epochRaw, 10);
     const rows =
       epoch == null
-        ? await env.DB.prepare(
+        ? await db.prepare(
             `SELECT conversation_id, epoch, ephemeral_public_key, nonce, ciphertext, mac
              FROM device_key_envelopes
              WHERE conversation_id = ? AND recipient_device_id = ?
@@ -341,7 +346,7 @@ keysRouter.get(
           )
             .bind(id, device.id)
             .all<Record<string, unknown>>()
-        : await env.DB.prepare(
+        : await db.prepare(
             `SELECT conversation_id, epoch, ephemeral_public_key, nonce, ciphertext, mac
              FROM device_key_envelopes
              WHERE conversation_id = ? AND recipient_device_id = ? AND epoch = ?`,

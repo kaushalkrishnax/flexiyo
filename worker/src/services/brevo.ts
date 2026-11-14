@@ -1,26 +1,17 @@
 import type { Env } from '../types.js';
-
-/**
- * Brevo transactional email helpers.
- *
- * The Brevo API key lives ONLY in Worker secrets (`wrangler secret put
- * BREVO_API_KEY`) — never in the client bundle. Every call goes Worker →
- * Brevo directly over HTTPS; nothing secret crosses the client API surface.
- */
+import { getSqlDb } from '../database/turso.js';
 
 const BREVO_API_BASE = 'https://api.brevo.com/v3';
-const CODE_TTL_SECONDS = 10 * 60; // verification codes expire after 10 minutes
-const MAX_ATTEMPTS = 5; // per-code attempt ceiling
-export const DAILY_EMAIL_LIMIT = 3; // verification emails per user per day
+const CODE_TTL_SECONDS = 10 * 60;
+const MAX_ATTEMPTS = 5;
+export const DAILY_EMAIL_LIMIT = 3;
 const DAY_WINDOW_SECONDS = 24 * 60 * 60;
 
 interface SendEmailArgs {
   env: Env;
   to: string;
   subject: string;
-  /** Rendered HTML body. */
   html: string;
-  /** Plain-text fallback (some clients reject HTML-only mail). */
   text?: string;
 }
 
@@ -33,12 +24,9 @@ interface EmailVerificationRow {
   attempts: number;
 }
 
-/** Send a transactional email through Brevo. Returns true on accepted send. */
 export async function sendEmail({ env, to, subject, html, text }: SendEmailArgs): Promise<boolean> {
   const apiKey = env.BREVO_API_KEY;
   if (!apiKey) {
-    // Dev/no-secret environments: don't fail the flow, just surface it. The
-    // recipient address and subject (which contains the code) stay out of logs.
     console.warn('[brevo] BREVO_API_KEY not configured — skipping send');
     return false;
   }
@@ -79,7 +67,6 @@ const HASH_CONTEXT = 'flexiyo-email-code:';
 
 function generateVerificationCode(): string {
   const max = 10 ** CODE_DIGITS;
-  // Rejection sampling avoids modulo bias in the 32-bit range.
   const cutoff = Math.floor(0x1_0000_0000 / max) * max;
   const buffer = new Uint32Array(1);
   do {
@@ -88,11 +75,6 @@ function generateVerificationCode(): string {
   return String(buffer[0] % max).padStart(CODE_DIGITS, '0');
 }
 
-/**
- * Keyed hash: an unsalted SHA-256 of a six-digit code is reversible by
- * enumerating a million candidates if the database leaks. HMAC with the
- * Worker secret makes that offline search impossible without the secret.
- */
 async function hashCode(env: Env, code: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     'raw',
@@ -118,26 +100,17 @@ function constantTimeEqual(left: string, right: string): boolean {
   return diff === 0;
 }
 
-/**
- * Issue a verification code for a user: stores a hashed, expiring record in
- * `email_verification_codes` and emails the raw code via Brevo.
- * One active code per user — re-issuing overwrites the previous record.
- * Daily budget: at most {@link DAILY_EMAIL_LIMIT} emails per user per 24h,
- * enforced atomically inside the same upsert (no extra queries, no races).
- */
 export async function issueEmailVerificationCode(
   env: Env,
   userId: string,
   email: string,
 ): Promise<{ sent: boolean; capped?: boolean; code?: string }> {
+  const db = getSqlDb(env);
   const code = generateVerificationCode();
   const now = Math.floor(Date.now() / 1000);
   const expiresAt = now + CODE_TTL_SECONDS;
 
-  // Rolling 24h window per user: if the stored window elapsed, the counter
-  // restarts. The conditional update keeps concurrent requests honest — DB
-  // arbitration means two parallel sends cannot both "fit" past the cap.
-  const upsert = await env.DB.prepare(
+  const upsert = await db.prepare(
     `INSERT INTO email_verification_codes
        (id, user_id, email, code_hash, expires_at, attempts, created_at,
         daily_count, window_started_at)
@@ -175,14 +148,13 @@ export async function issueEmailVerificationCode(
       await hashCode(env, code),
       expiresAt,
       now,
-      now, // INSERT window start
-      now, // daily_count reset
-      now, now, // window_started_at reset
-      now, // WHERE gate
+      now,
+      now,
+      now, now,
+      now,
     )
     .run();
 
-  // meta.changes == 0 means the WHERE gate rejected the send → cap reached.
   if ((upsert.meta?.changes ?? 0) === 0) {
     return { sent: false, capped: true };
   }
@@ -200,17 +172,16 @@ export async function issueEmailVerificationCode(
     </div>`,
   });
 
-  // Delivery failure is surfaced to the caller; the code is never logged.
   return { sent, code: sent ? undefined : code };
 }
 
-/** Verify a submitted code for a user (crop: hashed match + TTL + attempts). */
 export async function verifyEmailCode(
   env: Env,
   userId: string,
   code: string,
 ): Promise<boolean> {
-  const row = await env.DB.prepare(
+  const db = getSqlDb(env);
+  const row = await db.prepare(
     `SELECT code_hash, email, expires_at, attempts
        FROM email_verification_codes
       WHERE user_id = ?
@@ -221,7 +192,7 @@ export async function verifyEmailCode(
 
   if (!row || row.attempts >= MAX_ATTEMPTS || row.expires_at < Math.floor(Date.now() / 1000)) {
     if (row && row.attempts >= MAX_ATTEMPTS) {
-      await env.DB.prepare('DELETE FROM email_verification_codes WHERE user_id = ?')
+      await db.prepare('DELETE FROM email_verification_codes WHERE user_id = ?')
         .bind(userId)
         .run();
     }
@@ -231,13 +202,13 @@ export async function verifyEmailCode(
   const matches = constantTimeEqual(await hashCode(env, code), row.code_hash);
 
   if (matches) {
-    await env.DB.prepare('DELETE FROM email_verification_codes WHERE user_id = ?')
+    await db.prepare('DELETE FROM email_verification_codes WHERE user_id = ?')
       .bind(userId)
       .run();
     return true;
   }
 
-  await env.DB.prepare(
+  await db.prepare(
     'UPDATE email_verification_codes SET attempts = attempts + 1 WHERE user_id = ?',
   )
     .bind(userId)

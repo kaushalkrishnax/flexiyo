@@ -16,6 +16,7 @@ import { pruneOperationalData } from './services/maintenance.js';
 import { ChatRoom } from './sockets/chatRoom.js';
 import type { Env } from './types.js';
 import { verifyJWT } from './utils/jwt.js';
+import { getSqlDb } from './database/turso.js';
 
 const router = Router();
 
@@ -37,6 +38,7 @@ export default {
       return handlePreflight(env, request);
     }
 
+    const db = getSqlDb(env, request);
     const url = new URL(request.url);
     const inboxMatch = url.pathname === '/api/ws/inbox';
     const wsMatch = url.pathname.match(/^\/api\/ws\/([^/]+)$/);
@@ -78,7 +80,7 @@ export default {
       }
 
       const conversationId = wsMatch![1];
-      const conv = await env.DB.prepare(
+      const conv = await db.prepare(
         `SELECT id FROM conversations
          WHERE id = ? AND (user_a_id = ? OR user_b_id = ?)`,
       ).bind(conversationId, userId, userId).first<{ id: string }>();
@@ -142,10 +144,10 @@ export default {
   },
 
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
-    // Isolate each task: one failing maintenance job must not starve the rest.
+    const db = getSqlDb(env);
     const tasks: Array<() => Promise<void>> = [
       () => cleanExpiredMessages(env),
-      () => purgeExpiredMedia(env.DB, env),
+      () => purgeExpiredMedia(db, env),
       () => pruneOperationalData(env),
     ];
     for (const task of tasks) {

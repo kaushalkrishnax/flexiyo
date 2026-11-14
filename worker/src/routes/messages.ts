@@ -16,6 +16,7 @@ import { readJsonBody } from '../utils/http.js';
 import { postChatRoomJson } from '../utils/durableObject.js';
 import { runBatched } from '../utils/d1.js';
 import { validateConversationEnvelope } from '../services/conversationKeys.js';
+import { getSqlDb } from '../database/turso.js';
 
 export const messagesRouter = Router({ base: '/api/conversations' });
 
@@ -84,8 +85,9 @@ messagesRouter.get(
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
     const { id: conversationId } = request.params as { id: string };
+    const db = getSqlDb(env, request as unknown as Request);
 
-    const conv = await getConversationForMember(conversationId, userId, env.DB);
+    const conv = await getConversationForMember(conversationId, userId, db);
     if (!conv) {
       return new Response(JSON.stringify({ error: 'Conversation not found' }), {
         status: 404,
@@ -114,10 +116,10 @@ messagesRouter.get(
     const limit = Math.min(Math.max(1, isNaN(limitRaw) ? 50 : limitRaw), 100);
     const now = Math.floor(Date.now() / 1000);
 
-    let rows: D1Result<MessageRow>;
+    let rows: { results: MessageRow[] };
 
     if (before) {
-      const cursorMsg = await env.DB.prepare(
+      const cursorMsg = await db.prepare(
         'SELECT created_at, id FROM messages WHERE id = ? AND conversation_id = ?',
       )
         .bind(before, conversationId)
@@ -132,10 +134,9 @@ messagesRouter.get(
 
       const cursorCreatedAt = cursorMsg?.created_at ?? beforeCreatedAt!;
       const cursorId = cursorMsg?.id ?? before;
-      // Overlap the second if the cursor row vanished so same-second pagination leaves no gap.
       const includeCursorSecond = cursorMsg == null ? 1 : 0;
 
-      rows = await env.DB.prepare(
+      rows = await db.prepare(
         `SELECT m.*,
            (m.sender_id = ?) AS is_sent_by_me
          FROM messages m
@@ -167,7 +168,7 @@ messagesRouter.get(
         )
         .all<MessageRow>();
     } else {
-      rows = await env.DB.prepare(
+      rows = await db.prepare(
         `SELECT m.*,
            (m.sender_id = ?) AS is_sent_by_me
          FROM messages m
@@ -201,8 +202,9 @@ messagesRouter.post(
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
     const { id: conversationId } = request.params as { id: string };
+    const db = getSqlDb(env, request as unknown as Request);
 
-    const conv = await getConversationAccess(conversationId, userId, env.DB);
+    const conv = await getConversationAccess(conversationId, userId, db);
     if (!conv) {
       return new Response(JSON.stringify({ error: 'Conversation not found' }), {
         status: 404,
@@ -217,7 +219,7 @@ messagesRouter.post(
     if (conv.request_status === 'pending' && conv.initiated_by_id === userId) {
       hasExistingMessage = conv.last_message_at != null;
       if (!hasExistingMessage) {
-        const existingMessage = await env.DB.prepare(
+        const existingMessage = await db.prepare(
           'SELECT id FROM messages WHERE conversation_id = ? LIMIT 1',
         )
           .bind(conversationId)
@@ -292,17 +294,17 @@ messagesRouter.post(
       });
     }
 
-    const [existingResult, mediaResult, coverageResult] = await env.DB.batch([
-      env.DB.prepare(
+    const [existingResult, mediaResult, coverageResult] = await db.batch([
+      db.prepare(
         'SELECT id, sender_id, conversation_id FROM messages WHERE id = ?',
       ).bind(v2.id),
       v2.mediaId
-        ? env.DB.prepare(
+        ? db.prepare(
             `SELECT id FROM media
              WHERE id = ? AND conversation_id = ? AND sender_id = ? AND consumed = 0`,
           ).bind(v2.mediaId, conversationId, userId)
-        : env.DB.prepare('SELECT NULL AS id WHERE 0'),
-      env.DB.prepare(
+        : db.prepare('SELECT NULL AS id WHERE 0'),
+      db.prepare(
         `SELECT
            (SELECT COUNT(*) FROM devices
             WHERE user_id IN (?, ?) AND status = 'active' AND identity_public_key IS NOT NULL) AS active_count,
@@ -389,11 +391,10 @@ messagesRouter.post(
     }
 
     const now = Math.floor(Date.now() / 1000);
-    // Disappearing timers arm on read, not on send.
     const expiresAt = null;
     try {
-      await env.DB.batch([
-        env.DB.prepare(
+      await db.batch([
+        db.prepare(
           `INSERT INTO messages
              (id, conversation_id, sender_id, sender_device_id, message_type,
               reply_to_id, media_id, version, is_unsent, created_at, expires_at,
@@ -413,29 +414,29 @@ messagesRouter.post(
           v2.authTag,
           v2.keyEpoch,
         ),
-        env.DB.prepare(
+        db.prepare(
           'UPDATE conversations SET last_message_at = ?, last_message_sender_id = ? WHERE id = ?',
         ).bind(now, userId, conversationId),
-        env.DB.prepare(
+        db.prepare(
           `INSERT INTO conversation_user_state (conversation_id, user_id, unread_count)
            VALUES (?, ?, 1)
            ON CONFLICT(conversation_id, user_id) DO UPDATE SET
              unread_count = conversation_user_state.unread_count + 1`,
         ).bind(conversationId, expectedRecipient),
-        env.DB.prepare(
+        db.prepare(
           `INSERT OR IGNORE INTO conversation_user_state (conversation_id, user_id, unread_count)
            VALUES (?, ?, 0)`,
         ).bind(conversationId, userId),
         ...(v2.mediaId
           ? [
-              env.DB.prepare(
+              db.prepare(
                 'UPDATE media SET consumed = 1 WHERE id = ? AND conversation_id = ? AND sender_id = ?',
               ).bind(v2.mediaId, conversationId, userId),
             ]
           : []),
       ]);
     } catch {
-      const duplicate = await env.DB.prepare(
+      const duplicate = await db.prepare(
         'SELECT sender_id, conversation_id FROM messages WHERE id = ?',
       )
         .bind(v2.id)
@@ -524,7 +525,8 @@ messagesRouter.post(
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
     const { id: conversationId } = request.params as { id: string };
-    const conversation = await getConversationForMember(conversationId, userId, env.DB);
+    const db = getSqlDb(env, request as unknown as Request);
+    const conversation = await getConversationForMember(conversationId, userId, db);
     if (!conversation) {
       return new Response(JSON.stringify({ error: 'Conversation not found' }), {
         status: 404,
@@ -543,9 +545,7 @@ messagesRouter.post(
     }
 
     const messageIds = [...new Set(parsed.data.messageIds)];
-    // Driving from json_each keeps this to one primary-key lookup per id; the
-    // IN-subquery form makes SQLite scan the whole conversation instead.
-    const matching = await env.DB.prepare(
+    const matching = await db.prepare(
       `SELECT m.id AS id
        FROM json_each(?) ids
        CROSS JOIN messages m
@@ -562,9 +562,9 @@ messagesRouter.post(
 
     const now = Math.floor(Date.now() / 1000);
     await runBatched(
-      env.DB,
+      db,
       messageIds.map((messageId) =>
-        env.DB.prepare(
+        db.prepare(
           `INSERT OR IGNORE INTO local_deletions (id, user_id, message_id, deleted_at)
            VALUES (?, ?, ?, ?)`,
         ).bind(generateId(), userId, messageId, now),
@@ -585,7 +585,8 @@ messagesRouter.post(
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
     const { id: conversationId } = request.params as { id: string };
-    const conversation = await getConversationAccess(conversationId, userId, env.DB);
+    const db = getSqlDb(env, request as unknown as Request);
+    const conversation = await getConversationAccess(conversationId, userId, db);
     if (!conversation) {
       return new Response(JSON.stringify({ error: 'Conversation not found' }), {
         status: 404,
@@ -611,11 +612,7 @@ messagesRouter.post(
     const peerId =
       conversation.user_a_id === userId ? conversation.user_b_id : conversation.user_a_id;
 
-    // Address the peer directly so the (conversation_id, sender_id, read_at)
-    // index is fully constrained; `sender_id != ?` degrades to a conversation
-    // range scan. One UPDATE ... RETURNING replaces the SELECT-then-UPDATE so
-    // the unread set is scanned once and a concurrent read cannot double-broadcast.
-    const newlyRead = await env.DB.prepare(
+    const newlyRead = await db.prepare(
       `UPDATE messages
        SET delivered_at = COALESCE(delivered_at, ?), read_at = ?
        WHERE conversation_id = ? AND sender_id = ? AND is_unsent = 0 AND read_at IS NULL
@@ -627,15 +624,15 @@ messagesRouter.post(
     const newlyReadMessageIds = (newlyRead.results ?? []).map((row) => row.id);
 
     if (newlyReadMessageIds.length > 0) {
-      await env.DB.batch([
-        env.DB.prepare(
+      await db.batch([
+        db.prepare(
           `INSERT INTO conversation_user_state (conversation_id, user_id, unread_count, last_read_at)
            VALUES (?, ?, 0, ?)
            ON CONFLICT(conversation_id, user_id) DO UPDATE SET
              unread_count = 0,
              last_read_at = MAX(COALESCE(conversation_user_state.last_read_at, 0), excluded.last_read_at)`,
         ).bind(conversationId, userId, now),
-        env.DB.prepare(
+        db.prepare(
           `INSERT INTO conversation_user_state (conversation_id, user_id, unread_count, peer_seen_at)
            VALUES (?, ?, 0, ?)
            ON CONFLICT(conversation_id, user_id) DO UPDATE SET
@@ -657,7 +654,7 @@ messagesRouter.post(
       if (conversation.disappearing_timer === -1) {
         await deleteMessages(env, conversationId, newlyReadMessageIds);
       } else if (conversation.disappearing_timer > 0) {
-        await env.DB.prepare(
+        await db.prepare(
           `UPDATE messages SET expires_at = ?
            WHERE id IN (SELECT value FROM json_each(?))`,
         )
@@ -672,7 +669,7 @@ messagesRouter.post(
         },
       ]);
     } else {
-      await env.DB.prepare(
+      await db.prepare(
         `UPDATE conversation_user_state SET unread_count = 0
          WHERE conversation_id = ? AND user_id = ? AND unread_count != 0`,
       )
@@ -697,8 +694,9 @@ messagesRouter.patch(
       id: string;
       messageId: string;
     };
+    const db = getSqlDb(env, request as unknown as Request);
 
-    const conv = await getConversationForMember(conversationId, userId, env.DB);
+    const conv = await getConversationForMember(conversationId, userId, db);
     if (!conv) {
       return new Response(JSON.stringify({ error: 'Conversation not found' }), {
         status: 404,
@@ -706,7 +704,7 @@ messagesRouter.patch(
       });
     }
 
-    const message = await env.DB.prepare(
+    const message = await db.prepare(
       `SELECT * FROM messages WHERE id = ? AND conversation_id = ?`,
     )
       .bind(messageId, conversationId)
@@ -801,7 +799,7 @@ messagesRouter.patch(
     }
 
     const nextVersion = parsedV2.data.version + 1;
-    const updated = await env.DB.prepare(
+    const updated = await db.prepare(
       `UPDATE messages
        SET ciphertext = ?, nonce = ?, auth_tag = ?, key_epoch = ?,
            version = ?, edited_at = ?
@@ -880,11 +878,12 @@ messagesRouter.delete(
       id: string;
       messageId: string;
     };
+    const db = getSqlDb(env, request as unknown as Request);
 
     const url = new URL(request.url);
     const localOnly = url.searchParams.get('local') === 'true';
 
-    const conv = await getConversationForMember(conversationId, userId, env.DB);
+    const conv = await getConversationForMember(conversationId, userId, db);
     if (!conv) {
       return new Response(JSON.stringify({ error: 'Conversation not found' }), {
         status: 404,
@@ -892,7 +891,7 @@ messagesRouter.delete(
       });
     }
 
-    const message = await env.DB.prepare(
+    const message = await db.prepare(
       `SELECT * FROM messages WHERE id = ? AND conversation_id = ?`,
     )
       .bind(messageId, conversationId)
@@ -908,7 +907,7 @@ messagesRouter.delete(
     const now = Math.floor(Date.now() / 1000);
 
     if (localOnly) {
-      await env.DB.prepare(
+      await db.prepare(
         `INSERT OR IGNORE INTO local_deletions (id, user_id, message_id, deleted_at)
          VALUES (?, ?, ?, ?)`,
       )
@@ -947,8 +946,9 @@ messagesRouter.post(
       id: string;
       messageId: string;
     };
+    const db = getSqlDb(env, request as unknown as Request);
 
-    const conv = await getConversationForMember(conversationId, userId, env.DB);
+    const conv = await getConversationForMember(conversationId, userId, db);
     if (!conv) {
       return new Response(JSON.stringify({ error: 'Conversation not found' }), {
         status: 404,
@@ -956,7 +956,7 @@ messagesRouter.post(
       });
     }
 
-    const message = await env.DB.prepare(
+    const message = await db.prepare(
       `SELECT * FROM messages WHERE id = ? AND conversation_id = ?`,
     )
       .bind(messageId, conversationId)
@@ -990,7 +990,7 @@ messagesRouter.post(
     const { emoji } = parsed.data;
     const now = Math.floor(Date.now() / 1000);
 
-    const existing = await env.DB.prepare(
+    const existing = await db.prepare(
       `SELECT id, emoji FROM message_reactions WHERE message_id = ? AND user_id = ?`,
     )
       .bind(messageId, userId)
@@ -999,16 +999,16 @@ messagesRouter.post(
     let resultingReaction: string | null = emoji;
 
     if (existing && existing.emoji === emoji) {
-      await env.DB.prepare(`DELETE FROM message_reactions WHERE id = ?`).bind(existing.id).run();
+      await db.prepare(`DELETE FROM message_reactions WHERE id = ?`).bind(existing.id).run();
 
-      const otherReaction = await env.DB.prepare(
+      const otherReaction = await db.prepare(
         `SELECT emoji FROM message_reactions WHERE message_id = ? ORDER BY updated_at DESC LIMIT 1`,
       )
         .bind(messageId)
         .first<{ emoji: string }>();
 
       resultingReaction = otherReaction?.emoji ?? null;
-      await env.DB.prepare(`UPDATE messages SET reaction = ? WHERE id = ?`)
+      await db.prepare(`UPDATE messages SET reaction = ? WHERE id = ?`)
         .bind(resultingReaction, messageId)
         .run();
 
@@ -1032,13 +1032,13 @@ messagesRouter.post(
     }
 
     const reactionId = existing ? existing.id : generateId();
-    await env.DB.batch([
-      env.DB.prepare(
+    await db.batch([
+      db.prepare(
         `INSERT INTO message_reactions (id, message_id, conversation_id, user_id, emoji, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(message_id, user_id) DO UPDATE SET emoji = excluded.emoji, updated_at = excluded.updated_at`,
       ).bind(reactionId, messageId, conversationId, userId, emoji, now, now),
-      env.DB.prepare(`UPDATE messages SET reaction = ? WHERE id = ?`).bind(emoji, messageId),
+      db.prepare(`UPDATE messages SET reaction = ? WHERE id = ?`).bind(emoji, messageId),
     ]);
 
     await postChatRoomJson(env, conversationId, '/broadcast', {

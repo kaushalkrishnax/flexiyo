@@ -4,8 +4,8 @@ import { notifyInboxes } from '../services/inbox.js';
 import { sendMessagePush } from '../services/push.js';
 import { validateConversationEnvelope } from '../services/conversationKeys.js';
 import { consumeWindowBudget } from '../utils/windowBudget.js';
+import { getSqlDb, type SqlDatabase } from '../database/turso.js';
 
-// Keep socket metadata attached to the WebSocket so identity survives DO hibernation.
 interface SessionState {
   sessionId: string;
   userId: string;
@@ -85,10 +85,12 @@ const CONVERSATION_GATE_SQL = `
 export class ChatRoom {
   private state: DurableObjectState;
   private env: Env;
+  private db: SqlDatabase;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
     this.env = env;
+    this.db = getSqlDb(env, this);
     state.setWebSocketAutoResponse(
       new WebSocketRequestResponsePair(PING_FRAME, PONG_FRAME),
     );
@@ -169,7 +171,7 @@ export class ChatRoom {
 
     const jwtPayload = payload as unknown as JWTPayload;
     if (jwtPayload.jti) {
-      const revoked = await this.env.DB.prepare(
+      const revoked = await this.db.prepare(
         'SELECT jti FROM token_revocations WHERE jti = ?',
       )
         .bind(jwtPayload.jti)
@@ -192,7 +194,7 @@ export class ChatRoom {
       if (!Number.isInteger(parsedDeviceId) || parsedDeviceId <= 0) {
         return new Response(JSON.stringify({ error: 'Invalid device' }), { status: 400 });
       }
-      const row = await this.env.DB.prepare(
+      const row = await this.db.prepare(
         `SELECT id FROM devices
          WHERE id = ? AND user_id = ? AND status = 'active' AND identity_public_key IS NOT NULL`,
       )
@@ -550,7 +552,7 @@ export class ChatRoom {
   ): Promise<void> {
     const now = Math.floor(Date.now() / 1000);
     try {
-      const updated = await this.env.DB.prepare(
+      const updated = await this.db.prepare(
         `UPDATE messages SET delivered_at = COALESCE(delivered_at, ?)
          WHERE id = ? AND sender_id <> ? AND delivered_at IS NULL
          RETURNING sender_id`,
@@ -623,7 +625,7 @@ export class ChatRoom {
     const replyToId = typeof msg.replyToId === 'string' ? msg.replyToId : null;
     const mediaId = typeof msg.mediaId === 'string' ? msg.mediaId : null;
 
-    const conv = await this.env.DB.prepare(CONVERSATION_GATE_SQL)
+    const conv = await this.db.prepare(CONVERSATION_GATE_SQL)
       .bind(
         userId,
         userId,
@@ -666,7 +668,7 @@ export class ChatRoom {
       return;
     }
     if (conv.request_status === 'pending') {
-      const prior = await this.env.DB.prepare(
+      const prior = await this.db.prepare(
         `SELECT id FROM messages WHERE conversation_id = ? AND sender_id = ? AND is_unsent = 0 LIMIT 1`,
       )
         .bind(targetConversationId, userId)
@@ -724,18 +726,18 @@ export class ChatRoom {
       return;
     }
 
-    const [deviceResult, mediaResult, coverageResult] = await this.env.DB.batch([
-      this.env.DB.prepare(
+    const [deviceResult, mediaResult, coverageResult] = await this.db.batch([
+      this.db.prepare(
         `SELECT id FROM devices
          WHERE id = ? AND user_id = ? AND status = 'active' AND identity_public_key IS NOT NULL`,
       ).bind(deviceId, userId),
       mediaId
-        ? this.env.DB.prepare(
+        ? this.db.prepare(
             `SELECT id FROM media
              WHERE id = ? AND conversation_id = ? AND sender_id = ? AND consumed = 0`,
           ).bind(mediaId, targetConversationId, userId)
-        : this.env.DB.prepare('SELECT NULL AS id WHERE 0'),
-      this.env.DB.prepare(
+        : this.db.prepare('SELECT NULL AS id WHERE 0'),
+      this.db.prepare(
         `SELECT
            (SELECT COUNT(*) FROM devices
             WHERE user_id IN (?, ?) AND status = 'active' AND identity_public_key IS NOT NULL) AS active_count,
@@ -789,8 +791,8 @@ export class ChatRoom {
     const now = Math.floor(Date.now() / 1000);
     const expiresAt = null;
     try {
-      await this.env.DB.batch([
-        this.env.DB.prepare(
+      await this.db.batch([
+        this.db.prepare(
           `INSERT INTO messages
              (id, conversation_id, sender_id, sender_device_id, message_type,
               reply_to_id, media_id, version, is_unsent, created_at, expires_at,
@@ -810,22 +812,22 @@ export class ChatRoom {
           authTag,
           keyEpoch,
         ),
-        this.env.DB.prepare(
+        this.db.prepare(
           'UPDATE conversations SET last_message_at = ?, last_message_sender_id = ? WHERE id = ?',
         ).bind(now, userId, targetConversationId),
-        this.env.DB.prepare(
+        this.db.prepare(
           `INSERT INTO conversation_user_state (conversation_id, user_id, unread_count)
            VALUES (?, ?, 1)
            ON CONFLICT(conversation_id, user_id) DO UPDATE SET
              unread_count = conversation_user_state.unread_count + 1`,
         ).bind(targetConversationId, expectedRecipient),
-        this.env.DB.prepare(
+        this.db.prepare(
           `INSERT OR IGNORE INTO conversation_user_state (conversation_id, user_id, unread_count)
            VALUES (?, ?, 0)`,
         ).bind(targetConversationId, userId),
         ...(mediaId
           ? [
-              this.env.DB.prepare(
+              this.db.prepare(
                 'UPDATE media SET consumed = 1 WHERE id = ? AND conversation_id = ? AND sender_id = ?',
               ).bind(mediaId, targetConversationId, userId),
             ]

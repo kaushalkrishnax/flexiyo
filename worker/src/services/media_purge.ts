@@ -1,14 +1,13 @@
 import type { Env } from '../types.js';
 import { runBatched } from '../utils/d1.js';
+import type { SqlDatabase } from '../database/turso.js';
 
-// Deletes expired R2 media + rows and prunes old usage rows (scheduled handler).
 const MAX_EXPIRED_MEDIA_PER_RUN = 200;
 const MAX_DAILY_USAGE_PRUNE_PER_RUN = 1_000;
 
-export async function purgeExpiredMedia(db: D1Database, env: Env): Promise<void> {
+export async function purgeExpiredMedia(db: SqlDatabase, env: Env): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
 
-  // Bounded: each hourly run makes forward progress without an unbounded scan.
   const expired = await db
     .prepare(
       `SELECT id, r2_key FROM media WHERE expires_at < ?
@@ -30,8 +29,6 @@ export async function purgeExpiredMedia(db: D1Database, env: Env): Promise<void>
       );
     }
     if (retry.length > 0) {
-      // Mark inaccessible and move the retry deadline forward so repeated R2
-      // failures cannot monopolize the first 200 rows on every hourly sweep.
       const retryAt = now + 3_600;
       await runBatched(
         db,
@@ -42,7 +39,6 @@ export async function purgeExpiredMedia(db: D1Database, env: Env): Promise<void>
     }
   }
 
-  // Prune usage rows older than 30 days.
   await db
     .prepare(
       `DELETE FROM daily_usage

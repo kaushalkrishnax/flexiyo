@@ -1,5 +1,6 @@
 import type { Env, JWTPayload } from '../types.js';
 import { verifyJWT } from '../utils/jwt.js';
+import { getSqlDb } from '../database/turso.js';
 
 export async function authMiddleware(
   request: Request,
@@ -29,10 +30,10 @@ export async function authMiddleware(
     });
   }
 
-  // Check token revocation list
   const jti = payload['jti'] as string | undefined;
   if (jti) {
-    const revoked = await env.DB.prepare(
+    const db = getSqlDb(env, request);
+    const revoked = await db.prepare(
       'SELECT jti FROM token_revocations WHERE jti = ?',
     )
       .bind(jti)
@@ -46,7 +47,6 @@ export async function authMiddleware(
     }
   }
 
-  // Attach to request (Workers Request is mutable via property assignment)
   (request as unknown as Record<string, unknown>)['user'] = payload as unknown as JWTPayload;
-  return undefined; // continue to next handler
+  return undefined;
 }

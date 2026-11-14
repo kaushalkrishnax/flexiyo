@@ -1,5 +1,7 @@
 export interface Env {
   DB: D1Database;
+  TURSO_DB_URL?: string;
+  TURSO_DB_TOKEN?: string;
   CHAT_ROOM: DurableObjectNamespace;
   JWT_SECRET: string;
   CORS_ORIGIN: string;

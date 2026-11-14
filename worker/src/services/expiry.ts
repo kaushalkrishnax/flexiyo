@@ -1,16 +1,15 @@
 import type { Env } from '../types.js';
 import { deleteMessages } from './message_deletion.js';
+import { getSqlDb } from '../database/turso.js';
 
 const CLEANUP_INTERVAL_SECONDS = 60;
 
 const MAX_EXPIRED_PER_RUN = 500;
 
 export async function cleanExpiredMessages(env: Env): Promise<void> {
-  const db = env.DB;
+  const db = getSqlDb(env);
   const now = Math.floor(Date.now() / 1000);
 
-  // Claim the sweep with one conditional UPSERT. A read-then-write throttle
-  // lets two overlapping invocations both run the same cleanup.
   const claimed = await db
     .prepare(
       `INSERT INTO worker_meta (key, value)

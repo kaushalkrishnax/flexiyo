@@ -1,3 +1,6 @@
+import type { Env } from '../types.js';
+import { getSqlDb } from '../database/turso.js';
+
 interface RateLimitEntry {
   count: number;
   windowStart: number;
@@ -59,8 +62,6 @@ export function rateLimitMiddleware(
 ): (request: Request) => Response | undefined {
   return (request: Request): Response | undefined => {
     const url = new URL(request.url);
-    // One bucket per method+route: a flood on a cheap endpoint must not spend
-    // the budget of a sensitive one that shares the same client IP.
     const identifier = `${request.method}:${url.pathname}:${clientIp(request)}`;
 
     const allowed = checkRateLimit(identifier, options);
@@ -80,23 +81,18 @@ export function rateLimitMiddleware(
   };
 }
 
-/**
- * Distributed (D1-backed) fixed-window limiter. Use for sensitive endpoints
- * (key bundles, auth) where isolate-local counters are ineffective. The
- * read-and-increment is a single UPSERT so concurrent requests cannot all
- * observe the same below-limit count.
- */
 export async function checkRateLimitDistributed(
-  env: { DB: D1Database },
+  env: Env,
   identifier: string,
   options: RateLimitOptions = {},
 ): Promise<boolean> {
+  const db = getSqlDb(env);
   const limit = options.limit ?? 20;
   const windowMs = options.windowMs ?? 60_000;
   const now = Date.now();
   const windowStart = Math.floor(now / windowMs) * windowMs;
 
-  const claimed = await env.DB.prepare(
+  const claimed = await db.prepare(
     `INSERT INTO rate_limit_buckets (key, window_start, count)
      VALUES (?, ?, 1)
      ON CONFLICT(key) DO UPDATE SET

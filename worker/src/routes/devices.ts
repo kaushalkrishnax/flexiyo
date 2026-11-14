@@ -4,6 +4,7 @@ import { authMiddleware } from '../middleware/auth.js';
 import { readJsonBody } from '../utils/http.js';
 import { postChatRoomJson } from '../utils/durableObject.js';
 import { validatePublicKey } from '../services/conversationKeys.js';
+import { getSqlDb, type SqlDatabase } from '../database/turso.js';
 
 export const devicesRouter = Router({ base: '/api/devices' });
 
@@ -34,7 +35,8 @@ devicesRouter.get(
   (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
   async (request: IRequest, env: Env): Promise<Response> => {
     const userId = (request as unknown as AuthenticatedRequest).user.sub;
-    const rows = await env.DB.prepare(
+    const db = getSqlDb(env, request as unknown as Request);
+    const rows = await db.prepare(
       `SELECT * FROM devices WHERE user_id = ? ORDER BY created_at ASC`,
     )
       .bind(userId)
@@ -43,12 +45,12 @@ devicesRouter.get(
   },
 );
 
-// First-device V2 bootstrap. Additional installations must approve via QR pairing.
 devicesRouter.post(
   '/v2/register',
   (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
   async (request: IRequest, env: Env): Promise<Response> => {
     const userId = (request as unknown as AuthenticatedRequest).user.sub;
+    const db = getSqlDb(env, request as unknown as Request);
     const bodyResult = await readJsonBody(request);
     if (!bodyResult.ok) return bodyResult.response;
     const body = bodyResult.body as Record<string, unknown>;
@@ -63,7 +65,7 @@ devicesRouter.post(
       return json({ error: 'Invalid installation or identity key' }, 400);
     }
 
-    const existing = await env.DB.prepare(
+    const existing = await db.prepare(
       `SELECT id, status, identity_public_key
        FROM devices WHERE user_id = ? AND installation_id = ?`,
     )
@@ -77,7 +79,7 @@ devicesRouter.post(
     }
 
     const now = Math.floor(Date.now() / 1000);
-    const inserted = await env.DB.prepare(
+    const inserted = await db.prepare(
       `INSERT INTO devices
          (user_id, installation_id, status, created_at, last_seen_at, identity_public_key)
        SELECT ?, ?, 'active', ?, ?, ?
@@ -108,7 +110,8 @@ devicesRouter.get(
   async (request: IRequest, env: Env): Promise<Response> => {
     const requesterId = (request as unknown as AuthenticatedRequest).user.sub;
     const { userId } = request.params as { userId: string };
-    const blocked = await env.DB.prepare(
+    const db = getSqlDb(env, request as unknown as Request);
+    const blocked = await db.prepare(
       `SELECT 1 FROM user_blocks
        WHERE (blocker_id = ? AND blocked_id = ?)
           OR (blocker_id = ? AND blocked_id = ?) LIMIT 1`,
@@ -117,7 +120,7 @@ devicesRouter.get(
       .first();
     if (blocked) return json({ error: 'Cannot retrieve device keys for this account' }, 403);
 
-    const rows = await env.DB.prepare(
+    const rows = await db.prepare(
       `SELECT id, installation_id, identity_public_key
        FROM devices
        WHERE user_id = ? AND status = 'active' AND identity_public_key IS NOT NULL
@@ -142,44 +145,39 @@ devicesRouter.get(
 
 async function closeRevokedDeviceSockets(
   env: Env,
+  db: SqlDatabase,
   userId: string,
   deviceId: number,
 ): Promise<void> {
-  const rooms = await env.DB.prepare(
-    `SELECT id FROM conversations WHERE user_a_id = ? OR user_b_id = ?`,
-  )
-    .bind(userId, userId)
-    .all<{ id: string }>();
-
-  await env.DB.prepare(
-    `UPDATE conversations SET key_rotation_required = 1
-     WHERE key_epoch > 0 AND id IN (
-       SELECT conversation_id FROM device_key_envelopes WHERE recipient_device_id = ?
-     )`,
-  )
-    .bind(deviceId)
-    .run();
-  await env.DB.prepare(
-    'DELETE FROM device_key_envelopes WHERE recipient_device_id = ?',
-  )
-    .bind(deviceId)
-    .run();
+  const [rooms] = await db.batch([
+    db.prepare(`SELECT id FROM conversations WHERE user_a_id = ? OR user_b_id = ?`).bind(
+      userId,
+      userId,
+    ),
+    db.prepare(
+      `UPDATE conversations SET key_rotation_required = 1
+       WHERE key_epoch > 0 AND id IN (
+         SELECT conversation_id FROM device_key_envelopes WHERE recipient_device_id = ?
+       )`,
+    ).bind(deviceId),
+    db.prepare('DELETE FROM device_key_envelopes WHERE recipient_device_id = ?').bind(deviceId),
+  ]);
 
   await Promise.all(
-    (rooms.results ?? []).map(({ id }) =>
+    ((rooms.results ?? []) as Array<{ id: string }>).map(({ id }) =>
       postChatRoomJson(env, id, '/disconnect-device', { userId, deviceId }),
     ),
   );
 }
 
 async function findOwnDevice(
-  env: Env,
+  db: SqlDatabase,
   userId: string,
   rawId: string,
 ): Promise<DeviceRow | null> {
   const deviceId = Number.parseInt(rawId, 10);
   if (!Number.isInteger(deviceId)) return null;
-  const device = await env.DB.prepare(
+  const device = await db.prepare(
     `SELECT * FROM devices WHERE id = ? AND user_id = ?`,
   )
     .bind(deviceId, userId)
@@ -193,19 +191,20 @@ devicesRouter.post(
   async (request: IRequest, env: Env): Promise<Response> => {
     const userId = (request as unknown as AuthenticatedRequest).user.sub;
     const { id } = request.params as { id: string };
+    const db = getSqlDb(env, request as unknown as Request);
 
-    const device = await findOwnDevice(env, userId, id);
+    const device = await findOwnDevice(db, userId, id);
     if (!device) return json({ error: 'Device not found' }, 404);
     if (device.status === 'disabled') return json(deviceToJson(device));
 
-    await closeRevokedDeviceSockets(env, userId, device.id);
-    await env.DB.prepare(
+    await closeRevokedDeviceSockets(env, db, userId, device.id);
+    await db.prepare(
       `UPDATE devices SET status = 'disabled', last_seen_at = ? WHERE id = ?`,
     )
       .bind(Math.floor(Date.now() / 1000), device.id)
       .run();
 
-    const updated = await findOwnDevice(env, userId, id);
+    const updated = await findOwnDevice(db, userId, id);
     return json(deviceToJson(updated!));
   },
 );
@@ -216,12 +215,12 @@ devicesRouter.post(
   async (request: IRequest, env: Env): Promise<Response> => {
     const userId = (request as unknown as AuthenticatedRequest).user.sub;
     const { id } = request.params as { id: string };
+    const db = getSqlDb(env, request as unknown as Request);
 
-    const device = await findOwnDevice(env, userId, id);
+    const device = await findOwnDevice(db, userId, id);
     if (!device) return json({ error: 'Device not found' }, 404);
 
-    // Slot check and status flip stay in one statement so concurrent enables cannot exceed the limit.
-    const result = await env.DB.prepare(
+    const result = await db.prepare(
       `UPDATE devices
        SET status = 'active', revoked_at = NULL, last_seen_at = ?
        WHERE id = ? AND user_id = ? AND status <> 'active'
@@ -246,7 +245,7 @@ devicesRouter.post(
       );
     }
 
-    const updated = await findOwnDevice(env, userId, id);
+    const updated = await findOwnDevice(db, userId, id);
     return json(deviceToJson(updated!));
   },
 );
@@ -257,12 +256,13 @@ devicesRouter.delete(
   async (request: IRequest, env: Env): Promise<Response> => {
     const userId = (request as unknown as AuthenticatedRequest).user.sub;
     const { id } = request.params as { id: string };
+    const db = getSqlDb(env, request as unknown as Request);
 
-    const device = await findOwnDevice(env, userId, id);
+    const device = await findOwnDevice(db, userId, id);
     if (!device) return json({ error: 'Device not found' }, 404);
 
-    await closeRevokedDeviceSockets(env, userId, device.id);
-    await env.DB.prepare(`DELETE FROM devices WHERE id = ? AND user_id = ?`)
+    await closeRevokedDeviceSockets(env, db, userId, device.id);
+    await db.prepare(`DELETE FROM devices WHERE id = ? AND user_id = ?`)
       .bind(device.id, userId)
       .run();
 

@@ -7,6 +7,7 @@ import { validateKeyEnvelope, validatePublicKey } from '../services/conversation
 import { generateId } from '../utils/crypto.js';
 import { readJsonBody } from '../utils/http.js';
 import { MAX_ACTIVE_DEVICES } from './devices.js';
+import { getSqlDb } from '../database/turso.js';
 
 export const pairingRouter = Router({ base: '/api/devices/pairing' });
 
@@ -34,6 +35,7 @@ pairingRouter.post(
   (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
   async (request: IRequest, env: Env): Promise<Response> => {
     const userId = (request as unknown as AuthenticatedRequest).user.sub;
+    const db = getSqlDb(env, request as unknown as Request);
     const device = await resolveRequestDevice(request, env, userId);
     if (!isActiveV2Device(device)) {
       return json({ error: 'An active conversation-key device is required' }, 403);
@@ -49,7 +51,7 @@ pairingRouter.post(
     const now = Math.floor(Date.now() / 1000);
     const id = generateId();
     const expiresAt = now + 180;
-    const inserted = await env.DB.prepare(
+    const inserted = await db.prepare(
       `INSERT INTO pairing_sessions
          (id, user_id, initiator_device_id, initiator_ephemeral_public,
           status, created_at, expires_at)
@@ -94,6 +96,7 @@ pairingRouter.post(
   async (request: IRequest, env: Env): Promise<Response> => {
     const userId = (request as unknown as AuthenticatedRequest).user.sub;
     const { id } = request.params as { id: string };
+    const db = getSqlDb(env, request as unknown as Request);
     const bodyResult = await readJsonBody(request);
     if (!bodyResult.ok) return bodyResult.response;
     const parsed = joinSchema.safeParse(bodyResult.body);
@@ -115,7 +118,7 @@ pairingRouter.post(
       return json({ error: 'Invalid encrypted pairing payload' }, 400);
     }
 
-    const session = await env.DB.prepare(
+    const session = await db.prepare(
       `SELECT * FROM pairing_sessions
        WHERE id = ? AND user_id = ? AND status = 'pending' AND expires_at > ?`,
     )
@@ -123,7 +126,7 @@ pairingRouter.post(
       .first<PairingSessionRow>();
     if (!session) return json({ error: 'Pairing session not found or expired' }, 404);
 
-    const existing = await env.DB.prepare(
+    const existing = await db.prepare(
       `SELECT id FROM devices WHERE user_id = ? AND installation_id = ?`,
     )
       .bind(userId, value.installationId)
@@ -132,7 +135,7 @@ pairingRouter.post(
       return json({ error: 'Installation is already registered' }, 409);
     }
 
-    const updated = await env.DB.prepare(
+    const updated = await db.prepare(
       `UPDATE pairing_sessions
        SET status = 'joined', joined_installation_id = ?, joined_identity_public = ?,
            joined_ephemeral_public = ?, joined_nonce = ?, joined_ciphertext = ?, joined_mac = ?
@@ -164,8 +167,9 @@ pairingRouter.get(
   async (request: IRequest, env: Env): Promise<Response> => {
     const userId = (request as unknown as AuthenticatedRequest).user.sub;
     const { id } = request.params as { id: string };
+    const db = getSqlDb(env, request as unknown as Request);
     const now = Math.floor(Date.now() / 1000);
-    const session = await env.DB.prepare(
+    const session = await db.prepare(
       'SELECT * FROM pairing_sessions WHERE id = ? AND user_id = ?',
     )
       .bind(id, userId)
@@ -173,7 +177,7 @@ pairingRouter.get(
     if (!session) return json({ error: 'Pairing session not found' }, 404);
 
     if (session.status !== 'approved' && session.status !== 'cancelled' && session.expires_at <= now) {
-      await env.DB.prepare(
+      await db.prepare(
         `UPDATE pairing_sessions SET status = 'expired'
          WHERE id = ? AND status IN ('pending', 'joined') AND expires_at <= ?`,
       )
@@ -203,13 +207,14 @@ pairingRouter.post(
   async (request: IRequest, env: Env): Promise<Response> => {
     const userId = (request as unknown as AuthenticatedRequest).user.sub;
     const { id } = request.params as { id: string };
+    const db = getSqlDb(env, request as unknown as Request);
     const initiator = await resolveRequestDevice(request, env, userId);
     if (!isActiveV2Device(initiator)) {
       return json({ error: 'An active conversation-key device is required' }, 403);
     }
 
     const now = Math.floor(Date.now() / 1000);
-    const session = await env.DB.prepare(
+    const session = await db.prepare(
       `SELECT * FROM pairing_sessions WHERE id = ? AND user_id = ?`,
     )
       .bind(id, userId)
@@ -228,7 +233,7 @@ pairingRouter.post(
     }
 
     const joinedInstallation = session.joined_installation_id;
-    const existing = await env.DB.prepare(
+    const existing = await db.prepare(
       `SELECT id FROM devices WHERE user_id = ? AND installation_id = ?`,
     )
       .bind(userId, joinedInstallation)
@@ -238,8 +243,8 @@ pairingRouter.post(
       return json({ error: 'Installation is already registered' }, 409);
     }
 
-    const results = await env.DB.batch([
-      env.DB.prepare(
+    const results = await db.batch([
+      db.prepare(
         `INSERT INTO devices
            (user_id, installation_id, status, created_at, last_seen_at, identity_public_key)
          SELECT ?, ?, 'active', ?, ?, ?
@@ -262,7 +267,7 @@ pairingRouter.post(
         userId,
         MAX_ACTIVE_DEVICES,
       ),
-      env.DB.prepare(
+      db.prepare(
         `UPDATE pairing_sessions
          SET status = 'approved',
              approved_device_id = (
@@ -288,11 +293,12 @@ pairingRouter.post(
   async (request: IRequest, env: Env): Promise<Response> => {
     const userId = (request as unknown as AuthenticatedRequest).user.sub;
     const { id } = request.params as { id: string };
+    const db = getSqlDb(env, request as unknown as Request);
     const device = await resolveRequestDevice(request, env, userId);
     if (!isActiveV2Device(device)) {
       return json({ error: 'An active conversation-key device is required' }, 403);
     }
-    const result = await env.DB.prepare(
+    const result = await db.prepare(
       `UPDATE pairing_sessions SET status = 'cancelled'
        WHERE id = ? AND user_id = ? AND initiator_device_id = ?
          AND status IN ('pending', 'joined')`,

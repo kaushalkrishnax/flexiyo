@@ -5,6 +5,7 @@ import { authMiddleware } from '../middleware/auth.js';
 import { generateId } from '../utils/crypto.js';
 import { readJsonBody } from '../utils/http.js';
 import { MAX_PUSH_TOKENS_PER_USER } from '../services/push.js';
+import { getSqlDb } from '../database/turso.js';
 
 export const pushRouter = Router({ base: '/api/push' });
 
@@ -26,6 +27,7 @@ pushRouter.post(
   async (request: IRequest, env: Env): Promise<Response> => {
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
+    const db = getSqlDb(env, request as unknown as Request);
 
     const bodyResult = await readJsonBody(request);
     if (!bodyResult.ok) return bodyResult.response;
@@ -40,10 +42,7 @@ pushRouter.post(
     const platform = parsed.data.platform ?? 'android';
     const now = Math.floor(Date.now() / 1000);
 
-    // Token is unique per install; a re-registration (or a different account
-    // signing in on the same device) reassigns ownership. The cap is enforced
-    // in the same statement so parallel registrations cannot overshoot it.
-    const registered = await env.DB.prepare(
+    const registered = await db.prepare(
       `INSERT INTO push_tokens (id, user_id, token, platform, created_at, updated_at)
        SELECT ?, ?, ?, ?, ?, ?
        WHERE (SELECT COUNT(*) FROM push_tokens WHERE user_id = ?) < ?
@@ -88,6 +87,7 @@ pushRouter.post(
   async (request: IRequest, env: Env): Promise<Response> => {
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
+    const db = getSqlDb(env, request as unknown as Request);
 
     const bodyResult = await readJsonBody(request);
     if (!bodyResult.ok) return bodyResult.response;
@@ -98,7 +98,7 @@ pushRouter.post(
       return json({ error: 'token is required' }, 400);
     }
 
-    await env.DB.prepare(
+    await db.prepare(
       'DELETE FROM push_tokens WHERE token = ? AND user_id = ?',
     )
       .bind(token, userId)

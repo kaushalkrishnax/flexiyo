@@ -18,6 +18,7 @@ import { sendPushToUser } from '../services/push.js';
 import type { InboxEvent } from '../services/inbox.js';
 import { readJsonBody } from '../utils/http.js';
 import { postChatRoomJson } from '../utils/durableObject.js';
+import { getSqlDb, type SqlDatabase } from '../database/turso.js';
 
 export const conversationsRouter = Router({ base: '/api/conversations' });
 
@@ -43,7 +44,7 @@ const disappearingTimerSchema = z.object({
 async function getConversationForMember(
   conversationId: string,
   userId: string,
-  db: D1Database,
+  db: SqlDatabase,
 ): Promise<ConversationRow | null> {
   const conv = await db
     .prepare(
@@ -62,7 +63,7 @@ export interface ConversationAccessRow extends ConversationRow {
 export async function getConversationAccess(
   conversationId: string,
   userId: string,
-  db: D1Database,
+  db: SqlDatabase,
 ): Promise<ConversationAccessRow | null> {
   const conv = await db
     .prepare(
@@ -89,6 +90,7 @@ conversationsRouter.post(
   async (request: IRequest, env: Env): Promise<Response> => {
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
+    const db = getSqlDb(env, request as unknown as Request);
 
     const bodyResult = await readJsonBody(request);
     if (!bodyResult.ok) return bodyResult.response;
@@ -111,7 +113,7 @@ conversationsRouter.post(
       });
     }
 
-    const participant = await env.DB.prepare(
+    const participant = await db.prepare(
       'SELECT id, username FROM users WHERE id = ?',
     )
       .bind(participantId)
@@ -127,7 +129,7 @@ conversationsRouter.post(
     const [userA, userB] =
       userId < participantId ? [userId, participantId] : [participantId, userId];
 
-    const existing = await env.DB.prepare(
+    const existing = await db.prepare(
       `SELECT c.*, COALESCE(cus.unread_count, 0) AS unread_count
        FROM conversations c
        LEFT JOIN conversation_user_state cus
@@ -168,23 +170,23 @@ conversationsRouter.post(
     const convId = generateId();
     const now = Math.floor(Date.now() / 1000);
 
-    await env.DB.batch([
-      env.DB.prepare(
+    await db.batch([
+      db.prepare(
         `INSERT INTO conversations
            (id, user_a_id, user_b_id, initiated_by_id, request_status, disappearing_timer, created_at)
          VALUES (?, ?, ?, ?, 'pending', 0, ?)`,
       ).bind(convId, userA, userB, userId, now),
-      env.DB.prepare(
+      db.prepare(
         `INSERT OR IGNORE INTO conversation_user_state (conversation_id, user_id, unread_count)
          VALUES (?, ?, 0)`,
       ).bind(convId, userA),
-      env.DB.prepare(
+      db.prepare(
         `INSERT OR IGNORE INTO conversation_user_state (conversation_id, user_id, unread_count)
          VALUES (?, ?, 0)`,
       ).bind(convId, userB),
     ]);
 
-    const myUser = await env.DB.prepare('SELECT username FROM users WHERE id = ?')
+    const myUser = await db.prepare('SELECT username FROM users WHERE id = ?')
       .bind(userId)
       .first<{ username: string }>();
 
@@ -253,7 +255,8 @@ conversationsRouter.patch(
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
     const { id } = request.params as { id: string };
-    const conversation = await getConversationForMember(id, userId, env.DB);
+    const db = getSqlDb(env, request as unknown as Request);
+    const conversation = await getConversationForMember(id, userId, db);
     if (!conversation) {
       return new Response(JSON.stringify({ error: 'Message request not found' }), {
         status: 404,
@@ -292,7 +295,7 @@ conversationsRouter.patch(
       });
     }
 
-    await env.DB.prepare(
+    await db.prepare(
       `UPDATE conversations SET request_status = ?
        WHERE id = ? AND request_status = 'pending'`,
     )
@@ -316,9 +319,9 @@ conversationsRouter.patch(
     try {
       const otherId =
         conversation.user_a_id === userId ? conversation.user_b_id : conversation.user_a_id;
-      const [namesResult, stateResult] = await env.DB.batch([
-        env.DB.prepare(`SELECT id, username FROM users WHERE id IN (?, ?)`).bind(userId, otherId),
-        env.DB.prepare(
+      const [namesResult, stateResult] = await db.batch([
+        db.prepare(`SELECT id, username FROM users WHERE id IN (?, ?)`).bind(userId, otherId),
+        db.prepare(
           `SELECT user_id, unread_count FROM conversation_user_state
            WHERE conversation_id = ? AND user_id IN (?, ?)`,
         ).bind(id, userId, otherId),
@@ -404,8 +407,9 @@ conversationsRouter.get(
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
     const { id } = request.params as { id: string };
+    const db = getSqlDb(env, request as unknown as Request);
 
-    const row = await env.DB.prepare(
+    const row = await db.prepare(
       `SELECT
          c.id,
          c.disappearing_timer,
@@ -473,8 +477,9 @@ conversationsRouter.patch(
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
     const { id } = request.params as { id: string };
+    const db = getSqlDb(env, request as unknown as Request);
 
-    const conv = await getConversationForMember(id, userId, env.DB);
+    const conv = await getConversationForMember(id, userId, db);
     if (!conv) {
       return new Response(JSON.stringify({ error: 'Conversation not found' }), {
         status: 404,
@@ -498,14 +503,14 @@ conversationsRouter.patch(
 
     const { timer } = parsed.data;
 
-    await env.DB.prepare(
+    await db.prepare(
       'UPDATE conversations SET disappearing_timer = ? WHERE id = ?',
     )
       .bind(timer, id)
       .run();
 
     if (timer === 0) {
-      await env.DB.prepare(
+      await db.prepare(
         'UPDATE messages SET expires_at = NULL WHERE conversation_id = ?',
       )
         .bind(id)
@@ -541,8 +546,9 @@ conversationsRouter.post(
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
     const { id } = request.params as { id: string };
+    const db = getSqlDb(env, request as unknown as Request);
 
-    const conversation = await getConversationForMember(id, userId, env.DB);
+    const conversation = await getConversationForMember(id, userId, db);
     if (!conversation) {
       return new Response(JSON.stringify({ error: 'Conversation not found' }), {
         status: 404,
@@ -555,7 +561,7 @@ conversationsRouter.post(
     const blockId = generateId();
     const now = Math.floor(Date.now() / 1000);
 
-    await env.DB.prepare(
+    await db.prepare(
       `INSERT OR IGNORE INTO user_blocks (id, blocker_id, blocked_id, created_at)
        VALUES (?, ?, ?, ?)`,
     )
@@ -576,8 +582,9 @@ conversationsRouter.delete(
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
     const { id } = request.params as { id: string };
+    const db = getSqlDb(env, request as unknown as Request);
 
-    const conversation = await getConversationForMember(id, userId, env.DB);
+    const conversation = await getConversationForMember(id, userId, db);
     if (!conversation) {
       return new Response(JSON.stringify({ error: 'Conversation not found' }), {
         status: 404,
@@ -587,7 +594,7 @@ conversationsRouter.delete(
 
     const otherUserId =
       conversation.user_a_id === userId ? conversation.user_b_id : conversation.user_a_id;
-    await env.DB.prepare(
+    await db.prepare(
       'DELETE FROM user_blocks WHERE blocker_id = ? AND blocked_id = ?',
     )
       .bind(userId, otherUserId)

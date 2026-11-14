@@ -15,6 +15,7 @@
     "db:seed:local": "wrangler d1 execute flexiyo-db --local --file=./migrations/seed.sql"
   },
   "dependencies": {
+    "@libsql/client": "^0.18.0",
     "drizzle-orm": "^0.45.4",
     "itty-router": "^5.0.18",
     "zod": "^3.23.8"

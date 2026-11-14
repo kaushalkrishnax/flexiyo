@@ -1,4 +1,5 @@
 import type { Env } from '../types.js';
+import { getSqlDb } from '../database/turso.js';
 
 export type ConversationScope = 'inbox' | 'requests' | 'blocked' | 'all';
 
@@ -27,12 +28,12 @@ export function conversationListQuery(
   scope: ConversationScope,
 ): { sql: string; binds: string[] } {
   const binds = [
-    userId, // last_message_is_mine
-    userId, // conversant_username
-    userId, // conversant_id
-    userId, // user_blocks blocker_id
-    userId, // user_blocks blocked_id CASE
-    userId, // cus.user_id
+    userId,
+    userId,
+    userId,
+    userId,
+    userId,
+    userId,
   ];
 
   let scopeWhere: string;
@@ -126,8 +127,9 @@ export async function listConversations(
   userId: string,
   scope: Exclude<ConversationScope, 'all'>,
 ): Promise<ConversationListRow[]> {
+  const db = getSqlDb(env);
   const { sql, binds } = conversationListQuery(userId, scope);
-  const rows = await env.DB.prepare(sql).bind(...binds).all<ConversationListRow>();
+  const rows = await db.prepare(sql).bind(...binds).all<ConversationListRow>();
   return rows.results ?? [];
 }
 
@@ -135,8 +137,9 @@ export async function listAllConversations(
   env: Env,
   userId: string,
 ): Promise<{ conversations: ConversationListRow[]; requests: ConversationListRow[] }> {
+  const db = getSqlDb(env);
   const { sql, binds } = conversationListQuery(userId, 'all');
-  const result = await env.DB.prepare(sql).bind(...binds).all<ConversationListRow>();
+  const result = await db.prepare(sql).bind(...binds).all<ConversationListRow>();
   const conversations: ConversationListRow[] = [];
   const requests: ConversationListRow[] = [];
 

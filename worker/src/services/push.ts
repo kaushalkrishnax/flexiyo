@@ -1,21 +1,7 @@
 import type { Env } from '../types.js';
+import { getSqlDb, type SqlDatabase } from '../database/turso.js';
 
-/** Bounds FCM fan-out and per-account registration growth. */
 export const MAX_PUSH_TOKENS_PER_USER = 10;
-
-/**
- * Firebase Cloud Messaging (HTTP v1) delivery for offline notifications.
- *
- * Configuration comes from the `FCM_SERVICE_ACCOUNT` secret: the JSON key
- * generated in Firebase console → Project settings → Service accounts →
- * Generate new private key (project `flexiyo-app`). Without the secret,
- * pushes are skipped so messaging keeps working.
- *
- * The OAuth access token is cached per isolate (1-hour lifetime).
- *
- * Diagnostics never include secrets (tokens, private keys, JWTs, access
- * tokens); tokens are identified by their position in the delivery batch.
- */
 
 interface ServiceAccount {
   project_id: string;
@@ -29,7 +15,6 @@ export interface PushNotification {
   data?: Record<string, string>;
 }
 
-/** Subset of the FCM HTTP v1 error envelope used for classification. */
 interface FcmErrorBody {
   error?: {
     status?: string;
@@ -38,11 +23,6 @@ interface FcmErrorBody {
   };
 }
 
-/**
- * `pruned` and `auth_error` are both permanent for the request but differ in
- * cause: a pruned token is deleted, an auth error is a configuration problem
- * that must never delete tokens.
- */
 type FcmOutcome = 'accepted' | 'pruned' | 'auth_error' | 'transient' | 'rejected';
 
 interface FcmAttempt {
@@ -84,8 +64,6 @@ function truncate(value: string, max = 200): string {
 
 function parseServiceAccount(secret: string | undefined): ServiceAccount | null {
   if (!secret) {
-    // Config absence is an intentional deployment state, not a per-message
-    // fault: warn once so it is discoverable without spamming the logs.
     if (!warnedMissingConfig) {
       warnedMissingConfig = true;
       console.warn('FCM_SERVICE_ACCOUNT is not configured; push notifications are disabled');
@@ -127,7 +105,6 @@ async function readOAuthError(response: Response): Promise<string> {
     );
     return parts.length > 0 ? truncate(parts.join(': ')) : '';
   } catch {
-    // Never echo an arbitrary body: it could contain the assertion.
     return '';
   }
 }
@@ -174,8 +151,6 @@ async function getAccessToken(account: ServiceAccount): Promise<string> {
     body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${assertion}`,
   });
   if (!tokenResponse.ok) {
-    // Only Google's standard error fields are surfaced; the raw body is not
-    // logged because a request could echo the signed assertion.
     const detail = await readOAuthError(tokenResponse);
     throw new Error(
       `FCM OAuth token exchange failed (${tokenResponse.status})${detail ? `: ${detail}` : ''}`,
@@ -203,12 +178,6 @@ async function readFcmError(response: Response): Promise<FcmErrorBody | null> {
   }
 }
 
-/**
- * FCM returns `UNREGISTERED` (404) for tokens that are no longer installed or
- * have expired, and `INVALID_ARGUMENT` (400) when the registration token is
- * malformed. Both are permanent for this token. Everything else — auth,
- * quota, 5xx, network — must keep the token for a later retry.
- */
 function isPermanentTokenFailure(
   status: number,
   errorCode: string | undefined,
@@ -222,7 +191,7 @@ function isPermanentTokenFailure(
 }
 
 async function sendToToken(
-  env: Env,
+  db: SqlDatabase,
   account: ServiceAccount,
   accessToken: string,
   token: string,
@@ -271,9 +240,7 @@ async function sendToToken(
   }
 
   if (isPermanentTokenFailure(response.status, errorCode, message)) {
-    // Only permanent token failures reach here, so pruning cannot drop a
-    // valid token because of a transient outage or a configuration mistake.
-    await env.DB.prepare('DELETE FROM push_tokens WHERE token = ?').bind(token).run();
+    await db.prepare('DELETE FROM push_tokens WHERE token = ?').bind(token).run();
     return { outcome: 'pruned', status: response.status, errorCode, detail: message };
   }
 
@@ -284,10 +251,6 @@ async function sendToToken(
   return { outcome: 'rejected', status: response.status, errorCode, detail: message };
 }
 
-/**
- * Sends a push notification to every device registered for `userId`.
- * Never throws: notification delivery must not affect message sending.
- */
 export async function sendPushToUser(
   env: Env,
   userId: string,
@@ -296,8 +259,9 @@ export async function sendPushToUser(
   const account = parseServiceAccount(env.FCM_SERVICE_ACCOUNT);
   if (!account) return;
 
+  const db = getSqlDb(env);
   try {
-    const { results } = await env.DB.prepare(
+    const { results } = await db.prepare(
       'SELECT token FROM push_tokens WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?',
     )
       .bind(userId, MAX_PUSH_TOKENS_PER_USER)
@@ -316,10 +280,8 @@ export async function sendPushToUser(
       return;
     }
 
-    // Each token is attempted independently; one device's failure never
-    // prevents delivery to the account's other devices.
     const settlements = await Promise.allSettled(
-      tokens.map((token) => sendToToken(env, account, accessToken, token, notification)),
+      tokens.map((token) => sendToToken(db, account, accessToken, token, notification)),
     );
 
     let accepted = 0;
@@ -328,7 +290,6 @@ export async function sendPushToUser(
     let authError = 0;
 
     settlements.forEach((settlement, index) => {
-      // Tokens are identified by position so no token value reaches the logs.
       const label = `device #${index + 1}`;
       if (settlement.status === 'rejected') {
         failed += 1;
@@ -385,16 +346,6 @@ export async function sendPushToUser(
   }
 }
 
-/**
- * Notification policy for a persisted 1:1 message, shared by the HTTP and
- * WebSocket send paths so both transports behave identically.
- *
- * - Never notifies the sender (callers pass the recipient only).
- * - Skips the push when the inbox event already reached the recipient's
- *   active socket, avoiding a redundant notification.
- * - Keeps the preview neutral because the server cannot decrypt E2EE bodies.
- * - Never throws; push failure must not fail the message send.
- */
 export async function sendMessagePush(
   env: Env,
   params: {
@@ -411,7 +362,8 @@ export async function sendMessagePush(
     return;
   }
   try {
-    const sender = await env.DB.prepare('SELECT username FROM users WHERE id = ?')
+    const db = getSqlDb(env);
+    const sender = await db.prepare('SELECT username FROM users WHERE id = ?')
       .bind(params.senderId)
       .first<{ username: string }>();
     await sendPushToUser(env, params.recipientId, {

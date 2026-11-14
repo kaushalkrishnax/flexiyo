@@ -4,9 +4,8 @@ import { authMiddleware } from '../middleware/auth.js';
 import { decideView, viewLimit } from '../services/mediaViews.js';
 import { generateId } from '../utils/crypto.js';
 import { getConversationForMember } from './conversations.js';
+import { getSqlDb, type SqlDatabase } from '../database/turso.js';
 
-// Media upload/fetch through authed Worker routes; R2 is server-side only and
-// the Worker sees ciphertext (AES-256-GCM is applied client-side).
 export const mediaRouter = Router({ base: '/api' });
 
 const DEFAULT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
@@ -66,15 +65,14 @@ async function readBoundedBody(request: Request, maxBytes: number): Promise<Arra
 }
 
 async function reserveDailyBytes(
-  env: Env,
+  db: SqlDatabase,
   userId: string,
   day: string,
   column: 'bytes_up' | 'bytes_down',
   size: number,
   cap: number,
 ): Promise<boolean> {
-  // Column names are selected from a closed union above, never user input.
-  const result = await env.DB.prepare(
+  const result = await db.prepare(
     `INSERT INTO daily_usage (user_id, day, bytes_up, bytes_down)
      SELECT ?, ?, ?, ? WHERE ? <= ?
      ON CONFLICT(user_id, day) DO UPDATE SET
@@ -88,13 +86,13 @@ async function reserveDailyBytes(
 }
 
 async function releaseDailyBytes(
-  env: Env,
+  db: SqlDatabase,
   userId: string,
   day: string,
   column: 'bytes_up' | 'bytes_down',
   size: number,
 ): Promise<void> {
-  await env.DB.prepare(
+  await db.prepare(
     `UPDATE daily_usage SET ${column} = MAX(0, ${column} - ?) WHERE user_id = ? AND day = ?`,
   ).bind(size, userId, day).run();
 }
@@ -104,29 +102,26 @@ function utcDayKey(): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
 }
 
-/** Deletes the R2 object and marks the metadata row consumed so future fetches return 410. */
-async function consume(env: Env, mediaId: string, r2Key: string): Promise<void> {
+async function consume(env: Env, db: SqlDatabase, mediaId: string, r2Key: string): Promise<void> {
   try {
     await env.MEDIA.delete(r2Key);
-    await env.DB.prepare('UPDATE media SET consumed = 1 WHERE id = ?').bind(mediaId).run();
+    await db.prepare('UPDATE media SET consumed = 1 WHERE id = ?').bind(mediaId).run();
   } catch {
-    // Keep a consumed tombstone and retry cleanup on the next scheduled sweep.
     const retryAt = Math.floor(Date.now() / 1000) + 3_600;
-    await env.DB.prepare(
+    await db.prepare(
       'UPDATE media SET consumed = 1, expires_at = ? WHERE id = ?',
     ).bind(retryAt, mediaId).run();
   }
 }
 
-/** Returns a claimed view that could not be served because the object failed. */
-async function releaseView(env: Env, mediaId: string, userId: string): Promise<void> {
+async function releaseView(db: SqlDatabase, mediaId: string, userId: string): Promise<void> {
   try {
-    await env.DB.batch([
-      env.DB.prepare(
+    await db.batch([
+      db.prepare(
         `UPDATE media_views SET count = count - 1
          WHERE media_id = ? AND user_id = ? AND count > 1`,
       ).bind(mediaId, userId),
-      env.DB.prepare(
+      db.prepare(
         `DELETE FROM media_views WHERE media_id = ? AND user_id = ? AND count <= 1`,
       ).bind(mediaId, userId),
     ]);
@@ -141,6 +136,7 @@ mediaRouter.post(
   async (request: IRequest, env: Env): Promise<Response> => {
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
+    const db = getSqlDb(env, request as unknown as Request);
 
     const url = new URL(request.url);
     const conversationId = url.searchParams.get('conversationId');
@@ -162,7 +158,7 @@ mediaRouter.post(
       });
     }
 
-    const conv = await getConversationForMember(conversationId, userId, env.DB);
+    const conv = await getConversationForMember(conversationId, userId, db);
     if (!conv) {
       return new Response(JSON.stringify({ error: 'Conversation not found' }), {
         status: 404,
@@ -182,7 +178,7 @@ mediaRouter.post(
 
     const uploadCap = envNum(env, UPLOAD_CAP_VAR, 50 * 1024 * 1024);
     const today = utcDayKey();
-    const reserved = await reserveDailyBytes(env, userId, today, 'bytes_up', size, uploadCap);
+    const reserved = await reserveDailyBytes(db, userId, today, 'bytes_up', size, uploadCap);
     if (!reserved) {
       return new Response(JSON.stringify({ error: 'Daily upload quota reached' }), {
         status: 429,
@@ -212,7 +208,7 @@ mediaRouter.post(
       });
     } catch (error) {
       console.error('R2 media put failed', error);
-      await releaseDailyBytes(env, userId, today, 'bytes_up', size).catch(() => {});
+      await releaseDailyBytes(db, userId, today, 'bytes_up', size).catch(() => {});
       return new Response(JSON.stringify({ error: 'Storage upload failed' }), {
         status: 500,
         headers: { 'Content-Type': 'application/json' },
@@ -220,7 +216,7 @@ mediaRouter.post(
     }
 
     try {
-      await env.DB.prepare(
+      await db.prepare(
         `INSERT INTO media
           (id, conversation_id, sender_id, kind, view_policy, size, mime_type,
            r2_key, duration_ms, created_at, expires_at)
@@ -232,7 +228,7 @@ mediaRouter.post(
     } catch (error) {
       await Promise.allSettled([
         env.MEDIA.delete(r2Key),
-        releaseDailyBytes(env, userId, today, 'bytes_up', size),
+        releaseDailyBytes(db, userId, today, 'bytes_up', size),
       ]);
       console.error('Media metadata insert failed', error);
       return new Response(JSON.stringify({ error: 'Storage upload failed' }), {
@@ -256,8 +252,9 @@ mediaRouter.get(
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
     const { id: mediaId } = request.params as { id: string };
+    const db = getSqlDb(env, request as unknown as Request);
 
-    const media = await env.DB.prepare('SELECT * FROM media WHERE id = ?')
+    const media = await db.prepare('SELECT * FROM media WHERE id = ?')
       .bind(mediaId)
       .first<MediaRow & { consumed: number }>();
     if (!media) {
@@ -273,7 +270,7 @@ mediaRouter.get(
       });
     }
 
-    const conv = await getConversationForMember(media.conversation_id, userId, env.DB);
+    const conv = await getConversationForMember(media.conversation_id, userId, db);
     if (!conv) {
       return new Response(JSON.stringify({ error: 'Not a conversation participant' }), {
         status: 403,
@@ -295,21 +292,18 @@ mediaRouter.get(
       object = null;
     }
     if (!object) {
-      await consume(env, mediaId, media.r2_key);
+      await consume(env, db, mediaId, media.r2_key);
       return new Response(JSON.stringify({ error: 'Media object unavailable' }), {
         status: 410,
         headers: { 'Content-Type': 'application/json' },
       });
     }
 
-    // Claim the view atomically before reading the object. A read-then-write
-    // check lets two concurrent requests both observe the same count and
-    // exceed a view-once/view-twice policy.
     let isFinalView = false;
     let viewsRemaining: number | null = null;
     let claimedView = false;
     if (!isSender && limit !== null) {
-      const claimed = await env.DB.prepare(
+      const claimed = await db.prepare(
         `INSERT INTO media_views (media_id, user_id, count, updated_at)
          VALUES (?, ?, 1, ?)
          ON CONFLICT(media_id, user_id) DO UPDATE SET
@@ -322,9 +316,7 @@ mediaRouter.get(
         .first<{ count: number }>();
 
       if (!claimed) {
-        await releaseDailyBytes(env, userId, today, 'bytes_down', media.size).catch(() => {});
-        // The request that used the final view is responsible for consuming
-        // the object; deleting it here would race that response.
+        await releaseDailyBytes(db, userId, today, 'bytes_down', media.size).catch(() => {});
         return new Response(JSON.stringify({ error: 'View limit reached' }), {
           status: 410,
           headers: { 'Content-Type': 'application/json' },
@@ -338,10 +330,10 @@ mediaRouter.get(
     }
 
     const reservedDownload = await reserveDailyBytes(
-      env, userId, today, 'bytes_down', media.size, downloadCap,
+      db, userId, today, 'bytes_down', media.size, downloadCap,
     );
     if (!reservedDownload) {
-      if (claimedView) await releaseView(env, mediaId, userId);
+      if (claimedView) await releaseView(db, mediaId, userId);
       return new Response(JSON.stringify({ error: 'Daily download quota reached' }), {
         status: 429,
         headers: { 'Content-Type': 'application/json' },
@@ -353,9 +345,9 @@ mediaRouter.get(
     try {
       payload = await r2Body.arrayBuffer();
     } catch {
-      await releaseDailyBytes(env, userId, today, 'bytes_down', media.size).catch(() => {});
-      if (claimedView) await releaseView(env, mediaId, userId);
-      await consume(env, mediaId, media.r2_key);
+      await releaseDailyBytes(db, userId, today, 'bytes_down', media.size).catch(() => {});
+      if (claimedView) await releaseView(db, mediaId, userId);
+      await consume(env, db, mediaId, media.r2_key);
       return new Response(JSON.stringify({ error: 'Media object unavailable' }), {
         status: 410,
         headers: { 'Content-Type': 'application/json' },
@@ -363,15 +355,11 @@ mediaRouter.get(
     }
 
     if (isFinalView) {
-      // Last allowed view served — purge the object now so nothing remains
-      // in storage even if the app never fetches it again.
-      await consume(env, mediaId, media.r2_key);
+      await consume(env, db, mediaId, media.r2_key);
     }
     const headers: Record<string, string> = {
       'Content-Type': r2Body.httpMetadata?.contentType ?? 'application/octet-stream',
       'Content-Length': String(r2Body.size ?? 0),
-      // Limited media must not be served from an HTTP cache: a cached body
-      // would hand out extra views without the counter moving.
       'Cache-Control': media.view_policy === 'unlimited'
         ? 'private, max-age=60'
         : 'private, no-store',
@@ -383,9 +371,6 @@ mediaRouter.get(
   },
 );
 
-// Explicit purge so a client that has used up every allowed view (or unsends a
-// message) can make the object disappear immediately instead of waiting for the
-// TTL sweep. Members only; idempotent.
 mediaRouter.delete(
   '/media/:id',
   (req: IRequest, env: Env) => authMiddleware(req as unknown as Request, env),
@@ -393,8 +378,9 @@ mediaRouter.delete(
     const authReq = request as unknown as AuthenticatedRequest;
     const userId = authReq.user.sub;
     const { id: mediaId } = request.params as { id: string };
+    const db = getSqlDb(env, request as unknown as Request);
 
-    const media = await env.DB.prepare(
+    const media = await db.prepare(
       'SELECT id, conversation_id, r2_key, sender_id FROM media WHERE id = ?',
     )
       .bind(mediaId)
@@ -407,8 +393,8 @@ mediaRouter.delete(
           headers: { 'Content-Type': 'application/json' },
         });
       }
-      await consume(env, media.id, media.r2_key);
-      await env.DB.prepare('DELETE FROM media_views WHERE media_id = ?')
+      await consume(env, db, media.id, media.r2_key);
+      await db.prepare('DELETE FROM media_views WHERE media_id = ?')
         .bind(media.id)
         .run();
     }
